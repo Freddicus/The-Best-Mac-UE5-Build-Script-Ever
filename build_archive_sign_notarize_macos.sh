@@ -29,7 +29,7 @@ UPROJECT_NAME_DEFAULT="__REPLACE_ME__.uproject"
 # NOTE: This is created by Unreal's GenerateProjectFiles on macOS.
 XCODE_WORKSPACE_DEFAULT="__REPLACE_ME__.xcworkspace"
 
-# Xcode scheme (must be Shared).
+# Xcode scheme must be Shared (seen by `xcodebuild -list -workspace ...`)
 XCODE_SCHEME_DEFAULT="__REPLACE_ME__"
 
 
@@ -290,8 +290,8 @@ info "Sanity checks"
 [[ -x "$SCRIPTS/RunUAT.sh" ]] || die "RunUAT.sh not executable or missing: $SCRIPTS/RunUAT.sh"
 [[ -x "$UE_EDITOR" ]] || die "UnrealEditor not found/executable: $UE_EDITOR"
 
-# Xcode steps require these
-[[ -f "$WORKSPACE" ]] || die "Xcode workspace not found: $WORKSPACE"
+# Xcode workspaces are directory bundles (".xcworkspace" folders), not regular files.
+[[ -d "$WORKSPACE" ]] || die "Xcode workspace not found (expected a .xcworkspace directory): $WORKSPACE"
 command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found. Install Xcode and the Command Line Tools."
 command -v codesign  >/dev/null 2>&1 || die "codesign not found (unexpected on macOS)."
 

@@ -153,7 +153,7 @@ Artifacts go under (names derived from `SHORT_NAME` / `LONG_NAME`):
 
 ## Troubleshooting checklist
 - **Placeholders:** if the script stops immediately, you probably left `__REPLACE_ME__` somewhere.
-- **Xcode scheme not found:** the scheme must be Shared in Xcode.
+- **Xcode scheme not found:** the scheme must be Shared in Xcode. (seen by `xcodebuild -list -workspace ...`)
 - **RunUAT.sh not found:** double check `UE_ROOT`.
 - **Notarization fails:** ensure your `NOTARY_PROFILE` exists and is valid:
   - `xcrun notarytool history --keychain-profile "NAME"`
