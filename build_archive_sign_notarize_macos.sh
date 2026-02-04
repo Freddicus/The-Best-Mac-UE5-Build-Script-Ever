@@ -269,14 +269,73 @@ autodetect_workspace_guess_if_needed() {
 }
 
 autodetect_export_plist_if_needed() {
-  # If export plist is placeholder, try a repo-local ExportOptions.plist.
-  if is_placeholder "$EXPORT_PLIST"; then
-    local candidate="$REPO_ROOT/ExportOptions.plist"
-    if [[ -f "$candidate" ]]; then
-      EXPORT_PLIST="$candidate"
-      info "Auto-detected ExportOptions.plist: $EXPORT_PLIST"
-    fi
+  # If EXPORT_PLIST is placeholder, try to locate an ExportOptions.plist in the repo root.
+  # Heuristic: a candidate plist contains destination=export, e.g.
+  #   <key>destination</key><string>export</string>
+  # (whitespace/newlines allowed).
+  if ! is_placeholder "$EXPORT_PLIST"; then
+    return 0
   fi
+
+  # Fast path: conventional name.
+  local conventional="$REPO_ROOT/ExportOptions.plist"
+  if [[ -f "$conventional" ]]; then
+    EXPORT_PLIST="$conventional"
+    info "Auto-detected ExportOptions.plist (by name): $EXPORT_PLIST"
+    return 0
+  fi
+
+  # Scan all *.plist in the repo root and look for destination=export.
+  local matches=()
+  local p
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+
+    # Collapse whitespace to make matching resilient to formatting.
+    # We intentionally avoid plutil parsing to keep dependencies minimal.
+    if /bin/cat "$p" 2>/dev/null | /usr/bin/tr -d '[:space:]' | /usr/bin/grep -qi '<key>destination</key><string>export</string>'; then
+      matches+=("$p")
+      continue
+    fi
+
+    # Some plists may use <key>method</key> etc. We only care about destination.
+  done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 1 -type f -name '*.plist' 2>/dev/null | /usr/bin/sort)
+
+  if [[ "${#matches[@]}" -eq 1 ]]; then
+    EXPORT_PLIST="${matches[0]}"
+    info "Auto-detected ExportOptions.plist (by contents): $EXPORT_PLIST"
+    return 0
+  fi
+
+  if [[ "${#matches[@]}" -gt 1 ]]; then
+    echo "== EXPORT_PLIST not set — found multiple ExportOptions-like plist candidates in repo root ==" >&3
+    local i=1
+    for p in "${matches[@]}"; do
+      echo "  [$i] $p" >&3
+      i=$((i+1))
+    done
+
+    # If running in a non-interactive context, don't guess.
+    if [[ ! -t 0 ]]; then
+      warn "Multiple ExportOptions-like plist files found. Pass --export-plist PATH (or set EXPORT_PLIST env var) to select one."
+      return 0
+    fi
+
+    local choice
+    read -r -p "Select ExportOptions.plist [1]: " choice
+    choice="${choice:-1}"
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#matches[@]}" ]]; then
+      EXPORT_PLIST="${matches[$((choice-1))]}"
+      info "Selected ExportOptions.plist: $EXPORT_PLIST"
+      return 0
+    fi
+
+    warn "Invalid selection '$choice'. Provide --export-plist PATH instead."
+    return 0
+  fi
+
+  # No match found; leave placeholder and let validation explain next steps.
 }
 
 sanitize_name_for_tmp() {
@@ -655,6 +714,72 @@ autodetect_steam_dylib_src_from_engine_if_needed() {
   warn "Set STEAM_DYLIB_SRC explicitly (--steam-dylib-src or env/USER CONFIG) if your layout differs."
 }
 
+autodetect_ue_root_if_needed() {
+  # Best-effort UE_ROOT detection for Epic Games Launcher installs on macOS.
+  # Common path: /Users/Shared/Epic Games/UE_X.Y
+  # We only accept candidates that look complete (contain Engine/Binaries/Mac).
+
+  if ! is_placeholder "${UE_ROOT:-}"; then
+    return 0
+  fi
+
+  local base_dir="/Users/Shared/Epic Games"
+  [[ -d "$base_dir" ]] || return 0
+
+  local candidates=()
+  local d
+
+  # Prefer UE_* folders but still validate by required subfolder.
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    if [[ -d "$d/Engine/Binaries/Mac" ]]; then
+      candidates+=("$d")
+    fi
+  done < <(/usr/bin/find "$base_dir" -maxdepth 1 -type d -name 'UE_*' 2>/dev/null | /usr/bin/sort)
+
+  # If no UE_* candidates, do a slightly broader scan for engine-looking folders.
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    while IFS= read -r d; do
+      [[ -n "$d" ]] || continue
+      if [[ -d "$d/Engine/Binaries/Mac" ]]; then
+        candidates+=("$d")
+      fi
+    done < <(/usr/bin/find "$base_dir" -maxdepth 2 -type d -name 'Engine' 2>/dev/null | /usr/bin/sed 's#/Engine$##' | /usr/bin/sort -u)
+  fi
+
+  if [[ "${#candidates[@]}" -eq 1 ]]; then
+    UE_ROOT="${candidates[0]}"
+    info "UE_ROOT not set — auto-detected engine: $UE_ROOT"
+    return 0
+  fi
+
+  if [[ "${#candidates[@]}" -gt 1 ]]; then
+    echo "== UE_ROOT not set — found multiple Unreal Engine installs under: $base_dir ==" >&3
+    local i=1
+    for d in "${candidates[@]}"; do
+      echo "  [$i] $d" >&3
+      i=$((i+1))
+    done
+
+    # If running in a non-interactive context, don't guess.
+    if [[ ! -t 0 ]]; then
+      die "Multiple Unreal Engine installs found. Re-run with --ue-root PATH (or set UE_ROOT env var) to select one."
+    fi
+
+    local choice
+    read -r -p "Select engine [1]: " choice
+    choice="${choice:-1}"
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#candidates[@]}" ]]; then
+      UE_ROOT="${candidates[$((choice-1))]}"
+      info "Selected UE_ROOT: $UE_ROOT"
+      return 0
+    fi
+
+    die "Invalid selection '$choice'. Re-run and choose a number 1-${#candidates[@]}, or pass --ue-root PATH."
+  fi
+}
+
 #
 # Allow environment variables to override defaults without editing the script.
 REPO_ROOT="${REPO_ROOT:-$REPO_ROOT_DEFAULT}"
@@ -790,6 +915,8 @@ if [[ -n "${XCODE_WORKSPACE:-}" && "$XCODE_WORKSPACE" == /* ]]; then
   XCODE_WORKSPACE="$(/usr/bin/basename "$WORKSPACE")"
 fi
 
+# Auto-detect UE_ROOT (macOS EGL installs) if not provided.
+autodetect_ue_root_if_needed
 # Normalize REPO_ROOT to an absolute path (best-effort).
 # IMPORTANT: resolve relative paths (including ".") against the CURRENT working directory,
 # not against "/".
