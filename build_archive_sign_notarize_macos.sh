@@ -166,63 +166,90 @@ require_not_placeholder() {
 # -----------------------------------------------------------------------------
 
 read_uproject_module_name() {
-  # Extract the first module name from a .uproject (JSON).
-  # Uses python3 (present on modern macOS).
+  # Extract the first module name from a .uproject (JSON) without python/jq.
+  # This is a best-effort parser designed for typical Unreal .uproject formatting.
+  #
+  # It looks for: "Modules": [ { "Name": "YourModule", ... }, ... ]
   local uproject_path="$1"
   [[ -f "$uproject_path" ]] || { echo ""; return 0; }
 
-  /usr/bin/python3 - <<'PY' "$uproject_path" 2>/dev/null || true
-import json, sys
-p = sys.argv[1]
-try:
-    data = json.load(open(p, 'r', encoding='utf-8'))
-    mods = data.get('Modules') or []
-    if mods and isinstance(mods, list) and isinstance(mods[0], dict):
-        print(mods[0].get('Name','') or '')
-    else:
-        print('')
-except Exception:
-    print('')
-PY
+  /usr/bin/awk '
+    BEGIN {
+      in_modules = 0
+      bracket_depth = 0
+    }
+
+    # Once we enter the Modules array, track [] depth so we know when it ends.
+    {
+      line = $0
+    }
+
+    # Enter Modules section when we see "Modules"
+    !in_modules && line ~ /"Modules"[[:space:]]*:/ {
+      in_modules = 1
+    }
+
+    # If we are in Modules, update bracket depth for [ and ] on this line.
+    in_modules {
+      # Count [ and ] occurrences (simple but effective for .uproject files)
+      open = gsub(/\[/, "[", line)
+      close = gsub(/\]/, "]", line)
+      bracket_depth += (open - close)
+
+      # Look for the first "Name": "..."
+      # Capture the first quoted string after "Name":
+      if (match(line, /"Name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+        s = substr(line, RSTART, RLENGTH)
+        sub(/^.*"Name"[[:space:]]*:[[:space:]]*"/, "", s)
+        sub(/".*$/, "", s)
+        print s
+        exit 0
+      }
+
+      # If bracket_depth drops to 0 or below, we have left the array.
+      # (In practice, it should be 0 at the end of the array.)
+      if (bracket_depth <= 0) {
+        exit 0
+      }
+    }
+
+    END { }
+  ' "$uproject_path" 2>/dev/null || true
 }
 
 autodetect_uproject_if_needed() {
-  # If UPROJECT_NAME is placeholder and REPO_ROOT is known, try to find a single .uproject in repo root.
-  if is_placeholder "$UPROJECT_NAME"; then
+  if is_placeholder "${UPROJECT_NAME:-}"; then
     local found=()
     while IFS= read -r line; do
       [[ -n "$line" ]] && found+=("$line")
     done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 1 -type f -name '*.uproject' 2>/dev/null)
 
     if [[ "${#found[@]}" -eq 1 ]]; then
-      UPROJECT_NAME="$(/usr/bin/basename "${found[0]}")"
       UPROJECT_PATH="${found[0]}"
+      UPROJECT_NAME="$(/usr/bin/basename "$UPROJECT_PATH")"
       info "Auto-detected .uproject: $UPROJECT_NAME"
     elif [[ "${#found[@]}" -gt 1 ]]; then
       echo "Found multiple .uproject candidates:" >&3
       printf '  - %s\n' "${found[@]}" >&3
-      die "Multiple .uproject found. Set --uproject or UPROJECT_NAME explicitly."
+      die "Multiple .uproject files found. Pass --uproject explicitly."
     else
-      die "No .uproject found under REPO_ROOT. Set --uproject or place the .uproject in the repo root."
+      die "No .uproject found in REPO_ROOT. Put the script in the project root or pass --repo-root."
     fi
   fi
 }
 
 autodetect_names_if_needed() {
-  # If names are placeholders, derive them from the .uproject filename or module name.
-  local base module
+  local base
   base="${UPROJECT_NAME%.uproject}"
-  module="$(read_uproject_module_name "$UPROJECT_PATH")"
 
-  if is_placeholder "$LONG_NAME"; then
-    LONG_NAME="${module:-$base}"
+  if is_placeholder "${LONG_NAME:-}"; then
+    LONG_NAME="$base"
     info "Auto-detected LONG_NAME: $LONG_NAME"
   fi
 
-  if is_placeholder "$SHORT_NAME"; then
-    SHORT_NAME="${module:-$base}"
-    # Keep SHORT_NAME conservative: remove spaces.
-    SHORT_NAME="${SHORT_NAME// /}"
+  if is_placeholder "${SHORT_NAME:-}"; then
+    SHORT_NAME="$base"
+    SHORT_NAME="${SHORT_NAME// /}"  # conservative
     info "Auto-detected SHORT_NAME: $SHORT_NAME"
   fi
 }
@@ -462,25 +489,22 @@ find_first_app_under() {
 
 abspath_existing() {
   # Convert an existing file/dir path to an absolute, physical path.
-  # Returns empty string if the target does not exist.
-  #
-  # NOTE: macOS ships bash 3.2, so avoid bash-4-only features.
-  # We use python3 here (already used elsewhere in this script) because it is reliable
-  # and avoids brittle `cd/pwd` piping edge cases.
+  # Returns empty string if the target does not exist or cannot be resolved.
   local p="$1"
   [[ -n "$p" ]] || { echo ""; return 0; }
-
-  # If it doesn't exist, return empty.
   [[ -e "$p" ]] || { echo ""; return 0; }
 
-  /usr/bin/python3 - <<'PY' "$p" 2>/dev/null || true
-import os, sys
-p = sys.argv[1]
-try:
-    print(os.path.realpath(p))
-except Exception:
-    print('')
-PY
+  local dir base absdir
+  dir="$(/usr/bin/dirname "$p")"
+  base="$(/usr/bin/basename "$p")"
+
+  absdir="$((/bin/cd "$dir" 2>/dev/null && /bin/pwd -P) 2>/dev/null)"
+  if [[ -z "$absdir" ]]; then
+    echo ""
+    return 0
+  fi
+
+  echo "$absdir/$base"
 }
 
 abspath_from() {
@@ -495,6 +519,140 @@ abspath_from() {
   local d
   d="$(/bin/cd "$base" 2>/dev/null && /bin/pwd -P)" || { echo ""; return 0; }
   echo "$d/$p"
+}
+
+read_ini_value() {
+  # first match only; expects Key=Value
+  local file="$1"; local key="$2"
+  [[ -f "$file" ]] || { echo ""; return 0; }
+
+  local line val
+  line="$(/usr/bin/grep -E "^[[:space:]]*${key}[[:space:]]*=" "$file" 2>/dev/null | /usr/bin/head -n 1 || true)"
+  [[ -n "$line" ]] || { echo ""; return 0; }
+
+  val="${line#*=}"
+  val="${val#${val%%[![:space:]]*}}"
+  val="${val%${val##*[![:space:]]}}"
+  val="${val%\"}"; val="${val#\"}"
+  val="${val%%;*}"; val="${val%%#*}"
+  val="${val#${val%%[![:space:]]*}}"
+  val="${val%${val##*[![:space:]]}}"
+  echo "$val"
+}
+
+detect_steam_from_ini() {
+  local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
+  [[ -f "$engine_ini" ]] || return 1
+
+  /usr/bin/grep -qiE "OnlineSubsystemSteam|DefaultPlatformService[[:space:]]*=[[:space:]]*Steam" "$engine_ini" && return 0
+
+  /usr/bin/awk '
+    BEGIN{in=0}
+    /^\[/ {in=0}
+    /^\[\/Script\/OnlineSubsystemSteam\.OnlineSubsystemSteam\]/ {in=1}
+    in && /^[[:space:]]*bEnabled[[:space:]]*=[[:space:]]*true/ {found=1}
+    END{exit(found?0:1)}
+  ' "$engine_ini" 2>/dev/null && return 0
+
+  return 1
+}
+
+autodetect_steam_if_needed() {
+  if [[ "${CLI_SET_ENABLE_STEAM:-0}" != "1" && "${ENABLE_STEAM:-0}" == "0" ]]; then
+    if detect_steam_from_ini; then
+      ENABLE_STEAM="1"
+      info "Detected Steam OSS in Config/DefaultEngine.ini — ENABLE_STEAM=1"
+
+      local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
+      local appid
+      appid="$(read_ini_value "$engine_ini" "SteamDevAppId")"
+      [[ -z "$appid" ]] && appid="$(read_ini_value "$engine_ini" "SteamAppId")"
+      if [[ -n "$appid" ]]; then
+        STEAM_APP_ID="$appid"
+        info "Detected Steam App ID from INI: $STEAM_APP_ID"
+      fi
+    fi
+  fi
+}
+
+read_steamworks_version_number() {
+  # Extract SteamVersionNumber (e.g., 1.63) from Steamworks.build.cs (best-effort).
+  local cs="$1"
+  [[ -f "$cs" ]] || { echo ""; return 0; }
+
+  # Example line: double SteamVersionNumber = 1.63;
+  /usr/bin/awk '
+    match($0, /SteamVersionNumber[[:space:]]*=[[:space:]]*[0-9]+\.[0-9]+/) {
+      s=substr($0, RSTART, RLENGTH)
+      sub(/^.*=/, "", s)
+      gsub(/[[:space:]]*/, "", s)
+      print s
+      exit
+    }
+  ' "$cs" 2>/dev/null || true
+}
+
+steam_version_to_folder() {
+  # Convert 1.63 -> Steamv163 (remove dot).
+  local v="$1"
+  [[ -n "$v" ]] || { echo ""; return 0; }
+  local digits
+  digits="${v//./}"
+  echo "Steamv${digits}"
+}
+
+autodetect_steam_dylib_src_from_engine_if_needed() {
+  # If Steam is enabled and STEAM_DYLIB_SRC is placeholder, try to locate it inside UE_ROOT.
+  # Expected layout:
+  #   <UE_ROOT>/Engine/Source/ThirdParty/Steamworks/Steamv163/sdk/redistributable_bin/osx/libsteam_api.dylib
+  #
+  # We do NOT assume a specific UE version; we derive everything from UE_ROOT.
+
+  [[ "${ENABLE_STEAM:-0}" == "1" ]] || return 0
+  is_placeholder "${STEAM_DYLIB_SRC:-}" || return 0
+
+  local steam_root cs ver folder candidate
+  steam_root="$UE_ROOT/Engine/Source/ThirdParty/Steamworks"
+  cs="$steam_root/Steamworks.build.cs"
+
+  if [[ ! -d "$steam_root" ]]; then
+    # Some engine installs may omit ThirdParty sources; don't fail here.
+    warn "ENABLE_STEAM=1 but Steamworks ThirdParty folder not found under UE_ROOT: $steam_root"
+    return 0
+  fi
+
+  if [[ ! -f "$cs" ]]; then
+    warn "Steamworks.build.cs not found (cannot auto-detect Steam SDK version): $cs"
+    return 0
+  fi
+
+  ver="$(read_steamworks_version_number "$cs")"
+  folder="$(steam_version_to_folder "$ver")"
+
+  if [[ -z "$folder" ]]; then
+    warn "Could not parse SteamVersionNumber from: $cs"
+    return 0
+  fi
+
+  candidate="$steam_root/$folder/sdk/redistributable_bin/osx/libsteam_api.dylib"
+  if [[ -f "$candidate" ]]; then
+    STEAM_DYLIB_SRC="$candidate"
+    info "Auto-detected STEAM_DYLIB_SRC from UE_ROOT ($folder): $STEAM_DYLIB_SRC"
+    return 0
+  fi
+
+  # Fallback: if expected folder isn't present, try to find any matching dylib under Steamworks.
+  local found
+  found="$(/usr/bin/find "$steam_root" -maxdepth 6 -type f -name 'libsteam_api.dylib' -path '*/redistributable_bin/osx/*' -print -quit 2>/dev/null || true)"
+  if [[ -n "$found" && -f "$found" ]]; then
+    STEAM_DYLIB_SRC="$found"
+    info "Auto-detected STEAM_DYLIB_SRC by search under Steamworks: $STEAM_DYLIB_SRC"
+    return 0
+  fi
+
+  warn "ENABLE_STEAM=1 but could not locate libsteam_api.dylib under: $steam_root"
+  warn "Expected (based on SteamVersionNumber=$ver): $candidate"
+  warn "Set STEAM_DYLIB_SRC explicitly (--steam-dylib-src or env/USER CONFIG) if your layout differs."
 }
 
 #
@@ -592,7 +750,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)              DRY_RUN="$2"; shift 2 ;;
     --print-config)         PRINT_CONFIG="$2"; shift 2 ;;
 
-    --enable-steam)         ENABLE_STEAM="$2"; shift 2 ;;
+    --enable-steam) ENABLE_STEAM="$2"; CLI_SET_ENABLE_STEAM=1; shift 2 ;;
     --write-steam-appid)    WRITE_STEAM_APPID="$2"; shift 2 ;;
     --steam-app-id)         STEAM_APP_ID="$2"; shift 2 ;;
     --steam-dylib-src)      STEAM_DYLIB_SRC="$2"; shift 2 ;;
@@ -603,6 +761,22 @@ while [[ $# -gt 0 ]]; do
     *) die "Unknown option: $1 (use --help)" ;;
   esac
 done
+
+# If REPO_ROOT is still a placeholder/empty, assume this script lives in the project root.
+if is_placeholder "${REPO_ROOT:-}"; then
+  SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" && pwd -P)"
+  REPO_ROOT="$SCRIPT_DIR"
+  info "REPO_ROOT not set — assuming script directory: $REPO_ROOT"
+fi
+
+if is_placeholder "$DEVELOPMENT_TEAM"; then
+  ios_ini="$REPO_ROOT/Config/DefaultEngine.ini"
+  team="$(read_ini_value "$ios_ini" "IOSTeamID")"
+  if [[ -n "$team" ]]; then
+    DEVELOPMENT_TEAM="$team"
+    info "Detected DEVELOPMENT_TEAM from INI (IOSTeamID): $DEVELOPMENT_TEAM"
+  fi
+fi
 
 # If the caller provided absolute paths for uproject/workspace, normalize them.
 if [[ -n "${UPROJECT_NAME:-}" && "$UPROJECT_NAME" == /* ]]; then
@@ -642,6 +816,8 @@ autodetect_names_if_needed
 # Try the common "<Project> (Mac).xcworkspace" guess before the more general workspace find.
 autodetect_workspace_guess_if_needed
 autodetect_export_plist_if_needed
+autodetect_steam_if_needed
+autodetect_steam_dylib_src_from_engine_if_needed
 
 # Derive common paths (after CLI parsing/autodetect)
 REPO="$REPO_ROOT"
@@ -662,11 +838,14 @@ if [[ -d "$WORKSPACE" ]]; then
   WORKSPACE="$(abspath_existing "$WORKSPACE")"
 fi
 if [[ -f "$EXPORT_PLIST" ]]; then
-  EXPORT_PLIST="$(abspath_existing "$EXPORT_PLIST")"
+  _abs="$(abspath_existing "$EXPORT_PLIST")"
+  [[ -n "${_abs:-}" ]] && EXPORT_PLIST="$_abs"
 fi
 if [[ "$ENABLE_STEAM" == "1" && -f "$STEAM_DYLIB_SRC" ]]; then
-  STEAM_DYLIB_SRC="$(abspath_existing "$STEAM_DYLIB_SRC")"
+  _abs="$(abspath_existing "$STEAM_DYLIB_SRC")"
+  [[ -n "${_abs:-}" ]] && STEAM_DYLIB_SRC="$_abs"
 fi
+unset _abs
 
 #
 # Validate required config early (fail fast with helpful messages)
@@ -725,7 +904,7 @@ fi
 # Optional Steam validation (only when enabled)
 if [[ "$ENABLE_STEAM" == "1" ]]; then
   if is_placeholder "$STEAM_DYLIB_SRC"; then
-    die "ENABLE_STEAM=1 but STEAM_DYLIB_SRC is not set. Point it at libsteam_api.dylib or set ENABLE_STEAM=0."
+    die "ENABLE_STEAM=1 but STEAM_DYLIB_SRC is not set. The script tried to infer it from UE_ROOT but couldn't. Provide it via --steam-dylib-src (or env/USER CONFIG), or set ENABLE_STEAM=0."
   fi
 fi
 
