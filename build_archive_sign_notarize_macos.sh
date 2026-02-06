@@ -1,9 +1,33 @@
 #!/usr/bin/env bash
 
+
 set -euo pipefail
 
 # Preserve original stdout/stderr for human-facing status lines (FD 3/4)
 exec 3>&1 4>&2
+
+# -----------------------------------------------------------------------------
+# Optional .env support
+#
+# If a `.env` file exists next to this script, load it as environment variables.
+# This keeps the main script copy/paste friendly while allowing local configuration
+# without editing the script.
+#
+# Priority order remains:
+#   CLI flags > environment vars (including .env) > defaults in this file
+#
+# SECURITY NOTE: `.env` is sourced as shell code. Only use a `.env` you trust.
+# -----------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" 2>/dev/null && /bin/pwd -P)"
+ENV_FILE="$SCRIPT_DIR/.env"
+if [[ -f "$ENV_FILE" ]]; then
+  # Export variables defined in .env so they behave like real environment variables.
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+  echo "== Loaded .env: $ENV_FILE ==" >&3
+fi
 
 ### ============================================================================
 ### USER CONFIG (safe to publish)
@@ -1037,11 +1061,14 @@ fi
 
 # Ask up-front (unless overridden)
 if [[ -n "${BUILD_TYPE_OVERRIDE:-}" ]]; then
-  case "${BUILD_TYPE_OVERRIDE,,}" in
+  # bash 3.2 compatibility: lowercase via tr
+  _bto_lower="$(echo "$BUILD_TYPE_OVERRIDE" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+  case "$_bto_lower" in
     shipping|s)    BUILD_TYPE="s" ;;
     development|d) BUILD_TYPE="d" ;;
     *) die "BUILD_TYPE_OVERRIDE must be 'shipping' or 'development'" ;;
   esac
+  unset _bto_lower
 else
   read -r -p "Build type? (s=shipping, d=development) [s]: " BUILD_TYPE
   BUILD_TYPE=${BUILD_TYPE:-s}
@@ -1058,11 +1085,14 @@ else
 fi
 
 if [[ -n "${NOTARIZE_OVERRIDE:-}" ]]; then
-  case "${NOTARIZE_OVERRIDE,,}" in
+  # bash 3.2 compatibility: lowercase via tr
+  _no_lower="$(echo "$NOTARIZE_OVERRIDE" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+  case "$_no_lower" in
     yes|y) DO_NOTARIZE=0 ;;
     no|n)  DO_NOTARIZE=1 ;;
     *) die "NOTARIZE_OVERRIDE must be 'yes' or 'no'" ;;
   esac
+  unset _no_lower
 else
   read -r -p "Notarize + staple this build? (Y/n) " NOTARIZE_ANSWER
   if [[ "${NOTARIZE_ANSWER:-Y}" =~ ^[Nn]$ ]]; then
