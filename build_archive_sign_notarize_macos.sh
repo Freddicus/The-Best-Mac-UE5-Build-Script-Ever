@@ -581,7 +581,7 @@ abspath_existing() {
   dir="$(/usr/bin/dirname "$p")"
   base="$(/usr/bin/basename "$p")"
 
-  absdir="$((/bin/cd "$dir" 2>/dev/null && /bin/pwd -P) 2>/dev/null)"
+  absdir="$(cd "$dir" 2>/dev/null && /bin/pwd -P 2>/dev/null)"
   if [[ -z "$absdir" ]]; then
     echo ""
     return 0
@@ -597,10 +597,16 @@ abspath_from() {
   local p="$2"
   [[ -n "$p" ]] || { echo ""; return 0; }
   if [[ "$p" == /* ]]; then
-    echo "$p"; return 0
+    echo "$p"
+    return 0
   fi
+
   local d
-  d="$(/bin/cd "$base" 2>/dev/null && /bin/pwd -P)" || { echo ""; return 0; }
+  d="$(cd "$base" 2>/dev/null && /bin/pwd -P 2>/dev/null)"
+  if [[ -z "$d" ]]; then
+    echo ""
+    return 0
+  fi
   echo "$d/$p"
 }
 
