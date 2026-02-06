@@ -13,6 +13,11 @@ exec 3>&1 4>&2
 # This keeps the main script copy/paste friendly while allowing local configuration
 # without editing the script.
 #
+# Quick usage:
+#   - Copy `.env.example` (if provided) to `.env` next to this script
+#   - Fill in DEVELOPMENT_TEAM, SIGN_IDENTITY, and (if using Xcode export) EXPORT_PLIST
+#   - Run the script
+#
 # Priority order remains:
 #   CLI flags > environment vars (including .env) > defaults in this file
 #
@@ -35,7 +40,8 @@ fi
 ### Goal: Build + archive + sign + (optionally) notarize a macOS Unreal project.
 ###
 ### How to use:
-###   - Leave the PROMPT overrides commented out to be asked interactively.
+###   - Easiest: create a `.env` file next to this script and set your values there.
+###   - Or leave the PROMPT overrides commented out to be asked interactively.
 ###   - Or uncomment and set overrides to make it non-interactive / CI-friendly.
 ###   - You can also export environment variables instead of editing this file.
 ###   - Or pass command-line flags (highest priority):
@@ -95,8 +101,6 @@ DRY_RUN_DEFAULT="0"
 #   0 = run normally
 PRINT_CONFIG_DEFAULT="0"
 
-# NOTE: Spaces are allowed in paths on macOS, but they can complicate shells/CI.
-# This script will warn if it detects spaces so you can decide if you want to rename.
 
 
 # --- Unreal Engine location ---
