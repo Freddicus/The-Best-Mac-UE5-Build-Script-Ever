@@ -1031,22 +1031,6 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   require_not_placeholder "XCODE_SCHEME" "$XCODE_SCHEME" "Example: YourProject"
 fi
 
-warn_if_has_spaces() {
-  local name="$1"; local value="$2"
-  if [[ "$value" == *" "* ]]; then
-    warn "$name contains spaces: '$value'"
-    warn "  This is supported, but can complicate CI/shell scripts. Consider renaming to remove spaces if you're early in the project."
-  fi
-}
-
-warn_if_has_spaces "REPO_ROOT" "$REPO_ROOT"
-warn_if_has_spaces "UPROJECT_NAME" "$UPROJECT_NAME"
-warn_if_has_spaces "SHORT_NAME" "$SHORT_NAME"
-warn_if_has_spaces "LONG_NAME" "$LONG_NAME"
-if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
-  warn_if_has_spaces "XCODE_WORKSPACE" "$XCODE_WORKSPACE"
-  warn_if_has_spaces "XCODE_SCHEME" "$XCODE_SCHEME"
-fi
 
 # Notary profile is only required if we actually notarize.
 # If NOTARY_PROFILE is missing, we'll automatically skip notarization/stapling and explain how to configure it.
