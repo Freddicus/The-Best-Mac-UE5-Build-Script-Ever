@@ -1,9 +1,38 @@
 #!/usr/bin/env bash
 
+
 set -euo pipefail
 
 # Preserve original stdout/stderr for human-facing status lines (FD 3/4)
 exec 3>&1 4>&2
+
+# -----------------------------------------------------------------------------
+# Optional .env support
+#
+# If a `.env` file exists next to this script, load it as environment variables.
+# This keeps the main script copy/paste friendly while allowing local configuration
+# without editing the script.
+#
+# Quick usage:
+#   - Copy `.env.example` (if provided) to `.env` next to this script
+#   - Fill in DEVELOPMENT_TEAM, SIGN_IDENTITY, and (if using Xcode export) EXPORT_PLIST
+#   - Run the script
+#
+# Priority order remains:
+#   CLI flags > environment vars (including .env) > defaults in this file
+#
+# SECURITY NOTE: `.env` is sourced as shell code. Only use a `.env` you trust.
+# -----------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" 2>/dev/null && /bin/pwd -P)"
+ENV_FILE="$SCRIPT_DIR/.env"
+if [[ -f "$ENV_FILE" ]]; then
+  # Export variables defined in .env so they behave like real environment variables.
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+  echo "== Loaded .env: $ENV_FILE ==" >&3
+fi
 
 ### ============================================================================
 ### USER CONFIG (safe to publish)
@@ -11,9 +40,15 @@ exec 3>&1 4>&2
 ### Goal: Build + archive + sign + (optionally) notarize a macOS Unreal project.
 ###
 ### How to use:
-###   - Leave the PROMPT overrides commented out to be asked interactively.
+###   - Easiest: create a `.env` file next to this script and set your values there.
+###   - Or leave the PROMPT overrides commented out to be asked interactively.
 ###   - Or uncomment and set overrides to make it non-interactive / CI-friendly.
 ###   - You can also export environment variables instead of editing this file.
+###   - Or pass command-line flags (highest priority):
+###       ./build_archive_sign_notarize_macos.sh --repo-root "/path" --uproject "MyGame.uproject" --ue-root "/Users/Shared/Epic Games/UE_5.x"
+###
+### Priority order:
+###   CLI flags > environment vars > defaults in this file
 ###
 ### IMPORTANT: Replace any __REPLACE_ME__ placeholders before running.
 ### ============================================================================
@@ -35,7 +70,7 @@ XCODE_SCHEME_DEFAULT="__REPLACE_ME__"
 
 # Optional: Where to place build artifacts/logs. Defaults under the repo root.
 BUILD_DIR_DEFAULT="Build"
-LOG_DIR_DEFAULT="Logs/script-logs"
+LOG_DIR_DEFAULT="Logs"
 
 # --- Naming ---
 # SHORT_NAME: used for archive/export file/folder names (keep it simple; no spaces recommended).
@@ -43,8 +78,29 @@ LOG_DIR_DEFAULT="Logs/script-logs"
 SHORT_NAME_DEFAULT="__REPLACE_ME__"
 LONG_NAME_DEFAULT="__REPLACE_ME__"
 
-# NOTE: Spaces are allowed in paths on macOS, but they can complicate shells/CI.
-# This script will warn if it detects spaces so you can decide if you want to rename.
+# --- Behavior toggles ---
+# USE_XCODE_EXPORT:
+#   1 = use Xcode archive/export (`xcodebuild archive` + `-exportArchive`) to produce the signed app.
+#   0 = skip Xcode and attempt to sign/notarize the packaged `.app` produced by UAT.
+#
+# Xcode export is the most consistent route for Developer ID distribution, but not everyone wants/needs it.
+USE_XCODE_EXPORT_DEFAULT="1"  # 1 = on (default), 0 = off
+
+# CLEAN_BUILD_DIR:
+#   1 = wipe the entire Build/ dir each run (more deterministic, more destructive)
+#   0 = only remove the specific outputs this script produces (safer default)
+CLEAN_BUILD_DIR_DEFAULT="0"
+
+# DRY_RUN:
+#   1 = print what would happen (and resolved paths), then exit
+#   0 = run normally
+DRY_RUN_DEFAULT="0"
+
+# PRINT_CONFIG:
+#   1 = print resolved configuration (paths/flags), then exit
+#   0 = run normally
+PRINT_CONFIG_DEFAULT="0"
+
 
 
 # --- Unreal Engine location ---
@@ -122,10 +178,639 @@ is_placeholder() {
   [[ -z "$v" || "$v" == *"__REPLACE_ME__"* ]]
 }
 
+
 require_not_placeholder() {
   local name="$1"; local value="$2"; local hint="$3"
   if is_placeholder "$value"; then
+    if [[ "${PRINT_CONFIG:-0}" == "1" ]]; then
+      print_config
+    fi
     die "$name is not configured. Set it via env var, edit the USER CONFIG block, or provide an override. Hint: $hint"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Helpers for config discovery / printing
+# -----------------------------------------------------------------------------
+
+read_uproject_module_name() {
+  # Extract the first module name from a .uproject (JSON) without python/jq.
+  # This is a best-effort parser designed for typical Unreal .uproject formatting.
+  #
+  # It looks for: "Modules": [ { "Name": "YourModule", ... }, ... ]
+  local uproject_path="$1"
+  [[ -f "$uproject_path" ]] || { echo ""; return 0; }
+
+  /usr/bin/awk '
+    BEGIN {
+      in_modules = 0
+      bracket_depth = 0
+    }
+
+    # Once we enter the Modules array, track [] depth so we know when it ends.
+    {
+      line = $0
+    }
+
+    # Enter Modules section when we see "Modules"
+    !in_modules && line ~ /"Modules"[[:space:]]*:/ {
+      in_modules = 1
+    }
+
+    # If we are in Modules, update bracket depth for [ and ] on this line.
+    in_modules {
+      # Count [ and ] occurrences (simple but effective for .uproject files)
+      open = gsub(/\[/, "[", line)
+      close = gsub(/\]/, "]", line)
+      bracket_depth += (open - close)
+
+      # Look for the first "Name": "..."
+      # Capture the first quoted string after "Name":
+      if (match(line, /"Name"[[:space:]]*:[[:space:]]*"[^"]+"/)) {
+        s = substr(line, RSTART, RLENGTH)
+        sub(/^.*"Name"[[:space:]]*:[[:space:]]*"/, "", s)
+        sub(/".*$/, "", s)
+        print s
+        exit 0
+      }
+
+      # If bracket_depth drops to 0 or below, we have left the array.
+      # (In practice, it should be 0 at the end of the array.)
+      if (bracket_depth <= 0) {
+        exit 0
+      }
+    }
+
+    END { }
+  ' "$uproject_path" 2>/dev/null || true
+}
+
+autodetect_uproject_if_needed() {
+  if is_placeholder "${UPROJECT_NAME:-}"; then
+    local found=()
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && found+=("$line")
+    done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 1 -type f -name '*.uproject' 2>/dev/null)
+
+    if [[ "${#found[@]}" -eq 1 ]]; then
+      UPROJECT_PATH="${found[0]}"
+      UPROJECT_NAME="$(/usr/bin/basename "$UPROJECT_PATH")"
+      info "Auto-detected .uproject: $UPROJECT_NAME"
+    elif [[ "${#found[@]}" -gt 1 ]]; then
+      echo "Found multiple .uproject candidates:" >&3
+      printf '  - %s\n' "${found[@]}" >&3
+      die "Multiple .uproject files found. Pass --uproject explicitly."
+    else
+      die "No .uproject found in REPO_ROOT. Put the script in the project root or pass --repo-root."
+    fi
+  fi
+}
+
+autodetect_names_if_needed() {
+  local base
+  base="${UPROJECT_NAME%.uproject}"
+
+  if is_placeholder "${LONG_NAME:-}"; then
+    LONG_NAME="$base"
+    info "Auto-detected LONG_NAME: $LONG_NAME"
+  fi
+
+  if is_placeholder "${SHORT_NAME:-}"; then
+    SHORT_NAME="$base"
+    SHORT_NAME="${SHORT_NAME// /}"  # conservative
+    info "Auto-detected SHORT_NAME: $SHORT_NAME"
+  fi
+}
+
+autodetect_workspace_guess_if_needed() {
+  # If workspace is placeholder, try Unreal's common naming convention: "<Project> (Mac).xcworkspace".
+  if [[ "$USE_XCODE_EXPORT" == "1" ]] && is_placeholder "$XCODE_WORKSPACE"; then
+    local base guess
+    base="${UPROJECT_NAME%.uproject}"
+    guess="$REPO_ROOT/${base} (Mac).xcworkspace"
+    if [[ -d "$guess" ]]; then
+      XCODE_WORKSPACE="$(/usr/bin/basename "$guess")"
+      WORKSPACE="$guess"
+      info "Auto-detected workspace by convention: $WORKSPACE"
+    fi
+  fi
+}
+
+autodetect_export_plist_if_needed() {
+  # If EXPORT_PLIST is placeholder, try to locate an ExportOptions.plist in the repo root.
+  # Heuristic: a candidate plist contains destination=export, e.g.
+  #   <key>destination</key><string>export</string>
+  # (whitespace/newlines allowed).
+  if ! is_placeholder "$EXPORT_PLIST"; then
+    return 0
+  fi
+
+  # Fast path: conventional name.
+  local conventional="$REPO_ROOT/ExportOptions.plist"
+  if [[ -f "$conventional" ]]; then
+    EXPORT_PLIST="$conventional"
+    info "Auto-detected ExportOptions.plist (by name): $EXPORT_PLIST"
+    return 0
+  fi
+
+  # Scan all *.plist in the repo root and look for destination=export.
+  local matches=()
+  local p
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+
+    # Collapse whitespace to make matching resilient to formatting.
+    # We intentionally avoid plutil parsing to keep dependencies minimal.
+    if /bin/cat "$p" 2>/dev/null | /usr/bin/tr -d '[:space:]' | /usr/bin/grep -qi '<key>destination</key><string>export</string>'; then
+      matches+=("$p")
+      continue
+    fi
+
+    # Some plists may use <key>method</key> etc. We only care about destination.
+  done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 1 -type f -name '*.plist' 2>/dev/null | /usr/bin/sort)
+
+  if [[ "${#matches[@]}" -eq 1 ]]; then
+    EXPORT_PLIST="${matches[0]}"
+    info "Auto-detected ExportOptions.plist (by contents): $EXPORT_PLIST"
+    return 0
+  fi
+
+  if [[ "${#matches[@]}" -gt 1 ]]; then
+    echo "== EXPORT_PLIST not set — found multiple ExportOptions-like plist candidates in repo root ==" >&3
+    local i=1
+    for p in "${matches[@]}"; do
+      echo "  [$i] $p" >&3
+      i=$((i+1))
+    done
+
+    # If running in a non-interactive context, don't guess.
+    if [[ ! -t 0 ]]; then
+      warn "Multiple ExportOptions-like plist files found. Pass --export-plist PATH (or set EXPORT_PLIST env var) to select one."
+      return 0
+    fi
+
+    local choice
+    read -r -p "Select ExportOptions.plist [1]: " choice
+    choice="${choice:-1}"
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#matches[@]}" ]]; then
+      EXPORT_PLIST="${matches[$((choice-1))]}"
+      info "Selected ExportOptions.plist: $EXPORT_PLIST"
+      return 0
+    fi
+
+    warn "Invalid selection '$choice'. Provide --export-plist PATH instead."
+    return 0
+  fi
+
+  # No match found; leave placeholder and let validation explain next steps.
+}
+
+sanitize_name_for_tmp() {
+  # mktemp's -t template is happier without spaces/special chars.
+  local v="$1"
+  v="${v// /_}"
+  v="${v//[^a-zA-Z0-9._-]/_}"
+  echo "$v"
+}
+
+print_config() {
+  echo "== Resolved configuration ==" >&3
+  echo "REPO_ROOT:         $REPO_ROOT" >&3
+  echo "UPROJECT_PATH:     $UPROJECT_PATH" >&3
+  echo "UE_ROOT:           $UE_ROOT" >&3
+  echo "UAT (RunUAT.sh):   $SCRIPTS/RunUAT.sh" >&3
+  echo "UE_EDITOR:         $UE_EDITOR" >&3
+  echo "BUILD_DIR:         $BUILD_DIR" >&3
+  echo "LOG_DIR:           $LOG_DIR" >&3
+  echo "SHORT_NAME:        $SHORT_NAME" >&3
+  echo "LONG_NAME:         $LONG_NAME" >&3
+  echo "USE_XCODE_EXPORT:  $USE_XCODE_EXPORT" >&3
+  echo "CLEAN_BUILD_DIR:   $CLEAN_BUILD_DIR" >&3
+  echo "DRY_RUN:           $DRY_RUN" >&3
+  echo "PRINT_CONFIG:      $PRINT_CONFIG" >&3
+  echo "ENABLE_STEAM:      $ENABLE_STEAM" >&3
+  echo "WRITE_STEAM_APPID: $WRITE_STEAM_APPID" >&3
+  if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+    echo "WORKSPACE:         $WORKSPACE" >&3
+    echo "SCHEME:            $SCHEME" >&3
+    echo "XCODE_CONFIG:      ${XCODE_CONFIG:-<unset>}" >&3
+  fi
+  echo "DO_NOTARIZE:       ${DO_NOTARIZE:-<unset>}" >&3
+  if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+    echo "EXPORT_PLIST:      $EXPORT_PLIST" >&3
+  fi
+}
+
+autodetect_workspace_if_needed() {
+  # If the workspace is placeholder/empty AND Xcode export is enabled, try to discover it.
+  if [[ "$USE_XCODE_EXPORT" == "1" ]] && is_placeholder "$XCODE_WORKSPACE"; then
+    info "XCODE_WORKSPACE not set — attempting auto-detect"
+    local found=()
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && found+=("$line")
+    done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 2 -type d -name '*.xcworkspace' 2>/dev/null)
+    if [[ "${#found[@]}" -eq 1 ]]; then
+      XCODE_WORKSPACE="$(/usr/bin/basename "${found[0]}")"
+      WORKSPACE="${found[0]}"
+      info "Auto-detected workspace: $WORKSPACE"
+    elif [[ "${#found[@]}" -eq 0 ]]; then
+      die "No .xcworkspace found under REPO_ROOT. Generate it (GenerateProjectFiles) or set XCODE_WORKSPACE."
+    else
+      # Common Unreal output: both "<Project> (iOS).xcworkspace" and "<Project> (Mac).xcworkspace".
+      # Prefer the macOS workspace automatically when present.
+      local mac_found=()
+      local p
+      for p in "${found[@]}"; do
+        if [[ "$p" == *" (Mac).xcworkspace" ]]; then
+          mac_found+=("$p")
+        fi
+      done
+
+      if [[ "${#mac_found[@]}" -eq 1 ]]; then
+        XCODE_WORKSPACE="$(/usr/bin/basename "${mac_found[0]}")"
+        WORKSPACE="${mac_found[0]}"
+        info "Auto-selected macOS workspace: $WORKSPACE"
+      elif [[ "${#mac_found[@]}" -gt 1 ]]; then
+        # If there are multiple macOS workspaces, prefer the one that matches the project naming convention.
+        local base expected matches=()
+        base="${UPROJECT_NAME%.uproject}"
+        expected="$REPO_ROOT/${base} (Mac).xcworkspace"
+
+        for p in "${mac_found[@]}"; do
+          if [[ "$p" == "$expected" ]]; then
+            matches+=("$p")
+          fi
+        done
+
+        if [[ "${#matches[@]}" -eq 1 ]]; then
+          XCODE_WORKSPACE="$(/usr/bin/basename "${matches[0]}")"
+          WORKSPACE="${matches[0]}"
+          info "Auto-selected macOS workspace (matched convention): $WORKSPACE"
+        else
+          echo "Found multiple macOS .xcworkspace candidates:" >&3
+          printf '  - %s\n' "${mac_found[@]}" >&3
+          die "Multiple macOS workspaces found. Set XCODE_WORKSPACE explicitly."
+        fi
+      else
+        # No macOS workspace found — show candidates and instruct.
+        echo "Found multiple .xcworkspace candidates (but none look like a macOS workspace):" >&3
+        printf '  - %s\n' "${found[@]}" >&3
+        die "No '(Mac).xcworkspace' found. Generate Mac project files or set XCODE_WORKSPACE explicitly."
+      fi
+    fi
+  fi
+}
+
+autodetect_scheme_if_needed() {
+  # If scheme is placeholder/empty AND Xcode export is enabled, try to discover it from xcodebuild.
+  if [[ "$USE_XCODE_EXPORT" == "1" ]] && is_placeholder "$XCODE_SCHEME"; then
+    info "XCODE_SCHEME not set — attempting auto-detect"
+
+    local list
+    list=$(xcodebuild -list -workspace "$WORKSPACE" 2>/dev/null || true)
+    if [[ -z "$list" ]]; then
+      die "Could not list schemes from workspace. Open the workspace in Xcode and ensure a Shared scheme exists."
+    fi
+
+    local schemes=()
+    local in_section=0
+
+    while IFS= read -r line; do
+      # Look for the "Schemes:" header (it may be indented in some Xcode versions).
+      if [[ "$in_section" -eq 0 ]]; then
+        if [[ "$line" =~ ^[[:space:]]*Schemes:[[:space:]]*$ ]]; then
+          in_section=1
+        fi
+        continue
+      fi
+
+      # Once in the schemes section:
+      # - collect indented, non-empty lines
+      # - ignore blank lines
+      # - stop when we hit a non-indented line
+      if [[ -z "$line" ]]; then
+        continue
+      fi
+
+      if [[ "$line" =~ ^[[:space:]]+[^[:space:]] ]]; then
+        # Trim leading whitespace
+        local trimmed
+        trimmed="${line#${line%%[![:space:]]*}}"
+        schemes+=("$trimmed")
+      else
+        break
+      fi
+    done <<< "$list"
+
+    if [[ "${#schemes[@]}" -eq 1 ]]; then
+      XCODE_SCHEME="${schemes[0]}"
+      SCHEME="$XCODE_SCHEME"
+      info "Auto-detected scheme: $SCHEME"
+
+    elif [[ "${#schemes[@]}" -eq 0 ]]; then
+      die "No schemes found in workspace. Make sure the scheme exists and is marked Shared (Product → Scheme → Manage Schemes…)."
+
+    else
+      # Prefer an exact match to the detected project/app name.
+      local base module preferred chosen=""
+      base="${UPROJECT_NAME%.uproject}"
+      module="$(read_uproject_module_name "$UPROJECT_PATH")"
+
+      preferred=""
+      if ! is_placeholder "$LONG_NAME"; then
+        preferred="$LONG_NAME"
+      elif [[ -n "$module" ]]; then
+        preferred="$module"
+      else
+        preferred="$base"
+      fi
+
+      # Try to choose a single exact match in priority order.
+      local candidates=()
+      candidates+=("$preferred")
+      [[ -n "$module" ]] && candidates+=("$module")
+      candidates+=("$base")
+      if ! is_placeholder "$SHORT_NAME"; then
+        candidates+=("$SHORT_NAME")
+      fi
+
+      local c s
+      for c in "${candidates[@]}"; do
+        for s in "${schemes[@]}"; do
+          if [[ "$s" == "$c" ]]; then
+            chosen="$s"
+            break 2
+          fi
+        done
+      done
+
+      if [[ -n "$chosen" ]]; then
+        XCODE_SCHEME="$chosen"
+        SCHEME="$XCODE_SCHEME"
+        info "Auto-selected scheme by exact match: $SCHEME"
+
+        echo "Schemes (auto-selected):" >&3
+        for s in "${schemes[@]}"; do
+          if [[ "$s" == "$chosen" ]]; then
+            echo "  -> $s" >&3
+          else
+            echo "     $s" >&3
+          fi
+        done
+      else
+        echo "Available schemes:" >&3
+        printf '  - %s\n' "${schemes[@]}" >&3
+        die "Multiple schemes found and none matched the detected name. Set XCODE_SCHEME explicitly."
+      fi
+    fi
+  fi
+}
+
+
+find_first_app_under() {
+  # Find the first .app bundle under a root (prefers shallow paths; returns empty if none).
+  local root="$1"
+  /usr/bin/find "$root" -maxdepth 5 -type d -name '*.app' -print -quit 2>/dev/null || true
+}
+
+abspath_existing() {
+  # Convert an existing file/dir path to an absolute, physical path.
+  # Returns empty string if the target does not exist or cannot be resolved.
+  local p="$1"
+  [[ -n "$p" ]] || { echo ""; return 0; }
+  [[ -e "$p" ]] || { echo ""; return 0; }
+
+  local dir base absdir
+  dir="$(/usr/bin/dirname "$p")"
+  base="$(/usr/bin/basename "$p")"
+
+  absdir="$(cd "$dir" 2>/dev/null && /bin/pwd -P 2>/dev/null)"
+  if [[ -z "$absdir" ]]; then
+    echo ""
+    return 0
+  fi
+
+  echo "$absdir/$base"
+}
+
+abspath_from() {
+  # Resolve a (possibly relative) path against a base directory.
+  # Does not require the target to exist.
+  local base="$1"
+  local p="$2"
+  [[ -n "$p" ]] || { echo ""; return 0; }
+  if [[ "$p" == /* ]]; then
+    echo "$p"
+    return 0
+  fi
+
+  local d
+  d="$(cd "$base" 2>/dev/null && /bin/pwd -P 2>/dev/null)"
+  if [[ -z "$d" ]]; then
+    echo ""
+    return 0
+  fi
+  echo "$d/$p"
+}
+
+read_ini_value() {
+  # first match only; expects Key=Value
+  local file="$1"; local key="$2"
+  [[ -f "$file" ]] || { echo ""; return 0; }
+
+  local line val
+  line="$(/usr/bin/grep -E "^[[:space:]]*${key}[[:space:]]*=" "$file" 2>/dev/null | /usr/bin/head -n 1 || true)"
+  [[ -n "$line" ]] || { echo ""; return 0; }
+
+  val="${line#*=}"
+  val="${val#${val%%[![:space:]]*}}"
+  val="${val%${val##*[![:space:]]}}"
+  val="${val%\"}"; val="${val#\"}"
+  val="${val%%;*}"; val="${val%%#*}"
+  val="${val#${val%%[![:space:]]*}}"
+  val="${val%${val##*[![:space:]]}}"
+  echo "$val"
+}
+
+detect_steam_from_ini() {
+  local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
+  [[ -f "$engine_ini" ]] || return 1
+
+  /usr/bin/grep -qiE "OnlineSubsystemSteam|DefaultPlatformService[[:space:]]*=[[:space:]]*Steam" "$engine_ini" && return 0
+
+  /usr/bin/awk '
+    BEGIN{in=0}
+    /^\[/ {in=0}
+    /^\[\/Script\/OnlineSubsystemSteam\.OnlineSubsystemSteam\]/ {in=1}
+    in && /^[[:space:]]*bEnabled[[:space:]]*=[[:space:]]*true/ {found=1}
+    END{exit(found?0:1)}
+  ' "$engine_ini" 2>/dev/null && return 0
+
+  return 1
+}
+
+autodetect_steam_if_needed() {
+  if [[ "${CLI_SET_ENABLE_STEAM:-0}" != "1" && "${ENABLE_STEAM:-0}" == "0" ]]; then
+    if detect_steam_from_ini; then
+      ENABLE_STEAM="1"
+      info "Detected Steam OSS in Config/DefaultEngine.ini — ENABLE_STEAM=1"
+
+      local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
+      local appid
+      appid="$(read_ini_value "$engine_ini" "SteamDevAppId")"
+      [[ -z "$appid" ]] && appid="$(read_ini_value "$engine_ini" "SteamAppId")"
+      if [[ -n "$appid" ]]; then
+        STEAM_APP_ID="$appid"
+        info "Detected Steam App ID from INI: $STEAM_APP_ID"
+      fi
+    fi
+  fi
+}
+
+read_steamworks_version_number() {
+  # Extract SteamVersionNumber (e.g., 1.63) from Steamworks.build.cs (best-effort).
+  local cs="$1"
+  [[ -f "$cs" ]] || { echo ""; return 0; }
+
+  # Example line: double SteamVersionNumber = 1.63;
+  /usr/bin/awk '
+    match($0, /SteamVersionNumber[[:space:]]*=[[:space:]]*[0-9]+\.[0-9]+/) {
+      s=substr($0, RSTART, RLENGTH)
+      sub(/^.*=/, "", s)
+      gsub(/[[:space:]]*/, "", s)
+      print s
+      exit
+    }
+  ' "$cs" 2>/dev/null || true
+}
+
+steam_version_to_folder() {
+  # Convert 1.63 -> Steamv163 (remove dot).
+  local v="$1"
+  [[ -n "$v" ]] || { echo ""; return 0; }
+  local digits
+  digits="${v//./}"
+  echo "Steamv${digits}"
+}
+
+autodetect_steam_dylib_src_from_engine_if_needed() {
+  # If Steam is enabled and STEAM_DYLIB_SRC is placeholder, try to locate it inside UE_ROOT.
+  # Expected layout:
+  #   <UE_ROOT>/Engine/Source/ThirdParty/Steamworks/Steamv163/sdk/redistributable_bin/osx/libsteam_api.dylib
+  #
+  # We do NOT assume a specific UE version; we derive everything from UE_ROOT.
+
+  [[ "${ENABLE_STEAM:-0}" == "1" ]] || return 0
+  is_placeholder "${STEAM_DYLIB_SRC:-}" || return 0
+
+  local steam_root cs ver folder candidate
+  steam_root="$UE_ROOT/Engine/Source/ThirdParty/Steamworks"
+  cs="$steam_root/Steamworks.build.cs"
+
+  if [[ ! -d "$steam_root" ]]; then
+    # Some engine installs may omit ThirdParty sources; don't fail here.
+    warn "ENABLE_STEAM=1 but Steamworks ThirdParty folder not found under UE_ROOT: $steam_root"
+    return 0
+  fi
+
+  if [[ ! -f "$cs" ]]; then
+    warn "Steamworks.build.cs not found (cannot auto-detect Steam SDK version): $cs"
+    return 0
+  fi
+
+  ver="$(read_steamworks_version_number "$cs")"
+  folder="$(steam_version_to_folder "$ver")"
+
+  if [[ -z "$folder" ]]; then
+    warn "Could not parse SteamVersionNumber from: $cs"
+    return 0
+  fi
+
+  candidate="$steam_root/$folder/sdk/redistributable_bin/osx/libsteam_api.dylib"
+  if [[ -f "$candidate" ]]; then
+    STEAM_DYLIB_SRC="$candidate"
+    info "Auto-detected STEAM_DYLIB_SRC from UE_ROOT ($folder): $STEAM_DYLIB_SRC"
+    return 0
+  fi
+
+  # Fallback: if expected folder isn't present, try to find any matching dylib under Steamworks.
+  local found
+  found="$(/usr/bin/find "$steam_root" -maxdepth 6 -type f -name 'libsteam_api.dylib' -path '*/redistributable_bin/osx/*' -print -quit 2>/dev/null || true)"
+  if [[ -n "$found" && -f "$found" ]]; then
+    STEAM_DYLIB_SRC="$found"
+    info "Auto-detected STEAM_DYLIB_SRC by search under Steamworks: $STEAM_DYLIB_SRC"
+    return 0
+  fi
+
+  warn "ENABLE_STEAM=1 but could not locate libsteam_api.dylib under: $steam_root"
+  warn "Expected (based on SteamVersionNumber=$ver): $candidate"
+  warn "Set STEAM_DYLIB_SRC explicitly (--steam-dylib-src or env/USER CONFIG) if your layout differs."
+}
+
+autodetect_ue_root_if_needed() {
+  # Best-effort UE_ROOT detection for Epic Games Launcher installs on macOS.
+  # Common path: /Users/Shared/Epic Games/UE_X.Y
+  # We only accept candidates that look complete (contain Engine/Binaries/Mac).
+
+  if ! is_placeholder "${UE_ROOT:-}"; then
+    return 0
+  fi
+
+  local base_dir="/Users/Shared/Epic Games"
+  [[ -d "$base_dir" ]] || return 0
+
+  local candidates=()
+  local d
+
+  # Prefer UE_* folders but still validate by required subfolder.
+  while IFS= read -r d; do
+    [[ -n "$d" ]] || continue
+    if [[ -d "$d/Engine/Binaries/Mac" ]]; then
+      candidates+=("$d")
+    fi
+  done < <(/usr/bin/find "$base_dir" -maxdepth 1 -type d -name 'UE_*' 2>/dev/null | /usr/bin/sort)
+
+  # If no UE_* candidates, do a slightly broader scan for engine-looking folders.
+  if [[ "${#candidates[@]}" -eq 0 ]]; then
+    while IFS= read -r d; do
+      [[ -n "$d" ]] || continue
+      if [[ -d "$d/Engine/Binaries/Mac" ]]; then
+        candidates+=("$d")
+      fi
+    done < <(/usr/bin/find "$base_dir" -maxdepth 2 -type d -name 'Engine' 2>/dev/null | /usr/bin/sed 's#/Engine$##' | /usr/bin/sort -u)
+  fi
+
+  if [[ "${#candidates[@]}" -eq 1 ]]; then
+    UE_ROOT="${candidates[0]}"
+    info "UE_ROOT not set — auto-detected engine: $UE_ROOT"
+    return 0
+  fi
+
+  if [[ "${#candidates[@]}" -gt 1 ]]; then
+    echo "== UE_ROOT not set — found multiple Unreal Engine installs under: $base_dir ==" >&3
+    local i=1
+    for d in "${candidates[@]}"; do
+      echo "  [$i] $d" >&3
+      i=$((i+1))
+    done
+
+    # If running in a non-interactive context, don't guess.
+    if [[ ! -t 0 ]]; then
+      die "Multiple Unreal Engine installs found. Re-run with --ue-root PATH (or set UE_ROOT env var) to select one."
+    fi
+
+    local choice
+    read -r -p "Select engine [1]: " choice
+    choice="${choice:-1}"
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#candidates[@]}" ]]; then
+      UE_ROOT="${candidates[$((choice-1))]}"
+      info "Selected UE_ROOT: $UE_ROOT"
+      return 0
+    fi
+
+    die "Invalid selection '$choice'. Re-run and choose a number 1-${#candidates[@]}, or pass --ue-root PATH."
   fi
 }
 
@@ -141,6 +826,11 @@ LOG_DIR_REL="${LOG_DIR_REL:-$LOG_DIR_DEFAULT}"
 SHORT_NAME="${SHORT_NAME:-$SHORT_NAME_DEFAULT}"
 LONG_NAME="${LONG_NAME:-$LONG_NAME_DEFAULT}"
 
+USE_XCODE_EXPORT="${USE_XCODE_EXPORT:-$USE_XCODE_EXPORT_DEFAULT}"
+CLEAN_BUILD_DIR="${CLEAN_BUILD_DIR:-$CLEAN_BUILD_DIR_DEFAULT}"
+DRY_RUN="${DRY_RUN:-$DRY_RUN_DEFAULT}"
+PRINT_CONFIG="${PRINT_CONFIG:-$PRINT_CONFIG_DEFAULT}"
+
 UE_ROOT="${UE_ROOT:-$UE_ROOT_DEFAULT}"
 UAT_SCRIPTS_SUBPATH="${UAT_SCRIPTS_SUBPATH:-$UAT_SCRIPTS_SUBPATH_DEFAULT}"
 UE_EDITOR_SUBPATH="${UE_EDITOR_SUBPATH:-$UE_EDITOR_SUBPATH_DEFAULT}"
@@ -155,10 +845,145 @@ STEAM_APP_ID="${STEAM_APP_ID:-$STEAM_APP_ID_DEFAULT}"
 WRITE_STEAM_APPID="${WRITE_STEAM_APPID:-$WRITE_STEAM_APPID_DEFAULT}"
 STEAM_DYLIB_SRC="${STEAM_DYLIB_SRC:-$STEAM_DYLIB_SRC_DEFAULT}"
 
-# Derive common paths
+
+# -----------------------------------------------------------------------------
+# Command-line flag overrides (highest priority)
+# -----------------------------------------------------------------------------
+
+usage() {
+  cat >&3 <<'USAGE'
+Usage:
+  ./build_archive_sign_notarize_macos.sh [options]
+
+Options (override env/defaults):
+  --repo-root PATH
+  --uproject FILE_OR_PATH            (e.g. MyGame.uproject)
+  --ue-root PATH
+  --xcode-workspace FILE_OR_PATH     (e.g. "MyGame (Mac).xcworkspace")
+  --xcode-scheme NAME
+  --development-team TEAMID
+  --sign-identity "Developer ID Application: ... (TEAMID)"
+  --export-plist PATH
+  --notary-profile NAME
+
+  --short-name NAME
+  --long-name NAME
+
+  --use-xcode-export 0|1
+  --clean-build-dir 0|1
+  --dry-run 0|1
+  --print-config 0|1
+
+  --enable-steam 0|1
+  --write-steam-appid 0|1
+  --steam-app-id ID
+  --steam-dylib-src PATH
+
+  --build-type shipping|development
+  --notarize yes|no
+
+  -h, --help
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+
+    --repo-root)            REPO_ROOT="$2"; shift 2 ;;
+    --uproject)             UPROJECT_NAME="$2"; shift 2 ;;
+    --ue-root)              UE_ROOT="$2"; shift 2 ;;
+    --xcode-workspace)      XCODE_WORKSPACE="$2"; shift 2 ;;
+    --xcode-scheme)         XCODE_SCHEME="$2"; shift 2 ;;
+
+    --development-team)     DEVELOPMENT_TEAM="$2"; shift 2 ;;
+    --sign-identity)        SIGN_IDENTITY="$2"; shift 2 ;;
+    --export-plist)         EXPORT_PLIST="$2"; shift 2 ;;
+    --notary-profile)       NOTARY_PROFILE="$2"; shift 2 ;;
+
+    --short-name)           SHORT_NAME="$2"; shift 2 ;;
+    --long-name)            LONG_NAME="$2"; shift 2 ;;
+
+    --use-xcode-export)     USE_XCODE_EXPORT="$2"; shift 2 ;;
+    --clean-build-dir)      CLEAN_BUILD_DIR="$2"; shift 2 ;;
+    --dry-run)              DRY_RUN="$2"; shift 2 ;;
+    --print-config)         PRINT_CONFIG="$2"; shift 2 ;;
+
+    --enable-steam) ENABLE_STEAM="$2"; CLI_SET_ENABLE_STEAM=1; shift 2 ;;
+    --write-steam-appid)    WRITE_STEAM_APPID="$2"; shift 2 ;;
+    --steam-app-id)         STEAM_APP_ID="$2"; shift 2 ;;
+    --steam-dylib-src)      STEAM_DYLIB_SRC="$2"; shift 2 ;;
+
+    --build-type)           BUILD_TYPE_OVERRIDE="$2"; shift 2 ;;
+    --notarize)             NOTARIZE_OVERRIDE="$2"; shift 2 ;;
+
+    *) die "Unknown option: $1 (use --help)" ;;
+  esac
+done
+
+# If REPO_ROOT is still a placeholder/empty, assume this script lives in the project root.
+if is_placeholder "${REPO_ROOT:-}"; then
+  SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" && pwd -P)"
+  REPO_ROOT="$SCRIPT_DIR"
+  info "REPO_ROOT not set — assuming script directory: $REPO_ROOT"
+fi
+
+if is_placeholder "$DEVELOPMENT_TEAM"; then
+  ios_ini="$REPO_ROOT/Config/DefaultEngine.ini"
+  team="$(read_ini_value "$ios_ini" "IOSTeamID")"
+  if [[ -n "$team" ]]; then
+    DEVELOPMENT_TEAM="$team"
+    info "Detected DEVELOPMENT_TEAM from INI (IOSTeamID): $DEVELOPMENT_TEAM"
+  fi
+fi
+
+# If the caller provided absolute paths for uproject/workspace, normalize them.
+if [[ -n "${UPROJECT_NAME:-}" && "$UPROJECT_NAME" == /* ]]; then
+  UPROJECT_PATH="$UPROJECT_NAME"
+  UPROJECT_NAME="$(/usr/bin/basename "$UPROJECT_PATH")"
+  REPO_ROOT="$(/usr/bin/dirname "$UPROJECT_PATH")"
+fi
+
+if [[ -n "${XCODE_WORKSPACE:-}" && "$XCODE_WORKSPACE" == /* ]]; then
+  WORKSPACE="$XCODE_WORKSPACE"
+  XCODE_WORKSPACE="$(/usr/bin/basename "$WORKSPACE")"
+fi
+
+# Auto-detect UE_ROOT (macOS EGL installs) if not provided.
+autodetect_ue_root_if_needed
+# Normalize REPO_ROOT to an absolute path (best-effort).
+# IMPORTANT: resolve relative paths (including ".") against the CURRENT working directory,
+# not against "/".
+if [[ -n "${REPO_ROOT:-}" && "$REPO_ROOT" != /* ]]; then
+  REPO_ROOT="$(abspath_from "$(/bin/pwd -P)" "$REPO_ROOT")"
+fi
+
+# Auto-detect the .uproject, names, and common workspace naming convention when placeholders are used.
+autodetect_uproject_if_needed
+
+# Construct UPROJECT_PATH if it wasn't provided, then normalize it to an absolute path.
+UPROJECT_PATH="${UPROJECT_PATH:-$REPO_ROOT/$UPROJECT_NAME}"
+if [[ -f "$UPROJECT_PATH" ]]; then
+  UPROJECT_PATH="$(abspath_existing "$UPROJECT_PATH")"
+fi
+
+# Ensure REPO_ROOT matches the actual uproject directory once we have the uproject path.
+if [[ -n "${UPROJECT_PATH:-}" && -f "$UPROJECT_PATH" ]]; then
+  REPO_ROOT="$(/usr/bin/dirname "$UPROJECT_PATH")"
+fi
+
+autodetect_names_if_needed
+
+# Try the common "<Project> (Mac).xcworkspace" guess before the more general workspace find.
+autodetect_workspace_guess_if_needed
+autodetect_export_plist_if_needed
+autodetect_steam_if_needed
+autodetect_steam_dylib_src_from_engine_if_needed
+
+# Derive common paths (after CLI parsing/autodetect)
 REPO="$REPO_ROOT"
-UPROJECT_PATH="$REPO_ROOT/$UPROJECT_NAME"
-WORKSPACE="$REPO_ROOT/$XCODE_WORKSPACE"
+UPROJECT_PATH="${UPROJECT_PATH:-$REPO_ROOT/$UPROJECT_NAME}"
+WORKSPACE="${WORKSPACE:-$REPO_ROOT/$XCODE_WORKSPACE}"
 SCHEME="$XCODE_SCHEME"
 
 SCRIPTS="$UE_ROOT/$UAT_SCRIPTS_SUBPATH"
@@ -168,58 +993,76 @@ UE_EDITOR="$UE_ROOT/$UE_EDITOR_SUBPATH"
 BUILD_DIR="$REPO_ROOT/$BUILD_DIR_REL"
 LOG_DIR="$REPO_ROOT/$LOG_DIR_REL"
 
+# Normalize a few important paths to absolute paths when possible.
+# (This helps when the user passes relative paths via env/CLI.)
+if [[ -d "$WORKSPACE" ]]; then
+  WORKSPACE="$(abspath_existing "$WORKSPACE")"
+fi
+if [[ -f "$EXPORT_PLIST" ]]; then
+  _abs="$(abspath_existing "$EXPORT_PLIST")"
+  [[ -n "${_abs:-}" ]] && EXPORT_PLIST="$_abs"
+fi
+if [[ "$ENABLE_STEAM" == "1" && -f "$STEAM_DYLIB_SRC" ]]; then
+  _abs="$(abspath_existing "$STEAM_DYLIB_SRC")"
+  [[ -n "${_abs:-}" ]] && STEAM_DYLIB_SRC="$_abs"
+fi
+unset _abs
+
 #
 # Validate required config early (fail fast with helpful messages)
 require_not_placeholder "REPO_ROOT" "$REPO_ROOT" "Example: /Users/you/Documents/Unreal Projects/MyGame"
+# At this point, autodetection should have filled these unless the repo is unusual.
 require_not_placeholder "UPROJECT_NAME" "$UPROJECT_NAME" "Example: MyGame.uproject"
+require_not_placeholder "UPROJECT_PATH" "$UPROJECT_PATH" "Example: /path/to/MyGame.uproject"
 require_not_placeholder "UE_ROOT" "$UE_ROOT" "Example: /Users/Shared/Epic Games/UE_5.7"
 require_not_placeholder "DEVELOPMENT_TEAM" "$DEVELOPMENT_TEAM" "Example: ABCDE12345"
 require_not_placeholder "SIGN_IDENTITY" "$SIGN_IDENTITY" "Example: Developer ID Application: Your Company (ABCDE12345)"
-require_not_placeholder "EXPORT_PLIST" "$EXPORT_PLIST" "Point at an ExportOptions.plist compatible with Developer ID exports"
 require_not_placeholder "SHORT_NAME" "$SHORT_NAME" "Example: MG"
 require_not_placeholder "LONG_NAME" "$LONG_NAME" "Example: MyGame"
 
-# These are only required if you are using the Xcode archive/export steps.
-require_not_placeholder "XCODE_WORKSPACE" "$XCODE_WORKSPACE" "Example: YourProject (Mac).xcworkspace"
-require_not_placeholder "XCODE_SCHEME" "$XCODE_SCHEME" "Example: YourProject"
+# Xcode inputs are only required if you use the Xcode archive/export steps.
+if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+  # Ensure derived paths are available to autodetect.
+  WORKSPACE="${WORKSPACE:-$REPO_ROOT/$XCODE_WORKSPACE}"
+  SCHEME="$XCODE_SCHEME"
 
-warn_if_has_spaces() {
-  local name="$1"; local value="$2"
-  if [[ "$value" == *" "* ]]; then
-    warn "$name contains spaces: '$value'"
-    warn "  This is supported, but can complicate CI/shell scripts. Consider renaming to remove spaces if you're early in the project."
-  fi
-}
+  # Try auto-detect first (helps new users).
+  autodetect_workspace_if_needed
+  autodetect_scheme_if_needed
 
-warn_if_has_spaces "REPO_ROOT" "$REPO_ROOT"
-warn_if_has_spaces "UPROJECT_NAME" "$UPROJECT_NAME"
-warn_if_has_spaces "XCODE_WORKSPACE" "$XCODE_WORKSPACE"
-warn_if_has_spaces "XCODE_SCHEME" "$XCODE_SCHEME"
-warn_if_has_spaces "SHORT_NAME" "$SHORT_NAME"
-warn_if_has_spaces "LONG_NAME" "$LONG_NAME"
+  require_not_placeholder "EXPORT_PLIST" "$EXPORT_PLIST" "Point at an ExportOptions.plist compatible with Developer ID exports"
+  require_not_placeholder "XCODE_WORKSPACE" "$XCODE_WORKSPACE" "Example: YourProject (Mac).xcworkspace"
+  require_not_placeholder "XCODE_SCHEME" "$XCODE_SCHEME" "Example: YourProject"
+fi
 
-# Only required if you enable notarization.
-if [[ "${NOTARIZE_OVERRIDE:-}" == "yes" || "${NOTARIZE_OVERRIDE:-}" == "no" ]]; then
-  : # validated later
+
+# Notary profile is only required if we actually notarize.
+# If NOTARY_PROFILE is missing, we'll automatically skip notarization/stapling and explain how to configure it.
+if [[ "${NOTARIZE_OVERRIDE:-}" == "yes" ]]; then
+  : # user explicitly requested notarization; we'll validate later
+elif [[ "${NOTARIZE_OVERRIDE:-}" == "no" ]]; then
+  : # user explicitly disabled notarization
 else
-  # If they don't override, we'll ask; still validate placeholder now so the prompt doesn't hide a misconfig.
-  require_not_placeholder "NOTARY_PROFILE" "$NOTARY_PROFILE" "Run: xcrun notarytool store-credentials \"NAME\" ..."
+  : # we may ask later; do not fail early
 fi
 
 # Optional Steam validation (only when enabled)
 if [[ "$ENABLE_STEAM" == "1" ]]; then
   if is_placeholder "$STEAM_DYLIB_SRC"; then
-    die "ENABLE_STEAM=1 but STEAM_DYLIB_SRC is not set. Point it at libsteam_api.dylib or set ENABLE_STEAM=0."
+    die "ENABLE_STEAM=1 but STEAM_DYLIB_SRC is not set. The script tried to infer it from UE_ROOT but couldn't. Provide it via --steam-dylib-src (or env/USER CONFIG), or set ENABLE_STEAM=0."
   fi
 fi
 
 # Ask up-front (unless overridden)
 if [[ -n "${BUILD_TYPE_OVERRIDE:-}" ]]; then
-  case "${BUILD_TYPE_OVERRIDE,,}" in
+  # bash 3.2 compatibility: lowercase via tr
+  _bto_lower="$(echo "$BUILD_TYPE_OVERRIDE" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+  case "$_bto_lower" in
     shipping|s)    BUILD_TYPE="s" ;;
     development|d) BUILD_TYPE="d" ;;
     *) die "BUILD_TYPE_OVERRIDE must be 'shipping' or 'development'" ;;
   esac
+  unset _bto_lower
 else
   read -r -p "Build type? (s=shipping, d=development) [s]: " BUILD_TYPE
   BUILD_TYPE=${BUILD_TYPE:-s}
@@ -236,11 +1079,14 @@ else
 fi
 
 if [[ -n "${NOTARIZE_OVERRIDE:-}" ]]; then
-  case "${NOTARIZE_OVERRIDE,,}" in
+  # bash 3.2 compatibility: lowercase via tr
+  _no_lower="$(echo "$NOTARIZE_OVERRIDE" | /usr/bin/tr '[:upper:]' '[:lower:]')"
+  case "$_no_lower" in
     yes|y) DO_NOTARIZE=0 ;;
     no|n)  DO_NOTARIZE=1 ;;
     *) die "NOTARIZE_OVERRIDE must be 'yes' or 'no'" ;;
   esac
+  unset _no_lower
 else
   read -r -p "Notarize + staple this build? (Y/n) " NOTARIZE_ANSWER
   if [[ "${NOTARIZE_ANSWER:-Y}" =~ ^[Nn]$ ]]; then
@@ -248,6 +1094,31 @@ else
   else
     DO_NOTARIZE=0
   fi
+fi
+
+# If notarization was requested but NOTARY_PROFILE isn't configured, auto-skip with guidance.
+if [[ "$DO_NOTARIZE" -eq 0 ]] && is_placeholder "$NOTARY_PROFILE"; then
+  warn "Notarization requested, but NOTARY_PROFILE is not configured."
+  warn "Skipping notarization + stapling for this run."
+  warn "To enable notarization, create a keychain profile and provide it via one of:"
+  warn "  - Edit this script: set NOTARY_PROFILE_DEFAULT (or export NOTARY_PROFILE)"
+  warn "  - CLI flag: --notary-profile \"MyNotaryProfile\""
+  warn "Create the profile once with:" 
+  warn "  xcrun notarytool store-credentials \"MyNotaryProfile\" --apple-id \"you@example.com\" --team-id \"$DEVELOPMENT_TEAM\" --password \"app-specific-password\""
+  DO_NOTARIZE=1
+fi
+
+# Print resolved config and/or exit early if requested.
+if [[ "$PRINT_CONFIG" == "1" ]]; then
+  print_config
+  exit 0
+fi
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  print_config
+  echo "== DRY RUN ==" >&3
+  echo "Would run: UAT BuildCookRun → (optional) Xcode archive/export → codesign → (optional) notarize+staple" >&3
+  exit 0
 fi
 
 # Optional Steam overrides
@@ -267,7 +1138,7 @@ LOG_FILE="$LOG_DIR/build_$(date +%Y-%m-%d_%H-%M-%S).log"
 exec >>"$LOG_FILE" 2>&1
 echo "Log file: $LOG_FILE" >&3
 
-trap 'echo "❌ Script failed at line $LINENO" >&3; exit 1' ERR
+trap 'echo "❌ Script failed at line $LINENO" >&3; if [[ "${PRINT_CONFIG:-0}" == "1" ]]; then print_config; fi; exit 1' ERR
 
 # Build outputs
 ARCHIVE_PATH="$BUILD_DIR/${SHORT_NAME}.xcarchive"
@@ -278,7 +1149,11 @@ ZIP_PATH="$BUILD_DIR/${LONG_NAME}.zip"
 ### ===================================
 
 echo "== Prep output locations ==" >&3
-rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR" "$ZIP_PATH" "$BUILD_DIR"
+rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR" "$ZIP_PATH"
+if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
+  warn "CLEAN_BUILD_DIR=1 — wiping entire build dir: $BUILD_DIR"
+  rm -rf "$BUILD_DIR"
+fi
 mkdir -p "$BUILD_DIR"
 
 info "Sanity checks"
@@ -290,20 +1165,28 @@ info "Sanity checks"
 [[ -x "$SCRIPTS/RunUAT.sh" ]] || die "RunUAT.sh not executable or missing: $SCRIPTS/RunUAT.sh"
 [[ -x "$UE_EDITOR" ]] || die "UnrealEditor not found/executable: $UE_EDITOR"
 
-# Xcode workspaces are directory bundles (".xcworkspace" folders), not regular files.
-[[ -d "$WORKSPACE" ]] || die "Xcode workspace not found (expected a .xcworkspace directory): $WORKSPACE"
-command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found. Install Xcode and the Command Line Tools."
+# Tools used later
 command -v codesign  >/dev/null 2>&1 || die "codesign not found (unexpected on macOS)."
+
+# Xcode steps are optional
+if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+  # Xcode workspaces are directory bundles (".xcworkspace" folders), not regular files.
+  [[ -d "$WORKSPACE" ]] || die "Xcode workspace not found (expected a .xcworkspace directory): $WORKSPACE"
+  command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found. Install Xcode and the Command Line Tools."
+fi
 
 # Notarization requires Apple tools and a configured notary profile
 if [[ "$DO_NOTARIZE" -eq 0 ]]; then
   command -v xcrun >/dev/null 2>&1 || die "xcrun not found. Install Xcode Command Line Tools."
-  # We validated NOTARY_PROFILE earlier, but double-check here for clarity.
-  require_not_placeholder "NOTARY_PROFILE" "$NOTARY_PROFILE" "Run: xcrun notarytool store-credentials \"NAME\" ..."
+  if is_placeholder "$NOTARY_PROFILE"; then
+    die "Internal error: DO_NOTARIZE=0 but NOTARY_PROFILE is not configured (should have been auto-disabled earlier)."
+  fi
 fi
 
 # Export options plist must exist if you are exporting
-[[ -f "$EXPORT_PLIST" ]] || die "ExportOptions.plist not found: $EXPORT_PLIST"
+if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+  [[ -f "$EXPORT_PLIST" ]] || die "ExportOptions.plist not found: $EXPORT_PLIST"
+fi
 
 echo "== Building Game ==" >&3
 
@@ -318,32 +1201,48 @@ echo "== Building Game ==" >&3
 
 echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3
 
-echo "== Archive (NO CLEAN) with Automatic signing ==" >&3
-xcodebuild \
-  -workspace "$WORKSPACE" \
-  -scheme "$SCHEME" \
-  -configuration "$XCODE_CONFIG" \
-  -archivePath "$ARCHIVE_PATH" \
-  archive \
-  CODE_SIGN_STYLE=Automatic \
-  DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
-  ENABLE_HARDENED_RUNTIME=YES \
-  OTHER_CODE_SIGN_FLAGS="--timestamp"
+if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+  echo "== Archive (NO CLEAN) with Automatic signing ==" >&3
+  xcodebuild \
+    -workspace "$WORKSPACE" \
+    -scheme "$SCHEME" \
+    -configuration "$XCODE_CONFIG" \
+    -archivePath "$ARCHIVE_PATH" \
+    archive \
+    CODE_SIGN_STYLE=Automatic \
+    DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+    ENABLE_HARDENED_RUNTIME=YES \
+    OTHER_CODE_SIGN_FLAGS="--timestamp"
 
-echo "== Export signed app for Developer ID ==" >&3
-# Minimal ExportOptions for direct download (Developer ID).
-# If you don't already have it, create the file with the XML below.
-xcodebuild -exportArchive \
-  -archivePath "$ARCHIVE_PATH" \
-  -exportPath "$EXPORT_DIR" \
-  -exportOptionsPlist "$EXPORT_PLIST"
+  echo "== Export signed app for Developer ID ==" >&3
+  # Minimal ExportOptions for direct download (Developer ID).
+  # If you don't already have it, create the file with the XML below.
+  xcodebuild -exportArchive \
+    -archivePath "$ARCHIVE_PATH" \
+    -exportPath "$EXPORT_DIR" \
+    -exportOptionsPlist "$EXPORT_PLIST"
+else
+  info "USE_XCODE_EXPORT=0 — skipping Xcode archive/export"
+fi
 
-# Locate the exported .app (name can vary; glob safely)
-APP_PATH="$(/usr/bin/find "$EXPORT_DIR" -maxdepth 1 -type d -name '*.app' -print -quit)"
-if [[ -z "${APP_PATH:-}" ]]; then
-  echo "ERROR: No .app found in export dir: $EXPORT_DIR" >&3
-  ls -la "$EXPORT_DIR" || true
-  exit 2
+# Locate the .app bundle.
+# - If using Xcode export, it should be in EXPORT_DIR.
+# - If skipping Xcode, it should be somewhere under BUILD_DIR (UAT output layout varies).
+if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+  APP_PATH="$(find_first_app_under "$EXPORT_DIR")"
+  if [[ -z "${APP_PATH:-}" ]]; then
+    echo "ERROR: No .app found under export dir: $EXPORT_DIR" >&3
+    ls -la "$EXPORT_DIR" || true
+    exit 2
+  fi
+else
+  APP_PATH="$(find_first_app_under "$BUILD_DIR")"
+  if [[ -z "${APP_PATH:-}" ]]; then
+    echo "ERROR: No .app found under build dir: $BUILD_DIR" >&3
+    echo "UAT output layouts differ by project/settings. Try enabling Xcode export (USE_XCODE_EXPORT=1) or point the script at the correct output." >&3
+    ls -la "$BUILD_DIR" || true
+    exit 2
+  fi
 fi
 
 echo "WRITE_STEAM_APPID: $WRITE_STEAM_APPID" >&3
@@ -385,10 +1284,11 @@ else
   info "Steam disabled (ENABLE_STEAM=0) — skipping libsteam_api.dylib staging"
 fi
 
+TMP_PREFIX="$(sanitize_name_for_tmp "$SHORT_NAME")"
 # Entitlements: hardened runtime is required for Developer ID signing.
 # Steam overlay / Steam client libraries may require disabling library validation.
 # Only enable those entitlements when you actually need them.
-ENTITLEMENTS_FILE="$(/usr/bin/mktemp -t ${SHORT_NAME}_entitlements_XXXXXX.plist)"
+ENTITLEMENTS_FILE="$(/usr/bin/mktemp -t ${TMP_PREFIX}_entitlements_XXXXXX.plist)"
 
 if [[ "$ENABLE_STEAM" == "1" ]]; then
   cat > "$ENTITLEMENTS_FILE" <<'PLIST'

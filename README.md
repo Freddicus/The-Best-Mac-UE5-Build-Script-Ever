@@ -7,6 +7,12 @@
 
 A pragmatic bash script for building a macOS **Developer ID** distributable from an Unreal Engine project, with optional notarization and optional Steam runtime tweaks.
 
+In many cases, the “easy mode” is:
+- drop this script into your project root
+- create a `.env` next to it
+- set your Team ID + signing identity (and an ExportOptions.plist if you’re using Xcode export)
+- run it
+
 This exists because: **shipping macOS builds is not “just click Package”** — especially once you care about hardened runtime, notarization, and making a build that works on a different Mac.
 
 ## What this script does
@@ -23,7 +29,7 @@ This exists because: **shipping macOS builds is not “just click Package”** �
    - Writes/removes `steam_appid.txt` for local non-launcher testing.
    - Adds entitlements commonly needed for Steam overlay / client-injected libs.
 
-The script logs everything to a timestamped file under `Logs/script-logs/`, while still printing human-friendly status lines to your terminal.
+The script logs everything to a timestamped file under `Logs/`, while still printing human-friendly status lines to your terminal.
 
 ## Why this is necessary (macOS reality check)
 
@@ -59,12 +65,12 @@ Unreal does **not** automatically keep this up to date, and it will not exist at
 A simple, reliable way to generate (or regenerate) it on macOS is:
 
 ```bash
-#!/usr/bin/env bash
-SCRIPTS="/Users/Shared/Epic Games/UE_5.7/Engine/Build/BatchFiles"
+UE_ROOT="/Users/Shared/Epic Games/UE_5.x"   # change this
+SCRIPTS="$UE_ROOT/Engine/Build/BatchFiles"
 
 "$SCRIPTS/Mac/GenerateProjectFiles.sh" \
-    -project="<path_to_project>/<project_file>.uproject" \
-    -game
+  -project="<path_to_project>/<project_file>.uproject" \
+  -game
 ```
 
 This will create (or refresh) a `.xcworkspace` next to your `.uproject`.  
@@ -78,8 +84,9 @@ If your workspace is missing, stale, or Xcode can’t find your scheme, regenera
 
 ## Quick Start
 
-1. **Copy the script** into your project tooling folder.
-2. Open it and replace all `__REPLACE_ME__` placeholders in the **USER CONFIG** section.
+1. **Copy the script** into your project root (the folder that contains the `.uproject`).
+2. Recommended: create a `.env` file next to the script and set your values there.
+   - You can also edit the script and replace `__REPLACE_ME__` placeholders in the **USER CONFIG** section.
 3. Run:
 
 ```bash
@@ -93,15 +100,31 @@ You’ll be prompted for:
 
 ## Configuration
 
-> **Naming note:** While macOS supports spaces in paths and filenames, they can complicate shell scripts and CI pipelines.  This script supports spaces but will emit warnings. If you are early in a project, consider using space-free names for `SHORT_NAME`, `LONG_NAME`, and your Xcode scheme.
+Recommended: use a `.env` file (no script edits)
 
-Recommended: use environment variables (no file edits)
+Create a file named `.env` next to the script. It’s sourced as shell code, so only use a `.env` you trust.
+
+Minimum you’ll usually need:
+```bash
+DEVELOPMENT_TEAM="ABCDE12345"
+SIGN_IDENTITY="Developer ID Application: My Company (ABCDE12345)"
+
+# If using Xcode export (default), point at an ExportOptions.plist
+EXPORT_PLIST="$PWD/ExportOptions.plist"
+
+# If notarizing, provide your notarytool profile name
+NOTARY_PROFILE="MyNotaryProfileName"
+```
+
+The script automatically loads `.env` if it exists in the same folder as the script.
+
+You can still use environment variables (no file edits)
 
 Example:
 ```bash
 export REPO_ROOT="/Users/you/Documents/Unreal Projects/MyGame"
 export UPROJECT_NAME="MyGame.uproject"
-export UE_ROOT="/Users/Shared/Epic Games/UE_5.6"
+export UE_ROOT="/Users/Shared/Epic Games/UE_5.x"   # optional; the script can auto-detect common EGL installs
 export XCODE_WORKSPACE="MyGame (Mac).xcworkspace"
 export XCODE_SCHEME="MyGame"
 export DEVELOPMENT_TEAM="ABCDE12345"
@@ -175,7 +198,7 @@ Artifacts go under (names derived from `SHORT_NAME` / `LONG_NAME`):
 - `Build/${SHORT_NAME}.xcarchive` — Xcode archive
 - `Build/${SHORT_NAME}-export/*.app` — exported app
 - `Build/${LONG_NAME}.zip` — zip used for notarization (name is cosmetic)
-- `Logs/script-logs/build_YYYY-MM-DD_HH-MM-SS.log` — full build log
+- `Logs/build_YYYY-MM-DD_HH-MM-SS.log` — full build log
 
 ## Troubleshooting checklist
 - **Placeholders:** if the script stops immediately, you probably left `__REPLACE_ME__` somewhere.
