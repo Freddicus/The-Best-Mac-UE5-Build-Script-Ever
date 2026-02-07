@@ -94,7 +94,7 @@ If your workspace or scheme cannot be resolved automatically, the script will gu
 
 1. **Copy the script** into your project root (the folder that contains the `.uproject`).
 2. Recommended: create a `.env` file next to the script and set your values there.
-   - You generally should **not** need to edit the script itself.
+   - Configuration is via `.env`, environment variables, or CLI flags.
    - You do **not** need to pre-generate an Xcode workspace; the script will locate or generate one if needed.
 3. Run:
 
@@ -138,7 +138,7 @@ You can still use environment variables (no file edits)
 Example:
 ```bash
 export REPO_ROOT="/Users/you/Documents/Unreal Projects/MyGame"
-export UPROJECT_NAME="MyGame.uproject"
+export UPROJECT_PATH="/Users/you/Documents/Unreal Projects/MyGame/MyGame.uproject"
 export UE_ROOT="/Users/Shared/Epic Games/UE_5.x"   # optional; the script can auto-detect common EGL installs
 export XCODE_WORKSPACE="MyGame (Mac).xcworkspace"
 export XCODE_SCHEME="MyGame"
@@ -157,8 +157,8 @@ Optional: skip prompts (CI-friendly)
 Set these via `.env`, environment variables, or CLI flags:
 
 ```bash
-# BUILD_TYPE_OVERRIDE="shipping"      # "shipping" or "development"
-# NOTARIZE_OVERRIDE="yes"             # "yes" or "no"
+# BUILD_TYPE="shipping"      # "shipping" or "development" (or s/d)
+# NOTARIZE="yes"             # "yes" or "no"
 ```
 
 ### About the Xcode scheme (and why it matters)
