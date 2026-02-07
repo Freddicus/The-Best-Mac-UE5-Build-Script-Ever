@@ -296,9 +296,6 @@ autodetect_workspace_guess_if_needed() {
   fi
 }
 
-# Offer to generate the Xcode workspace using Unreal's GenerateProjectFiles script.
-# Only runs in interactive terminals.
-# Requires UE_ROOT and UPROJECT_PATH.
 maybe_generate_workspace_interactively() {
   # Offer to generate the Xcode workspace using Unreal's GenerateProjectFiles script.
   # Only runs in interactive terminals.
@@ -1295,7 +1292,7 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   [[ -f "$EXPORT_PLIST" ]] || die "ExportOptions.plist not found: $EXPORT_PLIST"
 fi
 
-echo "== Building Game ==" >&3
+info "Building game (UAT BuildCookRun)"
 
 "$SCRIPTS/RunUAT.sh" BuildCookRun \
   -unrealexe="$UE_EDITOR" \
@@ -1322,8 +1319,8 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     OTHER_CODE_SIGN_FLAGS="--timestamp"
 
   echo "== Export signed app for Developer ID ==" >&3
-  # Minimal ExportOptions for direct download (Developer ID).
-  # If you don't already have it, create the file with the XML below.
+  # ExportOptions.plist controls how Xcode exports the archive.
+  # This script expects you to provide one (and can auto-detect a suitable plist in repo root).
   xcodebuild -exportArchive \
     -archivePath "$ARCHIVE_PATH" \
     -exportPath "$EXPORT_DIR" \
@@ -1352,7 +1349,9 @@ else
   fi
 fi
 
-echo "WRITE_STEAM_APPID: $WRITE_STEAM_APPID" >&3
+if [[ "$ENABLE_STEAM" == "1" ]]; then
+  echo "WRITE_STEAM_APPID: $WRITE_STEAM_APPID" >&3
+fi
 echo "App: $APP_PATH" >&3
 
 if [[ "$ENABLE_STEAM" == "1" ]]; then
@@ -1519,7 +1518,11 @@ echo "  - If distributing direct-download, test on a separate Mac (or a clean us
 
 echo "✅ Done" >&3
 echo "App: $APP_PATH" >&3
-echo "Zip: $ZIP_PATH" >&3
+if [[ "$DO_NOTARIZE" -eq 0 ]]; then
+  echo "Zip: $ZIP_PATH" >&3
+else
+  echo "Zip: (not created — notarization skipped)" >&3
+fi
 
 # Cleanup temp entitlements file
 rm -f "$ENTITLEMENTS_FILE" 2>/dev/null || true
