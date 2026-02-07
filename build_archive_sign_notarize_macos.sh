@@ -296,6 +296,64 @@ autodetect_workspace_guess_if_needed() {
   fi
 }
 
+# Offer to generate the Xcode workspace using Unreal's GenerateProjectFiles script.
+# Only runs in interactive terminals.
+# Requires UE_ROOT and UPROJECT_PATH.
+maybe_generate_workspace_interactively() {
+  # Offer to generate the Xcode workspace using Unreal's GenerateProjectFiles script.
+  # Only runs in interactive terminals.
+  # Requires UE_ROOT and UPROJECT_PATH.
+
+  # If stdin is not a TTY, we cannot prompt.
+  if [[ ! -t 0 ]]; then
+    return 1
+  fi
+
+  local gen_script
+  gen_script="$UE_ROOT/Engine/Build/BatchFiles/Mac/GenerateProjectFiles.sh"
+
+  if [[ ! -x "$gen_script" ]]; then
+    warn "GenerateProjectFiles.sh not found/executable at: $gen_script"
+    warn "If you installed Unreal elsewhere, pass --ue-root or set UE_ROOT."
+    return 1
+  fi
+
+  echo "No .xcworkspace found." >&3
+  echo "I can try to generate it now using Unreal's GenerateProjectFiles." >&3
+  read -r -p "Generate Xcode workspace now? (Y/n) " ans
+  if [[ "${ans:-Y}" =~ ^[Nn]$ ]]; then
+    return 1
+  fi
+
+  info "Generating Xcode workspace via GenerateProjectFiles.sh"
+  "$gen_script" -project="$UPROJECT_PATH" -game
+  return 0
+}
+
+choose_from_list_interactively() {
+  # Prompt user to choose a numbered item from an array.
+  # Args: prompt, default_index (1-based), array...
+  local prompt="$1"
+  local default_idx="$2"
+  shift 2
+  local items=("$@")
+
+  if [[ ! -t 0 ]]; then
+    echo ""; return 1
+  fi
+
+  local choice
+  read -r -p "$prompt [$default_idx]: " choice
+  choice="${choice:-$default_idx}"
+
+  if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#items[@]}" ]]; then
+    echo "${items[$((choice-1))]}"
+    return 0
+  fi
+
+  echo ""; return 1
+}
+
 autodetect_export_plist_if_needed() {
   # If EXPORT_PLIST is placeholder, try to locate an ExportOptions.plist in the repo root.
   # Heuristic: a candidate plist contains destination=export, e.g.
@@ -415,47 +473,96 @@ autodetect_workspace_if_needed() {
       WORKSPACE="${found[0]}"
       info "Auto-detected workspace: $WORKSPACE"
     elif [[ "${#found[@]}" -eq 0 ]]; then
-      die "No .xcworkspace found under REPO_ROOT. Generate it (GenerateProjectFiles) or set XCODE_WORKSPACE."
-    else
-      # Common Unreal output: both "<Project> (iOS).xcworkspace" and "<Project> (Mac).xcworkspace".
-      # Prefer the macOS workspace automatically when present.
-      local mac_found=()
-      local p
-      for p in "${found[@]}"; do
-        if [[ "$p" == *" (Mac).xcworkspace" ]]; then
-          mac_found+=("$p")
+      # Offer to generate the workspace interactively.
+      if maybe_generate_workspace_interactively; then
+        # Re-scan after generation.
+        found=()
+        while IFS= read -r line; do
+          [[ -n "$line" ]] && found+=("$line")
+        done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 2 -type d -name '*.xcworkspace' 2>/dev/null)
+
+        if [[ "${#found[@]}" -eq 1 ]]; then
+          XCODE_WORKSPACE="$(/usr/bin/basename "${found[0]}")"
+          WORKSPACE="${found[0]}"
+          info "Auto-detected workspace after generation: $WORKSPACE"
+          return 0
+        fi
+
+        # Fall through to multi-candidate handling below.
+        if [[ "${#found[@]}" -eq 0 ]]; then
+          die "GenerateProjectFiles completed, but no .xcworkspace was found under REPO_ROOT. Set XCODE_WORKSPACE explicitly."
+        fi
+      else
+        die "No .xcworkspace found under REPO_ROOT. Generate it (GenerateProjectFiles) or set XCODE_WORKSPACE."
+      fi
+    fi
+
+    # At this point we have 2+ candidates.
+    # Common Unreal output: both "<Project> (iOS).xcworkspace" and "<Project> (Mac).xcworkspace".
+    # Prefer the macOS workspace automatically when present.
+    local mac_found=()
+    local p
+    for p in "${found[@]}"; do
+      if [[ "$p" == *" (Mac).xcworkspace" ]]; then
+        mac_found+=("$p")
+      fi
+    done
+
+    if [[ "${#mac_found[@]}" -eq 1 ]]; then
+      XCODE_WORKSPACE="$(/usr/bin/basename "${mac_found[0]}")"
+      WORKSPACE="${mac_found[0]}"
+      info "Auto-selected macOS workspace: $WORKSPACE"
+
+    elif [[ "${#mac_found[@]}" -gt 1 ]]; then
+      # If there are multiple macOS workspaces, prefer the one that matches the project naming convention.
+      local base expected matches=()
+      base="${UPROJECT_NAME%.uproject}"
+      expected="$REPO_ROOT/${base} (Mac).xcworkspace"
+
+      for p in "${mac_found[@]}"; do
+        if [[ "$p" == "$expected" ]]; then
+          matches+=("$p")
         fi
       done
 
-      if [[ "${#mac_found[@]}" -eq 1 ]]; then
-        XCODE_WORKSPACE="$(/usr/bin/basename "${mac_found[0]}")"
-        WORKSPACE="${mac_found[0]}"
-        info "Auto-selected macOS workspace: $WORKSPACE"
-      elif [[ "${#mac_found[@]}" -gt 1 ]]; then
-        # If there are multiple macOS workspaces, prefer the one that matches the project naming convention.
-        local base expected matches=()
-        base="${UPROJECT_NAME%.uproject}"
-        expected="$REPO_ROOT/${base} (Mac).xcworkspace"
-
+      if [[ "${#matches[@]}" -eq 1 ]]; then
+        XCODE_WORKSPACE="$(/usr/bin/basename "${matches[0]}")"
+        WORKSPACE="${matches[0]}"
+        info "Auto-selected macOS workspace (matched convention): $WORKSPACE"
+      else
+        echo "Found multiple macOS .xcworkspace candidates:" >&3
+        local i=1
         for p in "${mac_found[@]}"; do
-          if [[ "$p" == "$expected" ]]; then
-            matches+=("$p")
-          fi
+          echo "  [$i] $p" >&3
+          i=$((i+1))
         done
 
-        if [[ "${#matches[@]}" -eq 1 ]]; then
-          XCODE_WORKSPACE="$(/usr/bin/basename "${matches[0]}")"
-          WORKSPACE="${matches[0]}"
-          info "Auto-selected macOS workspace (matched convention): $WORKSPACE"
+        local chosen
+        chosen="$(choose_from_list_interactively "Select macOS workspace" 1 "${mac_found[@]}")"
+        if [[ -n "$chosen" ]]; then
+          XCODE_WORKSPACE="$(/usr/bin/basename "$chosen")"
+          WORKSPACE="$chosen"
+          info "Selected macOS workspace: $WORKSPACE"
         else
-          echo "Found multiple macOS .xcworkspace candidates:" >&3
-          printf '  - %s\n' "${mac_found[@]}" >&3
-          die "Multiple macOS workspaces found. Set XCODE_WORKSPACE explicitly."
+          die "Multiple macOS workspaces found. Set XCODE_WORKSPACE explicitly (or run interactively to choose)."
         fi
+      fi
+    else
+      # No macOS workspace found — show candidates and offer selection.
+      echo "Found multiple .xcworkspace candidates (none look like '(Mac).xcworkspace'):" >&3
+      local i=1
+      for p in "${found[@]}"; do
+        echo "  [$i] $p" >&3
+        i=$((i+1))
+      done
+
+      local chosen
+      chosen="$(choose_from_list_interactively "Select workspace" 1 "${found[@]}")"
+      if [[ -n "$chosen" ]]; then
+        XCODE_WORKSPACE="$(/usr/bin/basename "$chosen")"
+        WORKSPACE="$chosen"
+        info "Selected workspace: $WORKSPACE"
       else
-        # No macOS workspace found — show candidates and instruct.
-        echo "Found multiple .xcworkspace candidates (but none look like a macOS workspace):" >&3
-        printf '  - %s\n' "${found[@]}" >&3
         die "No '(Mac).xcworkspace' found. Generate Mac project files or set XCODE_WORKSPACE explicitly."
       fi
     fi
