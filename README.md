@@ -1,4 +1,4 @@
-> **About this README**  
+**About this README**  
 > This README and shell script were written with the help of a large language model, and it represents the *end result* of many back‑and‑forths, dead ends, and genuine frustration while trying to ship a signed and notarized macOS Unreal build.  
 > 
 > I’m sharing it because getting all of this right was *hard enough* that it felt irresponsible not to document it once it finally worked.
@@ -10,7 +10,7 @@ A pragmatic bash script for building a macOS **Developer ID** distributable from
 In many cases, the “easy mode” is:
 - drop this script into your project root
 - create a `.env` next to it
-- set your Team ID + signing identity (and an ExportOptions.plist if you’re using Xcode export)
+- set your Team ID + signing identity (an ExportOptions.plist can be provided or generated automatically)
 - run it
 
 This exists because: **shipping macOS builds is not “just click Package”** — especially once you care about hardened runtime, notarization, and making a build that works on a different Mac.
@@ -18,7 +18,7 @@ This exists because: **shipping macOS builds is not “just click Package”** �
 ## What this script does
 
 1. **Build + Cook + Stage + Package** the project using Unreal Automation Tool (`RunUAT.sh BuildCookRun`).
-2. **Create an Xcode archive** (`.xcarchive`) using `xcodebuild archive`.
+2. **Locate or generate an Xcode workspace**, then create an Xcode archive (`.xcarchive`) using `xcodebuild archive`.
 3. **Export a signed `.app`** using `xcodebuild -exportArchive` + your `ExportOptions.plist`.
 4. Optionally:
    - **Notarize** the exported app (zip → `notarytool submit` → wait).
@@ -57,12 +57,20 @@ This script is that glue.
 - Xcode installed (and Command Line Tools)
 - Unreal Engine installed (any UE5.x — you configure the path)
 
-### Generating the Xcode workspace (.xcworkspace)
+### Xcode workspace handling (.xcworkspace)
 
-This script assumes you already have an Xcode workspace generated for your Unreal project.
-Unreal does **not** automatically keep this up to date, and it will not exist at all unless you generate it.
+This script **does not require you to manually manage your Xcode workspace in advance**.
 
-A simple, reliable way to generate (or regenerate) it on macOS is:
+When Xcode export is enabled:
+
+- If **exactly one** `.xcworkspace` is found, it is used automatically.
+- If **multiple** workspaces are found, you’ll be prompted to choose one (interactive shells only).
+- If **no workspace** is found, the script will offer to **generate it on the fly** using Unreal’s
+  `GenerateProjectFiles.sh`.
+
+In non-interactive contexts (CI), the script will fail with a clear error if it cannot uniquely determine which workspace to use.
+
+If you ever want to generate or regenerate the workspace manually, this is the underlying command:
 
 ```bash
 UE_ROOT="/Users/Shared/Epic Games/UE_5.x"   # change this
@@ -74,7 +82,7 @@ SCRIPTS="$UE_ROOT/Engine/Build/BatchFiles"
 ```
 
 This will create (or refresh) a `.xcworkspace` next to your `.uproject`.  
-If your workspace is missing, stale, or Xcode can’t find your scheme, regenerate it before debugging anything else.
+If your workspace or scheme cannot be resolved automatically, the script will guide you interactively or fail with a clear message explaining what needs to be set explicitly.
 
 - Apple Developer account with:
   - Team ID
@@ -86,7 +94,8 @@ If your workspace is missing, stale, or Xcode can’t find your scheme, regenera
 
 1. **Copy the script** into your project root (the folder that contains the `.uproject`).
 2. Recommended: create a `.env` file next to the script and set your values there.
-   - You can also edit the script and replace `__REPLACE_ME__` placeholders in the **USER CONFIG** section.
+   - You generally should **not** need to edit the script itself.
+   - You do **not** need to pre-generate an Xcode workspace; the script will locate or generate one if needed.
 3. Run:
 
 ```bash
@@ -116,7 +125,13 @@ EXPORT_PLIST="$PWD/ExportOptions.plist"
 NOTARY_PROFILE="MyNotaryProfileName"
 ```
 
+
 The script automatically loads `.env` if it exists in the same folder as the script.
+
+If `EXPORT_PLIST` is not provided and no suitable ExportOptions.plist is found, the script will offer to
+**generate a minimal ExportOptions.plist interactively** (Developer ID export) using your configured Team ID.
+
+In CI or other non-interactive contexts, you must provide `EXPORT_PLIST` explicitly.
 
 You can still use environment variables (no file edits)
 
@@ -139,7 +154,7 @@ export LONG_NAME="MyGameFullName"
 
 Optional: skip prompts (CI-friendly)
 
-Uncomment and set these in the script:
+Set these via `.env`, environment variables, or CLI flags:
 
 ```bash
 # BUILD_TYPE_OVERRIDE="shipping"      # "shipping" or "development"
@@ -147,6 +162,8 @@ Uncomment and set these in the script:
 ```
 
 ### About the Xcode scheme (and why it matters)
+
+The script will attempt to auto-detect a reasonable default scheme, and will prompt you to choose one if multiple viable schemes exist. In CI or non-interactive runs, you must specify `XCODE_SCHEME` explicitly.
 
 The `XCODE_SCHEME` is the glue between Unreal’s generated Xcode project and the command‑line `xcodebuild` steps this script runs.
 
@@ -201,7 +218,8 @@ Artifacts go under (names derived from `SHORT_NAME` / `LONG_NAME`):
 - `Logs/build_YYYY-MM-DD_HH-MM-SS.log` — full build log
 
 ## Troubleshooting checklist
-- **Placeholders:** if the script stops immediately, you probably left `__REPLACE_ME__` somewhere.
+- **Missing configuration:** if the script stops immediately, a required value (such as `DEVELOPMENT_TEAM` or
+  `SIGN_IDENTITY`) was not provided via `.env`, environment variable, or CLI flag.
 - **Xcode scheme not found:** the scheme must be Shared in Xcode. (seen by `xcodebuild -list -workspace ...`)
 - **RunUAT.sh not found:** double check `UE_ROOT`.
 - **Notarization fails:** ensure your `NOTARY_PROFILE` exists and is valid:
