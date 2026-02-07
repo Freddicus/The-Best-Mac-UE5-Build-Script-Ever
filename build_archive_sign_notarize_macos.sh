@@ -31,7 +31,7 @@ if [[ -f "$ENV_FILE" ]]; then
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
-  echo "== Loaded .env: $ENV_FILE ==" >&3
+  info "Loaded .env: $ENV_FILE"
 fi
 
 ### ============================================================================
@@ -418,7 +418,59 @@ autodetect_export_plist_if_needed() {
     return 0
   fi
 
-  # No match found; leave placeholder and let validation explain next steps.
+  # No match found; offer to generate one interactively.
+  maybe_generate_export_plist_interactively || true
+}
+
+maybe_generate_export_plist_interactively() {
+  # Offer to generate a minimal ExportOptions.plist suitable for Developer ID exports.
+  # Only runs in interactive terminals.
+  # Uses DEVELOPMENT_TEAM for teamID.
+
+  if [[ ! -t 0 ]]; then
+    return 1
+  fi
+
+  local out
+  out="$REPO_ROOT/ExportOptions.plist"
+
+  echo "No ExportOptions.plist was detected." >&3
+  echo "I can generate a minimal one for Developer ID exports." >&3
+  echo "Team ID: $DEVELOPMENT_TEAM" >&3
+
+  local ans
+  read -r -p "Generate ExportOptions.plist at '$out'? (Y/n) " ans
+  if [[ "${ans:-Y}" =~ ^[Nn]$ ]]; then
+    return 1
+  fi
+
+  if [[ -f "$out" ]]; then
+    local ow
+    read -r -p "File already exists. Overwrite? (y/N) " ow
+    if [[ ! "${ow:-N}" =~ ^[Yy]$ ]]; then
+      return 1
+    fi
+  fi
+
+  info "Generating ExportOptions.plist: $out"
+  /bin/cat > "$out" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key><string>developer-id</string>
+  <key>teamID</key><string>$DEVELOPMENT_TEAM</string>
+  <key>signingStyle</key><string>automatic</string>
+  <key>destination</key><string>export</string>
+  <key>stripSwiftSymbols</key><true/>
+  <key>compileBitcode</key><false/>
+</dict>
+</plist>
+PLIST
+
+  # Point the script at the generated file.
+  EXPORT_PLIST="$out"
+  return 0
 }
 
 sanitize_name_for_tmp() {
