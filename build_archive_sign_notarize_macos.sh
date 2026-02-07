@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 
+### ============================================================================
+### DISPLAY / LOGGING
+### ============================================================================
+
+die()   { echo "❌ $*" >&3; exit 1; }
+error() { echo "ERROR: $*" >&3; }
+warn()  { echo "⚠️  $*" >&3; }
+good()  { echo "✅  $*" >&3; }
+info()  { echo "== $* ==" >&3; }
 
 set -euo pipefail
 
@@ -169,10 +178,6 @@ STEAM_DYLIB_SRC_DEFAULT=""
 ### ============================================================================
 ### INTERNALS
 ### ============================================================================
-
-die()  { echo "❌ $*" >&3; exit 1; }
-warn() { echo "⚠️  $*" >&3; }
-info() { echo "== $* ==" >&3; }
 
 is_placeholder() {
   # Treat empty/unset as "not configured".
@@ -480,12 +485,211 @@ PLIST
   return 0
 }
 
+
 sanitize_name_for_tmp() {
   # mktemp's -t template is happier without spaces/special chars.
   local v="$1"
   v="${v// /_}"
   v="${v//[^a-zA-Z0-9._-]/_}"
   echo "$v"
+}
+
+# -----------------------------------------------------------------------------
+# UE Apple_SDK.json Xcode version compatibility check (best-effort warning)
+# -----------------------------------------------------------------------------
+normalize_semver_3() {
+  # Normalize a version string to MAJOR.MINOR.PATCH (missing parts default to 0).
+  # Examples:
+  #   15      -> 15.0.0
+  #   15.2    -> 15.2.0
+  #   15.2.1  -> 15.2.1
+  local v="${1:-}"
+  [[ -n "$v" ]] || { echo ""; return 0; }
+
+  local major minor patch
+  major="${v%%.*}"
+  if [[ "$v" == *.* ]]; then
+    minor="${v#*.}"; minor="${minor%%.*}"
+  else
+    minor="0"
+  fi
+  if [[ "$v" == *.*.* ]]; then
+    patch="${v#*.*.}"
+  else
+    patch="0"
+  fi
+
+  echo "${major:-0}.${minor:-0}.${patch:-0}"
+}
+
+semver3_to_int() {
+  # Convert MAJOR.MINOR.PATCH to a comparable integer.
+  # Assumes each component < 1000.
+  local v
+  v="$(normalize_semver_3 "${1:-}")"
+  [[ -n "$v" ]] || { echo ""; return 0; }
+
+  local a b c
+  a="${v%%.*}"
+  b="${v#*.}"; b="${b%%.*}"
+  c="${v##*.}"
+
+  echo $((a*1000000 + b*1000 + c))
+}
+
+extract_json_string_value() {
+  # Best-effort extraction of a top-level JSON string field value.
+  # Example: extract_json_string_value file.json MinVersion
+  local file="$1"; local key="$2"
+  [[ -f "$file" ]] || { echo ""; return 0; }
+
+  /usr/bin/grep -E "\"${key}\"[[:space:]]*:[[:space:]]*\"" "$file" 2>/dev/null \
+    | /usr/bin/head -n 1 \
+    | /usr/bin/sed -E 's/.*"'"$key"'\"[[:space:]]*:[[:space:]]*\"([^\"]+)\".*/\1/' \
+    || true
+}
+
+extract_json_array_lines() {
+  # Extract raw lines between "AppleVersionToLLVMVersions" [ ... ] as a single stream.
+  local file="$1"
+  [[ -f "$file" ]] || { return 0; }
+
+  /usr/bin/awk '
+    BEGIN{in=0}
+    /"AppleVersionToLLVMVersions"[[:space:]]*:/ {in=1}
+    in {print}
+    in && /\]/ {exit}
+  ' "$file" 2>/dev/null || true
+}
+
+get_installed_xcode_version() {
+  # Returns Xcode version like 15.2 or empty.
+  local line
+  line="$(/usr/bin/xcodebuild -version 2>/dev/null | /usr/bin/head -n 1 || true)"
+  # Expected: "Xcode 15.2"
+  echo "$line" | /usr/bin/awk '{print $2}' 2>/dev/null || true
+}
+
+check_apple_sdk_json_compat() {
+  # NOTE: Apple_SDK.json describes supported Xcode versions for this UE install.
+  # It does NOT describe macOS versions.
+
+  local json="$UE_ROOT/Engine/Config/Apple/Apple_SDK.json"
+  if [[ ! -f "$json" ]]; then
+    info "Apple_SDK.json not found — skipping UE/Xcode compatibility check"
+    return 0
+  fi
+
+  local xcode_ver
+  xcode_ver="$(get_installed_xcode_version)"
+  if [[ -z "$xcode_ver" ]]; then
+    info "Xcode not detected — skipping UE/Xcode compatibility check"
+    return 0
+  fi
+
+  local xcode_norm
+  xcode_norm="$(normalize_semver_3 "$xcode_ver")"
+  info "Detected Xcode version: $xcode_norm"
+
+  local minv maxv
+  minv="$(extract_json_string_value "$json" "MinVersion")"
+  maxv="$(extract_json_string_value "$json" "MaxVersion")"
+
+  local x_i min_i max_i
+  x_i="$(semver3_to_int "$xcode_ver")"
+  min_i="$(semver3_to_int "$minv")"
+  max_i="$(semver3_to_int "$maxv")"
+
+  if [[ -n "$minv" && -n "$maxv" ]]; then
+    good "UE Apple_SDK.json Min/Max: $(normalize_semver_3 "$minv") .. $(normalize_semver_3 "$maxv")"
+  else
+    warn "UE Apple_SDK.json does not specify a MinVersion/MaxVersion"
+  fi
+
+  info "Checking Xcode version against AppleVersionToLLVMVersions mappings"
+
+  # 1) Range check: MinVersion <= Xcode <= MaxVersion
+  local range_ok=1
+  if [[ -n "$min_i" && -n "$x_i" && "$x_i" -lt "$min_i" ]]; then
+    range_ok=0
+  fi
+  if [[ -n "$max_i" && -n "$x_i" && "$x_i" -gt "$max_i" ]]; then
+    range_ok=0
+  fi
+
+  # 2) Mapping check: Xcode version appears in AppleVersionToLLVMVersions mappings.
+  # Be defensive here: malformed JSON should not kill the script.
+  local errexit_was_set=0
+  if [[ $- == *e* ]]; then
+    errexit_was_set=1
+    set +e
+  fi
+
+  local map_ok=0
+  local parse_issue=0
+
+  # Pull out quoted pairs like "16.0.0-17.0.6" (Xcode -> LLVM) from the whole file.
+  local ranges=()
+  local r
+  while IFS= read -r r; do
+    r="${r%\"}"; r="${r#\"}"
+    if [[ "$r" == *-* && "$r" == *.*.*-*.*.* ]]; then
+      ranges+=("$r")
+    fi
+  done < <(/usr/bin/grep -Eo '"[0-9]+\.[0-9]+\.[0-9]+-[0-9]+\.[0-9]+\.[0-9]+"' "$json" 2>/dev/null || true)
+
+  if [[ "${#ranges[@]}" -eq 0 ]]; then
+    parse_issue=1
+    error "Could not parse any AppleVersionToLLVMVersions entries from $json (mapping check skipped)."
+    map_ok=1
+  else
+    good "Found ${#ranges[@]} AppleVersionToLLVMVersions entries."
+  fi
+
+  local start end
+  for r in "${ranges[@]}"; do
+    start="${r%%-*}"
+    end="${r#*-}"
+    # Apple_SDK.json entries are "XcodeVersion-LLVMVersion" mappings.
+    if [[ -n "$start" && -n "$xcode_norm" && "$start" == "$xcode_norm" ]]; then
+      map_ok=1
+      break
+    fi
+  done
+
+  if [[ $errexit_was_set -eq 1 ]]; then
+    set -e
+  fi
+
+  if [[ "$range_ok" -eq 0 || "$map_ok" -eq 0 ]]; then
+    error "Xcode compatibility check FAILED. This WILL cause build failures with this UE install."
+    error "UE_ROOT: $UE_ROOT"
+    error "Apple SDK policy file: $json"
+    error "Detected Xcode: $xcode_norm"
+    if [[ -n "$minv" && -n "$maxv" ]]; then
+      error "Supported Xcode range (per Apple_SDK.json): $(normalize_semver_3 "$minv") .. $(normalize_semver_3 "$maxv")"
+    fi
+    if [[ "$range_ok" -eq 0 ]]; then
+      error "Detected Xcode is outside MinVersion/MaxVersion."
+    fi
+    if [[ "$map_ok" -eq 0 ]]; then
+      error "AppleVersionToLLVMVersions does not include this Xcode version."
+    fi
+    error "Fix: edit $json"
+    error "  - If needed, update MinVersion/MaxVersion to include $(normalize_semver_3 "$xcode_ver")"
+    error "  - Add a mapping entry that covers your Xcode version, e.g.:"
+    error "      \"$(normalize_semver_3 "$xcode_ver")-<LLVM_VERSION>\""
+    error "    (Use the LLVM version that ships with your Xcode toolchain.)"
+    error "    Version mapping can be found at https://en.wikipedia.org/wiki/Xcode#Toolchain_versions"
+    die "Xcode/UE toolchain policy mismatch. Update Apple_SDK.json and re-run."
+  fi
+
+  if [[ "$range_ok" -eq 1 ]]; then
+    good "Xcode version is within MinVersion/MaxVersion."
+  fi
+  if [[ "$map_ok" -eq 1 && "$parse_issue" -eq 0 ]]; then
+    good "Xcode version is covered by AppleVersionToLLVMVersions."
+  fi
 }
 
 print_config() {
@@ -1277,13 +1481,6 @@ if [[ "$PRINT_CONFIG" == "1" ]]; then
   exit 0
 fi
 
-if [[ "$DRY_RUN" == "1" ]]; then
-  print_config
-  echo "== DRY RUN ==" >&3
-  echo "Would run: UAT BuildCookRun → (optional) Xcode archive/export → codesign → (optional) notarize+staple" >&3
-  exit 0
-fi
-
 # Optional Steam overrides
 if [[ -n "${ENABLE_STEAM_OVERRIDE:-}" ]]; then
   ENABLE_STEAM="$ENABLE_STEAM_OVERRIDE"
@@ -1311,15 +1508,14 @@ ZIP_PATH="$BUILD_DIR/${LONG_NAME}.zip"
 # NOTE: ZIP_PATH name is cosmetic (uses LONG_NAME). Change LONG_NAME to match your game.
 ### ===================================
 
-echo "== Prep output locations ==" >&3
-rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR" "$ZIP_PATH"
-if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
-  warn "CLEAN_BUILD_DIR=1 — wiping entire build dir: $BUILD_DIR"
-  rm -rf "$BUILD_DIR"
-fi
-mkdir -p "$BUILD_DIR"
-
 info "Sanity checks"
+
+# Best-effort: warn if the installed Xcode version looks outside this UE install's Apple toolchain policy.
+# (Apple_SDK.json is a UE file; it primarily constrains Xcode versions.)
+if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+  info "Checking Xcode compatibility against Unreal Engine Apple_SDK.json"
+  check_apple_sdk_json_compat || true
+fi
 
 # Basic file existence checks
 [[ -d "$REPO_ROOT" ]] || die "REPO_ROOT does not exist: $REPO_ROOT"
@@ -1350,6 +1546,21 @@ fi
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   [[ -f "$EXPORT_PLIST" ]] || die "ExportOptions.plist not found: $EXPORT_PLIST"
 fi
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  print_config
+  echo "== DRY RUN ==" >&3
+  echo "Would run: UAT BuildCookRun → (optional) Xcode archive/export → codesign → (optional) notarize+staple" >&3
+  exit 0
+fi
+
+echo "== Prep output locations ==" >&3
+rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR" "$ZIP_PATH"
+if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
+  warn "CLEAN_BUILD_DIR=1 — wiping entire build dir: $BUILD_DIR"
+  rm -rf "$BUILD_DIR"
+fi
+mkdir -p "$BUILD_DIR"
 
 info "Building game (UAT BuildCookRun)"
 
