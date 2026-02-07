@@ -138,7 +138,7 @@ You can still use environment variables (no file edits)
 Example:
 ```bash
 export REPO_ROOT="/Users/you/Documents/Unreal Projects/MyGame"
-export UPROJECT_NAME="MyGame.uproject"
+export UPROJECT_PATH="/Users/you/Documents/Unreal Projects/MyGame/MyGame.uproject"
 export UE_ROOT="/Users/Shared/Epic Games/UE_5.x"   # optional; the script can auto-detect common EGL installs
 export XCODE_WORKSPACE="MyGame (Mac).xcworkspace"
 export XCODE_SCHEME="MyGame"

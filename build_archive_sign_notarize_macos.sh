@@ -133,6 +133,14 @@ read_uproject_module_name() {
 }
 
 autodetect_uproject_if_needed() {
+  if [[ -n "${UPROJECT_PATH:-}" ]]; then
+    if [[ -f "$UPROJECT_PATH" ]]; then
+      UPROJECT_NAME="$(/usr/bin/basename "$UPROJECT_PATH")"
+      return 0
+    fi
+    die "UPROJECT_PATH set but not found: $UPROJECT_PATH"
+  fi
+
   if is_placeholder "${UPROJECT_NAME:-}"; then
     local found=()
     while IFS= read -r line; do
@@ -1141,7 +1149,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
 
     --repo-root)            REPO_ROOT="$2"; shift 2 ;;
-    --uproject)             UPROJECT_NAME="$2"; shift 2 ;;
+    --uproject)             UPROJECT_NAME="$2"; CLI_SET_UPROJECT=1; shift 2 ;;
     --ue-root)              UE_ROOT="$2"; shift 2 ;;
     --xcode-workspace)      XCODE_WORKSPACE="$2"; shift 2 ;;
     --xcode-scheme)         XCODE_SCHEME="$2"; shift 2 ;;
@@ -1184,6 +1192,28 @@ if is_placeholder "$DEVELOPMENT_TEAM"; then
   if [[ -n "$team" ]]; then
     DEVELOPMENT_TEAM="$team"
     info "Detected DEVELOPMENT_TEAM from INI (IOSTeamID): $DEVELOPMENT_TEAM"
+  fi
+fi
+
+# If UPROJECT_PATH is provided, normalize it and derive UPROJECT_NAME/REPO_ROOT.
+if [[ "${CLI_SET_UPROJECT:-0}" == "1" ]]; then
+  # CLI takes priority over any existing UPROJECT_PATH.
+  UPROJECT_PATH=""
+fi
+
+if [[ -n "${UPROJECT_PATH:-}" ]]; then
+  if [[ "$UPROJECT_PATH" != /* ]]; then
+    if [[ -n "${REPO_ROOT:-}" ]]; then
+      UPROJECT_PATH="$(abspath_from "$REPO_ROOT" "$UPROJECT_PATH")"
+    else
+      UPROJECT_PATH="$(abspath_from "$(/bin/pwd -P)" "$UPROJECT_PATH")"
+    fi
+  fi
+  if [[ -f "$UPROJECT_PATH" ]]; then
+    UPROJECT_NAME="$(/usr/bin/basename "$UPROJECT_PATH")"
+    if is_placeholder "${REPO_ROOT:-}"; then
+      REPO_ROOT="$(/usr/bin/dirname "$UPROJECT_PATH")"
+    fi
   fi
 fi
 
