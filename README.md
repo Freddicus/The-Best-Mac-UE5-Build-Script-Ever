@@ -10,7 +10,7 @@ A pragmatic bash script for building a macOS **Developer ID** distributable from
 In many cases, the “easy mode” is:
 - drop this script into your project root
 - create a `.env` next to it
-- set your Team ID + signing identity (and an ExportOptions.plist if you’re using Xcode export)
+- set your Team ID + signing identity (an ExportOptions.plist can be provided or generated automatically)
 - run it
 
 This exists because: **shipping macOS builds is not “just click Package”** — especially once you care about hardened runtime, notarization, and making a build that works on a different Mac.
@@ -94,7 +94,7 @@ If your workspace or scheme cannot be resolved automatically, the script will gu
 
 1. **Copy the script** into your project root (the folder that contains the `.uproject`).
 2. Recommended: create a `.env` file next to the script and set your values there.
-   - You can also edit the script and replace `__REPLACE_ME__` placeholders in the **USER CONFIG** section.
+   - You generally should **not** need to edit the script itself.
    - You do **not** need to pre-generate an Xcode workspace; the script will locate or generate one if needed.
 3. Run:
 
@@ -125,7 +125,13 @@ EXPORT_PLIST="$PWD/ExportOptions.plist"
 NOTARY_PROFILE="MyNotaryProfileName"
 ```
 
+
 The script automatically loads `.env` if it exists in the same folder as the script.
+
+If `EXPORT_PLIST` is not provided and no suitable ExportOptions.plist is found, the script will offer to
+**generate a minimal ExportOptions.plist interactively** (Developer ID export) using your configured Team ID.
+
+In CI or other non-interactive contexts, you must provide `EXPORT_PLIST` explicitly.
 
 You can still use environment variables (no file edits)
 
@@ -148,7 +154,7 @@ export LONG_NAME="MyGameFullName"
 
 Optional: skip prompts (CI-friendly)
 
-Uncomment and set these in the script:
+Set these via `.env`, environment variables, or CLI flags:
 
 ```bash
 # BUILD_TYPE_OVERRIDE="shipping"      # "shipping" or "development"
@@ -212,7 +218,8 @@ Artifacts go under (names derived from `SHORT_NAME` / `LONG_NAME`):
 - `Logs/build_YYYY-MM-DD_HH-MM-SS.log` — full build log
 
 ## Troubleshooting checklist
-- **Placeholders:** if the script stops immediately, you probably left `__REPLACE_ME__` somewhere.
+- **Missing configuration:** if the script stops immediately, a required value (such as `DEVELOPMENT_TEAM` or
+  `SIGN_IDENTITY`) was not provided via `.env`, environment variable, or CLI flag.
 - **Xcode scheme not found:** the scheme must be Shared in Xcode. (seen by `xcodebuild -list -workspace ...`)
 - **RunUAT.sh not found:** double check `UE_ROOT`.
 - **Notarization fails:** ensure your `NOTARY_PROFILE` exists and is valid:
