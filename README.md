@@ -216,15 +216,19 @@ If you want a signed DMG (for download distribution), enable DMG output:
 export ENABLE_DMG="1"
 ```
 
+`FANCY_DMG` is `0` by default when not set.
+
 Optional overrides:
 ```bash
 export ENABLE_ZIP="1"   # create ZIP alongside the app
+export FANCY_DMG="0"    # experimental Finder layout mode (off by default)
 export DMG_NAME="MyGame.dmg"
 export DMG_VOLUME_NAME="MyGame"
 export DMG_OUTPUT_DIR="$PWD/Build"
 ```
 
 When enabled, the script creates and signs the DMG. If `NOTARIZE=yes`, it also notarizes and staples the DMG.
+`FANCY_DMG=1` is experimental and may not behave consistently across machines and Finder states.
 
 ## Output
 

@@ -655,6 +655,7 @@ print_config() {
   echo "WRITE_STEAM_APPID: $WRITE_STEAM_APPID" >&3
   echo "ENABLE_ZIP:        ${ENABLE_ZIP:-<unset>}" >&3
   echo "ENABLE_DMG:        $ENABLE_DMG" >&3
+  echo "FANCY_DMG:         $FANCY_DMG" >&3
   echo "DMG_NAME:          ${DMG_NAME:-<unset>}" >&3
   echo "DMG_VOLUME_NAME:   ${DMG_VOLUME_NAME:-<unset>}" >&3
   echo "DMG_OUTPUT_DIR:    ${DMG_OUTPUT_DIR:-<unset>}" >&3
@@ -1166,6 +1167,7 @@ STEAM_DYLIB_SRC="${STEAM_DYLIB_SRC:-}"
 
 ENABLE_ZIP="${ENABLE_ZIP:-}"
 ENABLE_DMG="${ENABLE_DMG:-0}"
+FANCY_DMG="${FANCY_DMG:-0}"
 DMG_NAME="${DMG_NAME:-}"
 DMG_VOLUME_NAME="${DMG_VOLUME_NAME:-}"
 DMG_OUTPUT_DIR="${DMG_OUTPUT_DIR:-}"
@@ -1206,6 +1208,7 @@ Options (highest priority):
 
   --enable-zip 0|1
   --enable-dmg 0|1
+  --fancy-dmg 0|1
   --dmg-name NAME
   --dmg-volume-name NAME
   --dmg-output-dir PATH
@@ -1247,6 +1250,7 @@ while [[ $# -gt 0 ]]; do
 
     --enable-zip)           ENABLE_ZIP="$2"; shift 2 ;;
     --enable-dmg)           ENABLE_DMG="$2"; shift 2 ;;
+    --fancy-dmg)            FANCY_DMG="$2"; shift 2 ;;
     --dmg-name)             DMG_NAME="$2"; shift 2 ;;
     --dmg-volume-name)      DMG_VOLUME_NAME="$2"; shift 2 ;;
     --dmg-output-dir)       DMG_OUTPUT_DIR="$2"; shift 2 ;;
@@ -1549,6 +1553,9 @@ fi
 
 if [[ "$ENABLE_DMG" == "1" ]]; then
   command -v hdiutil >/dev/null 2>&1 || die "hdiutil not found (required to create DMG)."
+  if [[ "$FANCY_DMG" == "1" ]] && ! command -v osascript >/dev/null 2>&1; then
+    warn "FANCY_DMG=1 but osascript is unavailable. DMG will be created without Finder layout tweaks."
+  fi
 fi
 
 if [[ "$DRY_RUN" == "1" ]]; then
@@ -1566,6 +1573,9 @@ if [[ "$DRY_RUN" == "1" ]]; then
   fi
   if [[ "$ENABLE_DMG" == "1" ]]; then
     steps="$steps → DMG create+sign"
+    if [[ "$FANCY_DMG" == "1" ]]; then
+      steps="$steps → DMG Finder layout (experimental)"
+    fi
   fi
   if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
     steps="$steps → notarize+staple"
@@ -1798,11 +1808,114 @@ if [[ "$ENABLE_DMG" == "1" ]]; then
   echo "== Create DMG ==" >&3
   mkdir -p "$DMG_OUTPUT_DIR"
   rm -f "$DMG_PATH"
-  DMG_STAGE_DIR="$(/usr/bin/mktemp -d -t dmgstage.XXXXXX)"
-  /usr/bin/ditto "$APP_PATH" "$DMG_STAGE_DIR/$(/usr/bin/basename "$APP_PATH")"
-  /bin/ln -s /Applications "$DMG_STAGE_DIR/Applications"
-  /usr/bin/hdiutil create -volname "$DMG_VOLUME_NAME" -srcfolder "$DMG_STAGE_DIR" -ov -format UDZO "$DMG_PATH"
-  /bin/rm -rf "$DMG_STAGE_DIR"
+  if [[ "$FANCY_DMG" == "1" ]]; then
+    warn "FANCY_DMG=1 is experimental and may not persist layout consistently."
+    DMG_STAGE_DIR="$(/usr/bin/mktemp -d -t dmgstage.XXXXXX)"
+    DMG_RW_PATH="$DMG_OUTPUT_DIR/${DMG_NAME%.dmg}-rw.dmg"
+    DMG_MOUNT_DIR="/Volumes/${DMG_VOLUME_NAME}-$$"
+    DMG_MOUNT_BASENAME="$(/usr/bin/basename "$DMG_MOUNT_DIR")"
+    DMG_MOUNT_BASENAME_ESC="${DMG_MOUNT_BASENAME//\"/\\\"}"
+    STAGED_APP_NAME="$(/usr/bin/basename "$APP_PATH")"
+    APP_ESC="${STAGED_APP_NAME//\"/\\\"}"
+
+    /usr/bin/ditto "$APP_PATH" "$DMG_STAGE_DIR/$STAGED_APP_NAME"
+    /bin/ln -s /Applications "$DMG_STAGE_DIR/Applications"
+
+    /bin/rm -f "$DMG_RW_PATH"
+    /usr/bin/hdiutil create -volname "$DMG_VOLUME_NAME" -srcfolder "$DMG_STAGE_DIR" -ov -format UDRW -fs HFS+ "$DMG_RW_PATH"
+    /usr/bin/hdiutil attach "$DMG_RW_PATH" -mountpoint "$DMG_MOUNT_DIR" -nobrowse -readwrite
+    /bin/sleep 1
+
+    if command -v osascript >/dev/null 2>&1; then
+      /usr/bin/osascript -e 'tell application "Finder" to activate' >/dev/null 2>&1 || true
+      /bin/rm -f "$DMG_MOUNT_DIR/.DS_Store"
+      /bin/sleep 2
+      /usr/bin/osascript <<OSA || warn "Finder layout scripting failed; continuing with DMG creation."
+tell application "Finder"
+  set dmFolder to POSIX file "/Volumes/${DMG_MOUNT_BASENAME_ESC}/" as alias
+  open dmFolder
+  delay 1
+  set dmWin to container window of dmFolder
+  set current view of dmWin to icon view
+  delay 1
+  set toolbar visible of dmWin to false
+  set statusbar visible of dmWin to false
+  set bounds of dmWin to {200, 200, 860, 560}
+  set dmViewOptions to icon view options of dmWin
+  set arrangement of dmViewOptions to not arranged
+  set icon size of dmViewOptions to 144
+  delay 1
+  set position of item "${APP_ESC}" of dmFolder to {200, 100}
+  set position of item "Applications" of dmFolder to {450, 100}
+  delay 1
+  close dmWin
+  open dmFolder
+  delay 1
+  try
+    close container window of dmFolder
+  end try
+end tell
+OSA
+      /bin/sleep 2
+    fi
+
+    DMG_DS_STORE="$DMG_MOUNT_DIR/.DS_Store"
+    DMG_PREV_SIZE=0
+    DMG_PREV_MTIME=0
+    DMG_STABLE_COUNT=0
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      if [[ -f "$DMG_DS_STORE" ]]; then
+        DMG_SIZE="$(/usr/bin/stat -f%z "$DMG_DS_STORE" 2>/dev/null || echo 0)"
+        DMG_MTIME="$(/usr/bin/stat -f%m "$DMG_DS_STORE" 2>/dev/null || echo 0)"
+        if [[ "$DMG_SIZE" -gt 0 && "$DMG_SIZE" -eq "$DMG_PREV_SIZE" && "$DMG_MTIME" -eq "$DMG_PREV_MTIME" ]]; then
+          DMG_STABLE_COUNT=$((DMG_STABLE_COUNT + 1))
+        else
+          DMG_STABLE_COUNT=0
+        fi
+        if [[ "$DMG_STABLE_COUNT" -ge 2 ]]; then
+          break
+        fi
+        DMG_PREV_SIZE="$DMG_SIZE"
+        DMG_PREV_MTIME="$DMG_MTIME"
+      fi
+      /bin/sleep 1
+    done
+
+    /usr/bin/sync
+    /bin/sleep 2
+    if command -v osascript >/dev/null 2>&1; then
+      /usr/bin/osascript <<OSA >/dev/null 2>&1 || true
+tell application "Finder"
+  try
+    eject (POSIX file "/Volumes/${DMG_MOUNT_BASENAME_ESC}/" as alias)
+  end try
+end tell
+OSA
+    fi
+
+    DMG_DETACHED=0
+    for i in 1 2 3 4 5; do
+      if [[ ! -d "$DMG_MOUNT_DIR" ]]; then
+        DMG_DETACHED=1
+        break
+      fi
+      if /usr/bin/hdiutil detach "$DMG_MOUNT_DIR" >/dev/null 2>&1; then
+        DMG_DETACHED=1
+        break
+      fi
+      /bin/sleep $((i * 2))
+    done
+    if [[ "$DMG_DETACHED" -eq 0 && -d "$DMG_MOUNT_DIR" ]]; then
+      warn "Forced detach used; DMG layout metadata may not persist."
+      /usr/bin/hdiutil detach -force "$DMG_MOUNT_DIR" >/dev/null 2>&1 || true
+    fi
+
+    /usr/bin/hdiutil convert "$DMG_RW_PATH" -format UDZO -o "$DMG_PATH"
+    /bin/rm -f "$DMG_RW_PATH"
+    /bin/rm -rf "$DMG_STAGE_DIR"
+  else
+    /usr/bin/hdiutil create -volname "$DMG_VOLUME_NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
+  fi
   echo "DMG: $DMG_PATH" >&3
 
   echo "== Sign DMG ==" >&3
