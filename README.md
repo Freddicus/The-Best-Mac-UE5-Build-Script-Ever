@@ -21,8 +21,8 @@ This exists because: **shipping macOS builds is not “just click Package”** �
 2. **Locate or generate an Xcode workspace**, then create an Xcode archive (`.xcarchive`) using `xcodebuild archive`.
 3. **Export a signed `.app`** using `xcodebuild -exportArchive` + your `ExportOptions.plist`.
 4. Optionally:
-   - **Notarize** the exported app (zip → `notarytool submit` → wait).
-   - **Staple** the notarization ticket to the app.
+   - **Notarize** enabled distribution artifacts (ZIP and/or DMG).
+   - **Staple** the notarization ticket to the app and/or DMG as applicable.
 5. Validates signatures and runtime assumptions (`codesign` verification, `otool` check, team identifiers).
 6. Optionally (if enabled):
    - Stages and signs `libsteam_api.dylib` alongside the executable.
@@ -229,6 +229,7 @@ export DMG_OUTPUT_DIR="$PWD/Build"
 
 When enabled, the script creates and signs the DMG. If `NOTARIZE=yes`, it also notarizes and staples the DMG.
 `FANCY_DMG=1` is experimental and may not behave consistently across machines and Finder states.
+It also requires a GUI session and Finder Automation permission for your terminal.
 
 ## Output
 

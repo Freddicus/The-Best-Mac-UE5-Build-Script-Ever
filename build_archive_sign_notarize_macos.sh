@@ -12,7 +12,20 @@ info()  { echo "== $* ==" >&3; }
 
 on_error_exit() {
   local exit_code=$?
-  echo "❌ Script failed at line $LINENO (exit $exit_code)" >&3
+  local fail_line="${BASH_LINENO[0]:-unknown}"
+  local fail_cmd="${BASH_COMMAND:-unknown}"
+  # Best-effort cleanup for experimental fancy DMG workspace if an error occurs mid-flow.
+  if [[ -n "${DMG_MOUNT_DIR:-}" && -d "${DMG_MOUNT_DIR:-}" ]]; then
+    /usr/bin/hdiutil detach "${DMG_MOUNT_DIR:-}" >/dev/null 2>&1 || /usr/bin/hdiutil detach -force "${DMG_MOUNT_DIR:-}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${DMG_STAGE_DIR:-}" && -d "${DMG_STAGE_DIR:-}" ]]; then
+    /bin/rm -rf "${DMG_STAGE_DIR:-}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${DMG_RW_PATH:-}" && -f "${DMG_RW_PATH:-}" ]]; then
+    /bin/rm -f "${DMG_RW_PATH:-}" >/dev/null 2>&1 || true
+  fi
+  echo "❌ Script failed at line $fail_line (exit $exit_code)" >&3
+  echo "Failing command: $fail_cmd" >&3
   if [[ -n "${LOG_FILE:-}" ]]; then
     echo "See log file for details: $LOG_FILE" >&3
     if [[ -f "$LOG_FILE" ]]; then
