@@ -4,13 +4,123 @@
 ### DISPLAY / LOGGING
 ### ============================================================================
 
-die()   { echo "❌ $*" >&3; exit 1; }
+print_log_tail() {
+  if [[ -n "${LOG_FILE:-}" ]]; then
+    echo "See log file for details: $LOG_FILE" >&3
+    if [[ -f "$LOG_FILE" ]]; then
+      echo "== Last 20 log lines ==" >&3
+      /usr/bin/tail -n 20 "$LOG_FILE" >&3 || true
+    fi
+  fi
+}
+
+die()   { echo "❌ $*" >&3; print_log_tail; exit 1; }
 error() { echo "ERROR: $*" >&3; }
 warn()  { echo "⚠️  $*" >&3; }
 good()  { echo "✅  $*" >&3; }
 info()  { echo "== $* ==" >&3; }
 
-set -euo pipefail
+on_error_exit() {
+  local exit_code=$?
+  local fail_line="${BASH_LINENO[0]:-unknown}"
+  local fail_cmd="${BASH_COMMAND:-unknown}"
+  # Best-effort cleanup for experimental fancy DMG workspace if an error occurs mid-flow.
+  if [[ -n "${DMG_MOUNT_DIR:-}" && -d "${DMG_MOUNT_DIR:-}" ]]; then
+    /usr/bin/hdiutil detach "${DMG_MOUNT_DIR:-}" >/dev/null 2>&1 || /usr/bin/hdiutil detach -force "${DMG_MOUNT_DIR:-}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${DMG_STAGE_DIR:-}" && -d "${DMG_STAGE_DIR:-}" ]]; then
+    /bin/rm -rf "${DMG_STAGE_DIR:-}" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${DMG_RW_PATH:-}" && -f "${DMG_RW_PATH:-}" ]]; then
+    /bin/rm -f "${DMG_RW_PATH:-}" >/dev/null 2>&1 || true
+  fi
+  echo "❌ Script failed at line $fail_line (exit $exit_code)" >&3
+  echo "Failing command: $fail_cmd" >&3
+  print_log_tail
+  if [[ "${PRINT_CONFIG:-0}" == "1" ]]; then
+    print_config
+  fi
+  exit "$exit_code"
+}
+
+notary_profile_available() {
+  /usr/bin/xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1
+}
+
+wait_for_notary_profile_with_backoff() {
+  local attempt=1
+  local delay=1
+  while [[ "$attempt" -le 5 ]]; do
+    if notary_profile_available; then
+      return 0
+    fi
+    warn "Notary profile not accessible (attempt $attempt/5). Retrying in ${delay}s..."
+    /bin/sleep "$delay"
+    delay=$((delay * 2))
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+submit_notary() {
+  local path="$1"
+  local label="$2"
+  local out id
+  out="$(/usr/bin/xcrun notarytool submit "$path" --keychain-profile "$NOTARY_PROFILE" --no-wait --output-format json 2>&1)"
+  echo "$out" >&2
+  id="$(printf '%s' "$out" | /usr/bin/sed -nE 's/.*"id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | /usr/bin/head -n 1)"
+  if [[ -z "$id" ]]; then
+    die "Notary submit failed for $label (no submission id)."
+  fi
+  echo "Notary submit id ($label): $id" >&3
+  echo "$id"
+}
+
+notary_wait_with_output() {
+  local id="$1"
+  local label="$2"
+  local out rc last_line
+
+  if out="$(/usr/bin/xcrun notarytool wait "$id" --keychain-profile "$NOTARY_PROFILE" 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    return 0
+  fi
+
+  rc=$?
+  printf '%s\n' "$out" >&2
+  last_line="$(printf '%s\n' "$out" | /usr/bin/awk 'NF{line=$0} END{print line}')"
+  if [[ -n "$last_line" ]]; then
+    warn "notarytool wait failed for ${label}: $last_line"
+  else
+    warn "notarytool wait failed for ${label} (exit $rc)."
+  fi
+  return "$rc"
+}
+
+wait_notary() {
+  local id="$1"
+  local label="$2"
+  echo "== Notarize ${label} (wait) ==" >&3
+
+  if ! wait_for_notary_profile_with_backoff; then
+    die "Notary profile '$NOTARY_PROFILE' is unavailable before wait for ${label}. Resume manually with: /usr/bin/xcrun notarytool wait \"$id\" --keychain-profile \"$NOTARY_PROFILE\""
+  fi
+
+  if notary_wait_with_output "$id" "$label"; then
+    return 0
+  fi
+
+  warn "notarytool wait failed for ${label}. Re-checking notary profile and retrying once."
+  if wait_for_notary_profile_with_backoff; then
+    if notary_wait_with_output "$id" "$label"; then
+      return 0
+    fi
+  fi
+
+  die "notarytool wait failed for ${label} (submission id: $id). Resume manually with: /usr/bin/xcrun notarytool wait \"$id\" --keychain-profile \"$NOTARY_PROFILE\""
+}
+
+set -Eeuo pipefail
 
 # Preserve original stdout/stderr for human-facing status lines (FD 3/4)
 exec 3>&1 4>&2
@@ -597,6 +707,12 @@ print_config() {
   echo "NOTARIZE:          ${NOTARIZE:-<unset>}" >&3
   echo "ENABLE_STEAM:      $ENABLE_STEAM" >&3
   echo "WRITE_STEAM_APPID: $WRITE_STEAM_APPID" >&3
+  echo "ENABLE_ZIP:        ${ENABLE_ZIP:-<unset>}" >&3
+  echo "ENABLE_DMG:        $ENABLE_DMG" >&3
+  echo "FANCY_DMG:         $FANCY_DMG" >&3
+  echo "DMG_NAME:          ${DMG_NAME:-<unset>}" >&3
+  echo "DMG_VOLUME_NAME:   ${DMG_VOLUME_NAME:-<unset>}" >&3
+  echo "DMG_OUTPUT_DIR:    ${DMG_OUTPUT_DIR:-<unset>}" >&3
   if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     echo "WORKSPACE:         ${WORKSPACE:-<unset>}" >&3
     echo "SCHEME:            ${SCHEME:-<unset>}" >&3
@@ -1103,6 +1219,13 @@ STEAM_APP_ID="${STEAM_APP_ID:-480}"
 WRITE_STEAM_APPID="${WRITE_STEAM_APPID:-0}"
 STEAM_DYLIB_SRC="${STEAM_DYLIB_SRC:-}"
 
+ENABLE_ZIP="${ENABLE_ZIP:-}"
+ENABLE_DMG="${ENABLE_DMG:-0}"
+FANCY_DMG="${FANCY_DMG:-0}"
+DMG_NAME="${DMG_NAME:-}"
+DMG_VOLUME_NAME="${DMG_VOLUME_NAME:-}"
+DMG_OUTPUT_DIR="${DMG_OUTPUT_DIR:-}"
+
 
 # -----------------------------------------------------------------------------
 # Command-line flag overrides (highest priority)
@@ -1136,6 +1259,13 @@ Options (highest priority):
   --write-steam-appid 0|1
   --steam-app-id ID
   --steam-dylib-src PATH
+
+  --enable-zip 0|1
+  --enable-dmg 0|1
+  --fancy-dmg 0|1
+  --dmg-name NAME
+  --dmg-volume-name NAME
+  --dmg-output-dir PATH
 
   --build-type shipping|development
   --notarize yes|no
@@ -1171,6 +1301,13 @@ while [[ $# -gt 0 ]]; do
     --write-steam-appid)    WRITE_STEAM_APPID="$2"; shift 2 ;;
     --steam-app-id)         STEAM_APP_ID="$2"; shift 2 ;;
     --steam-dylib-src)      STEAM_DYLIB_SRC="$2"; shift 2 ;;
+
+    --enable-zip)           ENABLE_ZIP="$2"; shift 2 ;;
+    --enable-dmg)           ENABLE_DMG="$2"; shift 2 ;;
+    --fancy-dmg)            FANCY_DMG="$2"; shift 2 ;;
+    --dmg-name)             DMG_NAME="$2"; shift 2 ;;
+    --dmg-volume-name)      DMG_VOLUME_NAME="$2"; shift 2 ;;
+    --dmg-output-dir)       DMG_OUTPUT_DIR="$2"; shift 2 ;;
 
     --build-type)           BUILD_TYPE="$2"; shift 2 ;;
     --notarize)             NOTARIZE="$2"; shift 2 ;;
@@ -1380,6 +1517,33 @@ if [[ "$NOTARIZE_ENABLED" -eq 1 ]] && is_placeholder "$NOTARY_PROFILE"; then
   NOTARIZE_ENABLED=0
 fi
 
+# Packaging defaults (only if enabled)
+if is_placeholder "$ENABLE_ZIP"; then
+  if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
+    ENABLE_ZIP="1"
+  else
+    ENABLE_ZIP="0"
+  fi
+fi
+
+if [[ "$NOTARIZE_ENABLED" -eq 1 && "$ENABLE_ZIP" == "0" && "$ENABLE_DMG" == "0" ]]; then
+  die "NOTARIZE=yes but ENABLE_ZIP=0 and ENABLE_DMG=0 — nothing to notarize."
+fi
+
+if [[ "$ENABLE_DMG" == "1" ]]; then
+  if is_placeholder "$DMG_OUTPUT_DIR"; then
+    DMG_OUTPUT_DIR="$BUILD_DIR"
+  elif [[ "$DMG_OUTPUT_DIR" != /* ]]; then
+    DMG_OUTPUT_DIR="$(abspath_from "$REPO_ROOT" "$DMG_OUTPUT_DIR")"
+  fi
+  if is_placeholder "$DMG_VOLUME_NAME"; then
+    DMG_VOLUME_NAME="$LONG_NAME"
+  fi
+  if is_placeholder "$DMG_NAME"; then
+    DMG_NAME="${LONG_NAME}.dmg"
+  fi
+fi
+
 # Print resolved config and/or exit early if requested.
 if [[ "$PRINT_CONFIG" == "1" ]]; then
   print_config
@@ -1392,7 +1556,7 @@ LOG_FILE="$LOG_DIR/build_$(date +%Y-%m-%d_%H-%M-%S).log"
 exec >>"$LOG_FILE" 2>&1
 echo "Log file: $LOG_FILE" >&3
 
-trap 'echo "❌ Script failed at line $LINENO" >&3; if [[ "${PRINT_CONFIG:-0}" == "1" ]]; then print_config; fi; exit 1' ERR
+trap on_error_exit ERR
 
 # Build outputs
 ARCHIVE_PATH="$BUILD_DIR/${SHORT_NAME}.xcarchive"
@@ -1441,6 +1605,13 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   [[ -f "$EXPORT_PLIST" ]] || die "ExportOptions.plist not found: $EXPORT_PLIST"
 fi
 
+if [[ "$ENABLE_DMG" == "1" ]]; then
+  command -v hdiutil >/dev/null 2>&1 || die "hdiutil not found (required to create DMG)."
+  if [[ "$FANCY_DMG" == "1" ]] && ! command -v osascript >/dev/null 2>&1; then
+    warn "FANCY_DMG=1 but osascript is unavailable. DMG will be created without Finder layout tweaks."
+  fi
+fi
+
 if [[ "$DRY_RUN" == "1" ]]; then
   print_config
   echo "== DRY RUN ==" >&3
@@ -1451,6 +1622,15 @@ if [[ "$DRY_RUN" == "1" ]]; then
     steps="$steps → (skip Xcode archive/export)"
   fi
   steps="$steps → codesign"
+  if [[ "$ENABLE_ZIP" == "1" ]]; then
+    steps="$steps → zip"
+  fi
+  if [[ "$ENABLE_DMG" == "1" ]]; then
+    steps="$steps → DMG create+sign"
+    if [[ "$FANCY_DMG" == "1" ]]; then
+      steps="$steps → DMG Finder layout (experimental)"
+    fi
+  fi
   if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
     steps="$steps → notarize+staple"
   fi
@@ -1669,24 +1849,182 @@ else
   echo "TeamIdentifier (app):   ${APP_TEAM:-<none>}" >&3
 fi
 
-if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
-  echo "== Zip app for notarization (no extra parent) ==" >&3
+if [[ "$ENABLE_ZIP" == "1" ]]; then
+  echo "== Create ZIP (no extra parent) ==" >&3
   /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
   echo "Zip: $ZIP_PATH" >&3
-
-  echo "== Notarize ==" >&3
-  /usr/bin/xcrun notarytool submit "$ZIP_PATH" --keychain-profile "$NOTARY_PROFILE" --wait
-
-  echo "== Staple ==" >&3
-  /usr/bin/xcrun stapler staple "$APP_PATH"
-
-  echo "== Staple validation ==" >&3
-  /usr/bin/xcrun stapler validate "$APP_PATH" || true
-
-  echo "== Gatekeeper assessment ==" >&3
-  /usr/sbin/spctl -a -vv "$APP_PATH" || true
 else
-  echo "== Skipping zip/notarization/stapling (per prompt) ==" >&3
+  echo "== Skipping ZIP creation (ENABLE_ZIP=0) ==" >&3
+fi
+
+if [[ "$ENABLE_DMG" == "1" ]]; then
+  DMG_PATH="$DMG_OUTPUT_DIR/$DMG_NAME"
+  echo "== Create DMG ==" >&3
+  mkdir -p "$DMG_OUTPUT_DIR"
+  rm -f "$DMG_PATH"
+  if [[ "$FANCY_DMG" == "1" ]]; then
+    warn "FANCY_DMG=1 is experimental and may not persist layout consistently."
+    DMG_STAGE_DIR="$(/usr/bin/mktemp -d -t dmgstage.XXXXXX)"
+    DMG_RW_PATH="$DMG_OUTPUT_DIR/${DMG_NAME%.dmg}-rw.dmg"
+    DMG_MOUNT_DIR="/Volumes/${DMG_VOLUME_NAME}-$$"
+    DMG_MOUNT_BASENAME="$(/usr/bin/basename "$DMG_MOUNT_DIR")"
+    DMG_MOUNT_BASENAME_ESC="${DMG_MOUNT_BASENAME//\"/\\\"}"
+    STAGED_APP_NAME="$(/usr/bin/basename "$APP_PATH")"
+    APP_ESC="${STAGED_APP_NAME//\"/\\\"}"
+
+    /usr/bin/ditto "$APP_PATH" "$DMG_STAGE_DIR/$STAGED_APP_NAME"
+    /bin/ln -s /Applications "$DMG_STAGE_DIR/Applications"
+
+    /bin/rm -f "$DMG_RW_PATH"
+    /usr/bin/hdiutil create -volname "$DMG_VOLUME_NAME" -srcfolder "$DMG_STAGE_DIR" -ov -format UDRW -fs HFS+ "$DMG_RW_PATH"
+    /usr/bin/hdiutil attach "$DMG_RW_PATH" -mountpoint "$DMG_MOUNT_DIR" -nobrowse -readwrite
+    /bin/sleep 1
+
+    if command -v osascript >/dev/null 2>&1; then
+      /usr/bin/osascript -e 'tell application "Finder" to activate' >/dev/null 2>&1 || true
+      /bin/rm -f "$DMG_MOUNT_DIR/.DS_Store"
+      /bin/sleep 2
+      /usr/bin/osascript <<OSA || warn "Finder layout scripting failed; continuing with DMG creation."
+tell application "Finder"
+  set dmFolder to POSIX file "/Volumes/${DMG_MOUNT_BASENAME_ESC}/" as alias
+  open dmFolder
+  delay 1
+  set dmWin to container window of dmFolder
+  set current view of dmWin to icon view
+  delay 1
+  set toolbar visible of dmWin to false
+  set statusbar visible of dmWin to false
+  set bounds of dmWin to {200, 200, 860, 560}
+  set dmViewOptions to icon view options of dmWin
+  set arrangement of dmViewOptions to not arranged
+  set icon size of dmViewOptions to 144
+  delay 1
+  set position of item "${APP_ESC}" of dmFolder to {200, 100}
+  set position of item "Applications" of dmFolder to {450, 100}
+  delay 1
+  close dmWin
+  open dmFolder
+  delay 1
+  try
+    close container window of dmFolder
+  end try
+end tell
+OSA
+      /bin/sleep 2
+    fi
+
+    DMG_DS_STORE="$DMG_MOUNT_DIR/.DS_Store"
+    DMG_PREV_SIZE=0
+    DMG_PREV_MTIME=0
+    DMG_STABLE_COUNT=0
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      if [[ -f "$DMG_DS_STORE" ]]; then
+        DMG_SIZE="$(/usr/bin/stat -f%z "$DMG_DS_STORE" 2>/dev/null || echo 0)"
+        DMG_MTIME="$(/usr/bin/stat -f%m "$DMG_DS_STORE" 2>/dev/null || echo 0)"
+        if [[ "$DMG_SIZE" -gt 0 && "$DMG_SIZE" -eq "$DMG_PREV_SIZE" && "$DMG_MTIME" -eq "$DMG_PREV_MTIME" ]]; then
+          DMG_STABLE_COUNT=$((DMG_STABLE_COUNT + 1))
+        else
+          DMG_STABLE_COUNT=0
+        fi
+        if [[ "$DMG_STABLE_COUNT" -ge 2 ]]; then
+          break
+        fi
+        DMG_PREV_SIZE="$DMG_SIZE"
+        DMG_PREV_MTIME="$DMG_MTIME"
+      fi
+      /bin/sleep 1
+    done
+
+    /usr/bin/sync
+    /bin/sleep 2
+    if command -v osascript >/dev/null 2>&1; then
+      /usr/bin/osascript <<OSA >/dev/null 2>&1 || true
+tell application "Finder"
+  try
+    eject (POSIX file "/Volumes/${DMG_MOUNT_BASENAME_ESC}/" as alias)
+  end try
+end tell
+OSA
+    fi
+
+    DMG_DETACHED=0
+    for i in 1 2 3 4 5; do
+      if [[ ! -d "$DMG_MOUNT_DIR" ]]; then
+        DMG_DETACHED=1
+        break
+      fi
+      if /usr/bin/hdiutil detach "$DMG_MOUNT_DIR" >/dev/null 2>&1; then
+        DMG_DETACHED=1
+        break
+      fi
+      /bin/sleep $((i * 2))
+    done
+    if [[ "$DMG_DETACHED" -eq 0 && -d "$DMG_MOUNT_DIR" ]]; then
+      warn "Forced detach used; DMG layout metadata may not persist."
+      /usr/bin/hdiutil detach -force "$DMG_MOUNT_DIR" >/dev/null 2>&1 || true
+    fi
+
+    /usr/bin/hdiutil convert "$DMG_RW_PATH" -format UDZO -o "$DMG_PATH"
+    /bin/rm -f "$DMG_RW_PATH"
+    /bin/rm -rf "$DMG_STAGE_DIR"
+  else
+    /usr/bin/hdiutil create -volname "$DMG_VOLUME_NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
+  fi
+  echo "DMG: $DMG_PATH" >&3
+
+  echo "== Sign DMG ==" >&3
+  /usr/bin/codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
+else
+  info "ENABLE_DMG=0 — skipping DMG creation"
+fi
+
+ZIP_NOTARY_ID=""
+DMG_NOTARY_ID=""
+SKIP_DMG_NOTARY=0
+
+if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
+  if [[ "$ENABLE_ZIP" == "1" ]]; then
+    echo "== Notarize ZIP (submit) ==" >&3
+    ZIP_NOTARY_ID="$(submit_notary "$ZIP_PATH" "ZIP")"
+  fi
+
+  if [[ "$ENABLE_DMG" == "1" ]]; then
+    if [[ "$ENABLE_ZIP" == "1" ]]; then
+      if ! wait_for_notary_profile_with_backoff; then
+        warn "Notary profile still not accessible after retries. Skipping DMG notarization."
+        warn "You can notarize and staple the DMG manually:"
+        warn "  /usr/bin/xcrun notarytool submit \"$DMG_PATH\" --keychain-profile \"$NOTARY_PROFILE\" --wait"
+        warn "  /usr/bin/xcrun stapler staple \"$DMG_PATH\""
+        warn "  /usr/bin/xcrun stapler validate \"$DMG_PATH\""
+        SKIP_DMG_NOTARY=1
+      fi
+    fi
+
+    if [[ "$SKIP_DMG_NOTARY" -eq 0 ]]; then
+      echo "== Notarize DMG (submit) ==" >&3
+      DMG_NOTARY_ID="$(submit_notary "$DMG_PATH" "DMG")"
+    fi
+  fi
+
+  if [[ -n "$ZIP_NOTARY_ID" ]]; then
+    wait_notary "$ZIP_NOTARY_ID" "ZIP"
+    echo "== Staple app ==" >&3
+    /usr/bin/xcrun stapler staple "$APP_PATH"
+
+    echo "== Staple validation (app) ==" >&3
+    /usr/bin/xcrun stapler validate "$APP_PATH" || true
+
+    echo "== Gatekeeper assessment (app) ==" >&3
+    /usr/sbin/spctl -a -vv "$APP_PATH" || true
+  fi
+
+  if [[ -n "$DMG_NOTARY_ID" ]]; then
+    wait_notary "$DMG_NOTARY_ID" "DMG"
+    echo "== Staple DMG ==" >&3
+    /usr/bin/xcrun stapler staple "$DMG_PATH"
+  fi
+else
+  echo "== Notarization disabled (NOTARIZE=no) ==" >&3
 fi
 
 echo "REMINDER: Test your distribution path." >&3
@@ -1695,10 +2033,15 @@ echo "  - If distributing direct-download, test on a separate Mac (or a clean us
 
 echo "✅ Done" >&3
 echo "App: $APP_PATH" >&3
-if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
+if [[ "$ENABLE_ZIP" == "1" ]]; then
   echo "Zip: $ZIP_PATH" >&3
 else
-  echo "Zip: (not created — notarization skipped)" >&3
+  echo "Zip: (not created — ENABLE_ZIP=0)" >&3
+fi
+if [[ "$ENABLE_DMG" == "1" ]]; then
+  echo "DMG: $DMG_PATH" >&3
+else
+  echo "DMG: (not created — ENABLE_DMG=0)" >&3
 fi
 
 # Cleanup temp entitlements file
