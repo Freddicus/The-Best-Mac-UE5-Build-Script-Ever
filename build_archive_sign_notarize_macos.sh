@@ -51,7 +51,7 @@ submit_notary() {
   local out id
   out="$(/usr/bin/xcrun notarytool submit "$path" --keychain-profile "$NOTARY_PROFILE" --no-wait --output-format json 2>&1)"
   echo "$out" >&2
-  id="$(echo "$out" | /usr/bin/awk -F'"' '/"id"[[:space:]]*:/ {print $4; exit}')"
+  id="$(printf '%s' "$out" | /usr/bin/sed -nE 's/.*"id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | /usr/bin/head -n 1)"
   if [[ -z "$id" ]]; then
     die "Notary submit failed for $label (no submission id)."
   fi
@@ -1798,7 +1798,11 @@ if [[ "$ENABLE_DMG" == "1" ]]; then
   echo "== Create DMG ==" >&3
   mkdir -p "$DMG_OUTPUT_DIR"
   rm -f "$DMG_PATH"
-  /usr/bin/hdiutil create -volname "$DMG_VOLUME_NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
+  DMG_STAGE_DIR="$(/usr/bin/mktemp -d -t dmgstage.XXXXXX)"
+  /usr/bin/ditto "$APP_PATH" "$DMG_STAGE_DIR/$(/usr/bin/basename "$APP_PATH")"
+  /bin/ln -s /Applications "$DMG_STAGE_DIR/Applications"
+  /usr/bin/hdiutil create -volname "$DMG_VOLUME_NAME" -srcfolder "$DMG_STAGE_DIR" -ov -format UDZO "$DMG_PATH"
+  /bin/rm -rf "$DMG_STAGE_DIR"
   echo "DMG: $DMG_PATH" >&3
 
   echo "== Sign DMG ==" >&3
