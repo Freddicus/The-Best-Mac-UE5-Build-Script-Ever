@@ -4,7 +4,17 @@
 ### DISPLAY / LOGGING
 ### ============================================================================
 
-die()   { echo "❌ $*" >&3; exit 1; }
+print_log_tail() {
+  if [[ -n "${LOG_FILE:-}" ]]; then
+    echo "See log file for details: $LOG_FILE" >&3
+    if [[ -f "$LOG_FILE" ]]; then
+      echo "== Last 20 log lines ==" >&3
+      /usr/bin/tail -n 20 "$LOG_FILE" >&3 || true
+    fi
+  fi
+}
+
+die()   { echo "❌ $*" >&3; print_log_tail; exit 1; }
 error() { echo "ERROR: $*" >&3; }
 warn()  { echo "⚠️  $*" >&3; }
 good()  { echo "✅  $*" >&3; }
@@ -26,13 +36,7 @@ on_error_exit() {
   fi
   echo "❌ Script failed at line $fail_line (exit $exit_code)" >&3
   echo "Failing command: $fail_cmd" >&3
-  if [[ -n "${LOG_FILE:-}" ]]; then
-    echo "See log file for details: $LOG_FILE" >&3
-    if [[ -f "$LOG_FILE" ]]; then
-      echo "== Last 20 log lines ==" >&3
-      /usr/bin/tail -n 20 "$LOG_FILE" >&3 || true
-    fi
-  fi
+  print_log_tail
   if [[ "${PRINT_CONFIG:-0}" == "1" ]]; then
     print_config
   fi
@@ -72,14 +76,51 @@ submit_notary() {
   echo "$id"
 }
 
+notary_wait_with_output() {
+  local id="$1"
+  local label="$2"
+  local out rc last_line
+
+  if out="$(/usr/bin/xcrun notarytool wait "$id" --keychain-profile "$NOTARY_PROFILE" 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    return 0
+  fi
+
+  rc=$?
+  printf '%s\n' "$out" >&2
+  last_line="$(printf '%s\n' "$out" | /usr/bin/awk 'NF{line=$0} END{print line}')"
+  if [[ -n "$last_line" ]]; then
+    warn "notarytool wait failed for ${label}: $last_line"
+  else
+    warn "notarytool wait failed for ${label} (exit $rc)."
+  fi
+  return "$rc"
+}
+
 wait_notary() {
   local id="$1"
   local label="$2"
   echo "== Notarize ${label} (wait) ==" >&3
-  /usr/bin/xcrun notarytool wait "$id" --keychain-profile "$NOTARY_PROFILE"
+
+  if ! wait_for_notary_profile_with_backoff; then
+    die "Notary profile '$NOTARY_PROFILE' is unavailable before wait for ${label}. Resume manually with: /usr/bin/xcrun notarytool wait \"$id\" --keychain-profile \"$NOTARY_PROFILE\""
+  fi
+
+  if notary_wait_with_output "$id" "$label"; then
+    return 0
+  fi
+
+  warn "notarytool wait failed for ${label}. Re-checking notary profile and retrying once."
+  if wait_for_notary_profile_with_backoff; then
+    if notary_wait_with_output "$id" "$label"; then
+      return 0
+    fi
+  fi
+
+  die "notarytool wait failed for ${label} (submission id: $id). Resume manually with: /usr/bin/xcrun notarytool wait \"$id\" --keychain-profile \"$NOTARY_PROFILE\""
 }
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # Preserve original stdout/stderr for human-facing status lines (FD 3/4)
 exec 3>&1 4>&2
