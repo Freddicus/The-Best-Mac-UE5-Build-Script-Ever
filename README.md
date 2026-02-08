@@ -208,13 +208,32 @@ This script only adds those entitlements when `ENABLE_STEAM=1`, because they are
 
 If you don’t need Steam/launcher-injected libraries: keep `ENABLE_STEAM=0`.
 
+## Optional DMG output
+
+If you want a signed DMG (for download distribution), enable DMG output:
+
+```bash
+export ENABLE_DMG="1"
+```
+
+Optional overrides:
+```bash
+export ENABLE_ZIP="1"   # create ZIP alongside the app
+export DMG_NAME="MyGame.dmg"
+export DMG_VOLUME_NAME="MyGame"
+export DMG_OUTPUT_DIR="$PWD/Build"
+```
+
+When enabled, the script creates and signs the DMG. If `NOTARIZE=yes`, it also notarizes and staples the DMG.
+
 ## Output
 
 Artifacts go under (names derived from `SHORT_NAME` / `LONG_NAME`):
 
 - `Build/${SHORT_NAME}.xcarchive` — Xcode archive
 - `Build/${SHORT_NAME}-export/*.app` — exported app
-- `Build/${LONG_NAME}.zip` — zip used for notarization (name is cosmetic)
+- `Build/${LONG_NAME}.zip` — ZIP alongside the app (if enabled)
+- `Build/${LONG_NAME}.dmg` — signed DMG (if enabled)
 - `Logs/build_YYYY-MM-DD_HH-MM-SS.log` — full build log
 
 ## Troubleshooting checklist
