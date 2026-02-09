@@ -93,8 +93,8 @@ If your workspace or scheme cannot be resolved automatically, the script will gu
 ## Quick Start
 
 1. **Copy the script** into your project root (the folder that contains the `.uproject`).
-2. Recommended: create a `.env` file next to the script and set your values there.
-   - Configuration is via `.env`, environment variables, or CLI flags.
+2. Recommended: copy `.env.example` to `.env` next to the script and set your values there.
+   - Configuration is via `.env` (recommended) or CLI flags.
    - You do **not** need to pre-generate an Xcode workspace; the script will locate or generate one if needed.
 3. Run:
 
@@ -113,48 +113,27 @@ Recommended: use a `.env` file (no script edits)
 
 Create a file named `.env` next to the script. It’s sourced as shell code, so only use a `.env` you trust.
 
-Minimum you’ll usually need:
+Minimum to run:
 ```bash
 DEVELOPMENT_TEAM="ABCDE12345"
 SIGN_IDENTITY="Developer ID Application: My Company (ABCDE12345)"
+```
 
-# If using Xcode export (default), point at an ExportOptions.plist
-EXPORT_PLIST="$PWD/ExportOptions.plist"
-
-# If notarizing, provide your notarytool profile name
+If notarizing:
+```bash
 NOTARY_PROFILE="MyNotaryProfileName"
 ```
 
 
 The script automatically loads `.env` if it exists in the same folder as the script.
 
-If `EXPORT_PLIST` is not provided and no suitable ExportOptions.plist is found, the script will offer to
-**generate a minimal ExportOptions.plist interactively** (Developer ID export) using your configured Team ID.
+Xcode export needs an `ExportOptions.plist`. For interactive runs, the script tries to auto-detect one in your project root or offers to generate a minimal one. In CI or other non-interactive contexts, you must provide `EXPORT_PLIST` explicitly.
 
-In CI or other non-interactive contexts, you must provide `EXPORT_PLIST` explicitly.
-
-You can still use environment variables (no file edits)
-
-Example:
-```bash
-export REPO_ROOT="/Users/you/Documents/Unreal Projects/MyGame"
-export UPROJECT_PATH="/Users/you/Documents/Unreal Projects/MyGame/MyGame.uproject"
-export UE_ROOT="/Users/Shared/Epic Games/UE_5.x"   # optional; the script can auto-detect common EGL installs
-export XCODE_WORKSPACE="MyGame (Mac).xcworkspace"
-export XCODE_SCHEME="MyGame"
-export DEVELOPMENT_TEAM="ABCDE12345"
-export SIGN_IDENTITY="Developer ID Application: My Company (ABCDE12345)"
-export EXPORT_PLIST="/Users/you/MyGame/ExportOptions.plist"
-export NOTARY_PROFILE="MyNotaryProfileName"
-export SHORT_NAME="MyGame"
-export LONG_NAME="MyGameFullName"
-
-./build_archive_sign_notarize_macos.sh
-```
+If you prefer not to use a `.env` file, pass CLI flags instead. Run `./build_archive_sign_notarize_macos.sh --help` for the full list.
 
 Optional: skip prompts (CI-friendly)
 
-Set these via `.env`, environment variables, or CLI flags:
+Set these via `.env` or CLI flags:
 
 ```bash
 # BUILD_TYPE="shipping"      # "shipping" or "development" (or s/d)
@@ -186,16 +165,16 @@ If `xcodebuild -list -workspace YourProject.xcworkspace` does not list your sche
 **This script does not assume Steam.**  
 Steam support is *off by default.*
 
-To enable:
+To enable (in `.env`):
 ```bash
-export ENABLE_STEAM="1"
-export STEAM_DYLIB_SRC="/path/to/libsteam_api.dylib"
+ENABLE_STEAM="1"
+STEAM_DYLIB_SRC="/path/to/libsteam_api.dylib"
 ```
 
 Optional:
 ```bash
-export WRITE_STEAM_APPID="1"
-export STEAM_APP_ID="480"   # testing
+WRITE_STEAM_APPID="1"
+STEAM_APP_ID="480"   # testing
 ```
 
 ### Notes on Steam entitlements
@@ -213,18 +192,18 @@ If you don’t need Steam/launcher-injected libraries: keep `ENABLE_STEAM=0`.
 If you want a signed DMG (for download distribution), enable DMG output:
 
 ```bash
-export ENABLE_DMG="1"
+ENABLE_DMG="1"
 ```
 
 `FANCY_DMG` is `0` by default when not set.
 
 Optional overrides:
 ```bash
-export ENABLE_ZIP="1"   # create ZIP alongside the app
-export FANCY_DMG="0"    # experimental Finder layout mode (off by default)
-export DMG_NAME="MyGame.dmg"
-export DMG_VOLUME_NAME="MyGame"
-export DMG_OUTPUT_DIR="$PWD/Build"
+ENABLE_ZIP="1"     # create ZIP alongside the app (default: on when NOTARIZE=yes)
+FANCY_DMG="0"      # experimental Finder layout mode (off by default)
+DMG_NAME="MyGame.dmg"
+DMG_VOLUME_NAME="MyGame"
+DMG_OUTPUT_DIR="Build"
 ```
 
 When enabled, the script creates and signs the DMG. If `NOTARIZE=yes`, it also notarizes and staples the DMG.
@@ -243,7 +222,7 @@ Artifacts go under (names derived from `SHORT_NAME` / `LONG_NAME`):
 
 ## Troubleshooting checklist
 - **Missing configuration:** if the script stops immediately, a required value (such as `DEVELOPMENT_TEAM` or
-  `SIGN_IDENTITY`) was not provided via `.env`, environment variable, or CLI flag.
+  `SIGN_IDENTITY`) was not provided via `.env` or CLI flag.
 - **Xcode scheme not found:** the scheme must be Shared in Xcode. (seen by `xcodebuild -list -workspace ...`)
 - **RunUAT.sh not found:** double check `UE_ROOT`.
 - **Notarization fails:** ensure your `NOTARY_PROFILE` exists and is valid:
