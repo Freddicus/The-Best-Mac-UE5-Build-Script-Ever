@@ -1234,7 +1234,7 @@ DMG_OUTPUT_DIR="${DMG_OUTPUT_DIR:-}"
 usage() {
   cat >&3 <<'USAGE'
 Usage:
-  ./build_archive_sign_notarize_macos.sh [options]
+  ./ship.sh [options]
 
 Options (highest priority):
   --repo-root PATH
