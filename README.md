@@ -99,8 +99,8 @@ If your workspace or scheme cannot be resolved automatically, the script will gu
 3. Run:
 
 ```bash
-chmod +x build_archive_sign_notarize_macos.sh
-./build_archive_sign_notarize_macos.sh
+chmod +x ship.sh
+./ship.sh
 ```
 
 You’ll be prompted for:
@@ -129,7 +129,7 @@ The script automatically loads `.env` if it exists in the same folder as the scr
 
 Xcode export needs an `ExportOptions.plist`. For interactive runs, the script tries to auto-detect one in your project root or offers to generate a minimal one. In CI or other non-interactive contexts, you must provide `EXPORT_PLIST` explicitly.
 
-If you prefer not to use a `.env` file, pass CLI flags instead. Run `./build_archive_sign_notarize_macos.sh --help` for the full list.
+If you prefer not to use a `.env` file, pass CLI flags instead. Run `./ship.sh --help` for the full list.
 
 Optional: skip prompts (CI-friendly)
 
