@@ -707,6 +707,9 @@ print_config() {
   echo "NOTARIZE:          ${NOTARIZE:-<unset>}" >&3
   echo "ENABLE_STEAM:      $ENABLE_STEAM" >&3
   echo "WRITE_STEAM_APPID: $WRITE_STEAM_APPID" >&3
+  echo "MACOS_ICON_SYNC:   $MACOS_ICON_SYNC" >&3
+  echo "MACOS_ICON_XCASSETS: ${MACOS_ICON_XCASSETS:-<unset>}" >&3
+  echo "MACOS_APPICON_SET_NAME: ${MACOS_APPICON_SET_NAME:-<unset>}" >&3
   echo "ENABLE_ZIP:        ${ENABLE_ZIP:-<unset>}" >&3
   echo "ENABLE_DMG:        $ENABLE_DMG" >&3
   echo "FANCY_DMG:         $FANCY_DMG" >&3
@@ -935,6 +938,102 @@ autodetect_scheme_if_needed() {
         die "Multiple schemes found and none matched the detected name. Set XCODE_SCHEME explicitly."
       fi
     fi
+  fi
+}
+
+first_appiconset_name_in_catalog() {
+  # Return the first *.appiconset folder name (without suffix) from an asset catalog.
+  local catalog_dir="$1"
+  [[ -d "$catalog_dir" ]] || { echo ""; return 0; }
+
+  local d
+  d="$(/usr/bin/find "$catalog_dir" -maxdepth 1 -type d -name '*.appiconset' -print | /usr/bin/sort | /usr/bin/head -n 1 || true)"
+  [[ -n "$d" ]] || { echo ""; return 0; }
+  d="$(/usr/bin/basename "$d")"
+  echo "${d%.appiconset}"
+}
+
+seed_macos_icon_assets_for_workspace() {
+  # Make workspace projects consume a repo-local, source-controlled macOS asset catalog.
+  # This avoids depending on UE engine-global Assets.xcassets for app icons.
+  [[ "$USE_XCODE_EXPORT" == "1" ]] || return 0
+  [[ "${MACOS_ICON_SYNC:-0}" == "1" ]] || return 0
+
+  [[ -f "$WORKSPACE/contents.xcworkspacedata" ]] || die "Workspace metadata missing: $WORKSPACE/contents.xcworkspacedata"
+  [[ -d "$MACOS_ICON_XCASSETS" ]] || die "Configured macOS icon catalog not found: $MACOS_ICON_XCASSETS"
+
+  local stage_root stage_catalog
+  stage_root="$REPO_ROOT/Intermediate/SourceControlled"
+  stage_catalog="$stage_root/Assets.xcassets"
+
+  /bin/rm -rf "$stage_catalog"
+  /bin/mkdir -p "$stage_catalog"
+  /usr/bin/rsync -a --delete "$MACOS_ICON_XCASSETS"/ "$stage_catalog"/
+
+  # Xcode expects "AppIcon" by default. If the source-controlled catalog uses a custom
+  # appiconset name, mirror it to AppIcon so we do not require build setting edits.
+  local source_appicon_name
+  source_appicon_name="${MACOS_APPICON_SET_NAME:-}"
+  if is_placeholder "$source_appicon_name"; then
+    if [[ -d "$stage_catalog/AppIcon.appiconset" ]]; then
+      source_appicon_name="AppIcon"
+    else
+      source_appicon_name="$(first_appiconset_name_in_catalog "$stage_catalog")"
+    fi
+  fi
+
+  if is_placeholder "$source_appicon_name" || [[ ! -d "$stage_catalog/$source_appicon_name.appiconset" ]]; then
+    die "No usable *.appiconset found in $MACOS_ICON_XCASSETS (set MACOS_APPICON_SET_NAME if needed)."
+  fi
+
+  if [[ "$source_appicon_name" != "AppIcon" ]]; then
+    /bin/rm -rf "$stage_catalog/AppIcon.appiconset"
+    /bin/cp -R "$stage_catalog/$source_appicon_name.appiconset" "$stage_catalog/AppIcon.appiconset"
+  fi
+
+  if [[ ! -f "$stage_catalog/Contents.json" ]]; then
+    /bin/cat > "$stage_catalog/Contents.json" <<'JSON'
+{
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+JSON
+  fi
+
+  local stage_catalog_abs escaped_path workspace_xml rel_proj pbxproj changed_count
+  stage_catalog_abs="$(abspath_existing "$stage_catalog")"
+  [[ -n "$stage_catalog_abs" ]] || die "Unable to resolve staged asset catalog path: $stage_catalog"
+  escaped_path="$(printf '%s\n' "$stage_catalog_abs" | /usr/bin/sed 's/[&#\\]/\\&/g')"
+  workspace_xml="$WORKSPACE/contents.xcworkspacedata"
+  changed_count=0
+
+  while IFS= read -r rel_proj; do
+    [[ -n "$rel_proj" ]] || continue
+    pbxproj="$REPO_ROOT/$rel_proj/project.pbxproj"
+    if [[ ! -f "$pbxproj" ]]; then
+      warn "Workspace project missing (skipping icon path patch): $pbxproj"
+      continue
+    fi
+    if ! /usr/bin/grep -q 'folder.assetcatalog; name = "Assets.xcassets";' "$pbxproj"; then
+      continue
+    fi
+    /usr/bin/sed -i '' \
+      "/folder\\.assetcatalog; name = \"Assets\\.xcassets\"/ s#path = \"[^\"]*\";#path = \"$escaped_path\";#" \
+      "$pbxproj"
+    changed_count=$((changed_count + 1))
+  done < <(
+    /usr/bin/grep -Eo 'location = "group:[^"]+\.xcodeproj"' "$workspace_xml" \
+      | /usr/bin/sed -E 's/^location = "group:([^"]+)\.xcodeproj"$/\1.xcodeproj/' \
+      | /usr/bin/sort -u
+  )
+
+  if [[ "$changed_count" -eq 0 ]]; then
+    warn "No workspace project references to Assets.xcassets were patched for icon seeding."
+  else
+    info "Seeded macOS icon catalog from: $MACOS_ICON_XCASSETS"
+    info "Workspace projects patched to use: $stage_catalog_abs"
   fi
 }
 
@@ -1219,6 +1318,10 @@ STEAM_APP_ID="${STEAM_APP_ID:-480}"
 WRITE_STEAM_APPID="${WRITE_STEAM_APPID:-0}"
 STEAM_DYLIB_SRC="${STEAM_DYLIB_SRC:-}"
 
+MACOS_ICON_SYNC="${MACOS_ICON_SYNC:-1}"
+MACOS_ICON_XCASSETS="${MACOS_ICON_XCASSETS:-}"
+MACOS_APPICON_SET_NAME="${MACOS_APPICON_SET_NAME:-}"
+
 ENABLE_ZIP="${ENABLE_ZIP:-}"
 ENABLE_DMG="${ENABLE_DMG:-0}"
 FANCY_DMG="${FANCY_DMG:-0}"
@@ -1234,7 +1337,7 @@ DMG_OUTPUT_DIR="${DMG_OUTPUT_DIR:-}"
 usage() {
   cat >&3 <<'USAGE'
 Usage:
-  ./ship.sh [options]
+  ./build_archive_sign_notarize_macos.sh [options]
 
 Options (highest priority):
   --repo-root PATH
@@ -1259,6 +1362,10 @@ Options (highest priority):
   --write-steam-appid 0|1
   --steam-app-id ID
   --steam-dylib-src PATH
+
+  --macos-icon-sync 0|1
+  --macos-icon-xcassets PATH
+  --macos-appicon-set-name NAME
 
   --enable-zip 0|1
   --enable-dmg 0|1
@@ -1301,6 +1408,10 @@ while [[ $# -gt 0 ]]; do
     --write-steam-appid)    WRITE_STEAM_APPID="$2"; shift 2 ;;
     --steam-app-id)         STEAM_APP_ID="$2"; shift 2 ;;
     --steam-dylib-src)      STEAM_DYLIB_SRC="$2"; shift 2 ;;
+
+    --macos-icon-sync)      MACOS_ICON_SYNC="$2"; shift 2 ;;
+    --macos-icon-xcassets)  MACOS_ICON_XCASSETS="$2"; CLI_SET_MACOS_ICON_XCASSETS=1; shift 2 ;;
+    --macos-appicon-set-name) MACOS_APPICON_SET_NAME="$2"; shift 2 ;;
 
     --enable-zip)           ENABLE_ZIP="$2"; shift 2 ;;
     --enable-dmg)           ENABLE_DMG="$2"; shift 2 ;;
@@ -1396,6 +1507,14 @@ autodetect_workspace_guess_if_needed
 autodetect_export_plist_if_needed
 autodetect_steam_if_needed
 autodetect_steam_dylib_src_from_engine_if_needed
+
+# Default macOS icon catalog location is source-controlled in repo root.
+if is_placeholder "${MACOS_ICON_XCASSETS:-}"; then
+  MACOS_ICON_XCASSETS="$REPO_ROOT/macOS-SourceControlled.xcassets"
+fi
+if [[ "$MACOS_ICON_XCASSETS" != /* ]]; then
+  MACOS_ICON_XCASSETS="$(abspath_from "$REPO_ROOT" "$MACOS_ICON_XCASSETS")"
+fi
 
 # Derive common paths (after CLI parsing/autodetect)
 REPO="$REPO_ROOT"
@@ -1605,6 +1724,17 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   [[ -f "$EXPORT_PLIST" ]] || die "ExportOptions.plist not found: $EXPORT_PLIST"
 fi
 
+if [[ "$USE_XCODE_EXPORT" == "1" && "$MACOS_ICON_SYNC" == "1" ]]; then
+  if [[ ! -d "$MACOS_ICON_XCASSETS" ]]; then
+    if [[ "${CLI_SET_MACOS_ICON_XCASSETS:-0}" == "1" ]]; then
+      die "Configured --macos-icon-xcassets path not found: $MACOS_ICON_XCASSETS"
+    fi
+    warn "macOS icon catalog not found at default path: $MACOS_ICON_XCASSETS"
+    warn "Continuing without macOS icon catalog seeding (set --macos-icon-sync 0 to silence this)."
+    MACOS_ICON_SYNC="0"
+  fi
+fi
+
 if [[ "$ENABLE_DMG" == "1" ]]; then
   command -v hdiutil >/dev/null 2>&1 || die "hdiutil not found (required to create DMG)."
   if [[ "$FANCY_DMG" == "1" ]] && ! command -v osascript >/dev/null 2>&1; then
@@ -1663,6 +1793,8 @@ info "Building game (UAT BuildCookRun)"
 echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3
 
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+  seed_macos_icon_assets_for_workspace
+
   echo "== Archive (NO CLEAN) with Automatic signing ==" >&3
   xcodebuild \
     -workspace "$WORKSPACE" \
