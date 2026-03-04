@@ -34,7 +34,7 @@ on_error_exit() {
   if [[ -n "${DMG_RW_PATH:-}" && -f "${DMG_RW_PATH:-}" ]]; then
     /bin/rm -f "${DMG_RW_PATH:-}" >/dev/null 2>&1 || true
   fi
-  /bin/rm -f "${ENTITLEMENTS_FILE:-}" 2>/dev/null || true
+  /bin/rm -f "${_ENTITLEMENTS_TMP:-}" 2>/dev/null || true
   echo "❌ Script failed at line $fail_line (exit $exit_code)" >&3
   echo "Failing command: $fail_cmd" >&3
   print_log_tail
@@ -1749,10 +1749,21 @@ TMP_PREFIX="$(sanitize_name_for_tmp "$SHORT_NAME")"
 # Entitlements: hardened runtime is required for Developer ID signing.
 # Steam overlay / Steam client libraries may require disabling library validation.
 # Only enable those entitlements when you actually need them.
-ENTITLEMENTS_FILE="$(/usr/bin/mktemp -t ${TMP_PREFIX}_entitlements_XXXXXX.plist)"
+#
+# If ENTITLEMENTS_FILE is already set (e.g. user-provided via env or future CLI flag),
+# use it as-is and do not generate or clean it up. Otherwise, generate a temp file.
+if is_placeholder "${ENTITLEMENTS_FILE:-}"; then
+  _ENTITLEMENTS_TMP="$(/usr/bin/mktemp -t ${TMP_PREFIX}_entitlements_XXXXXX.plist)"
+  ENTITLEMENTS_FILE="$_ENTITLEMENTS_TMP"
+else
+  _ENTITLEMENTS_TMP=""
+  info "Using user-provided ENTITLEMENTS_FILE: $ENTITLEMENTS_FILE"
+fi
 
-if [[ "$ENABLE_STEAM" == "1" ]]; then
-  cat > "$ENTITLEMENTS_FILE" <<'PLIST'
+if [[ -n "$_ENTITLEMENTS_TMP" ]]; then
+  # Script-generated entitlements: write the appropriate content.
+  if [[ "$ENABLE_STEAM" == "1" ]]; then
+    cat > "$ENTITLEMENTS_FILE" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1764,15 +1775,16 @@ if [[ "$ENABLE_STEAM" == "1" ]]; then
 </dict>
 </plist>
 PLIST
-else
-  # Minimal entitlements file. Keeping it empty is valid for many apps.
-  cat > "$ENTITLEMENTS_FILE" <<'PLIST'
+  else
+    # Minimal entitlements file. Keeping it empty is valid for many apps.
+    cat > "$ENTITLEMENTS_FILE" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict/>
 </plist>
 PLIST
+  fi
 fi
 
 echo "Using signing identity: $SIGN_IDENTITY" >&3
@@ -2055,5 +2067,5 @@ else
   echo "DMG: (not created — ENABLE_DMG=0)" >&3
 fi
 
-# Cleanup temp entitlements file
-rm -f "$ENTITLEMENTS_FILE" 2>/dev/null || true
+# Cleanup script-generated temp entitlements file only (user-provided files are never deleted).
+/bin/rm -f "${_ENTITLEMENTS_TMP:-}" 2>/dev/null || true
