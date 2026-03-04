@@ -6,7 +6,7 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
-## [Unreleased] — cleanup-pass (PR #9)
+## [2026-03-04] — Cleanup Pass (PR #9)
 
 ### Fixed
 - Replace all bare `exit N` calls with `die()` so errors consistently trigger `on_error_exit` cleanup and print the log tail
