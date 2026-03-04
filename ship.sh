@@ -34,6 +34,7 @@ on_error_exit() {
   if [[ -n "${DMG_RW_PATH:-}" && -f "${DMG_RW_PATH:-}" ]]; then
     /bin/rm -f "${DMG_RW_PATH:-}" >/dev/null 2>&1 || true
   fi
+  /bin/rm -f "${ENTITLEMENTS_FILE:-}" 2>/dev/null || true
   echo "❌ Script failed at line $fail_line (exit $exit_code)" >&3
   echo "Failing command: $fail_cmd" >&3
   print_log_tail
@@ -1692,17 +1693,14 @@ fi
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   APP_PATH="$(find_first_app_under "$EXPORT_DIR")"
   if [[ -z "${APP_PATH:-}" ]]; then
-    echo "ERROR: No .app found under export dir: $EXPORT_DIR" >&3
-    ls -la "$EXPORT_DIR" || true
-    exit 2
+    /bin/ls -la "$EXPORT_DIR" >&3 || true
+    die "No .app found under export dir: $EXPORT_DIR"
   fi
 else
   APP_PATH="$(find_first_app_under "$BUILD_DIR")"
   if [[ -z "${APP_PATH:-}" ]]; then
-    echo "ERROR: No .app found under build dir: $BUILD_DIR" >&3
-    echo "UAT output layouts differ by project/settings. Try enabling Xcode export (USE_XCODE_EXPORT=1) or point the script at the correct output." >&3
-    ls -la "$BUILD_DIR" || true
-    exit 2
+    /bin/ls -la "$BUILD_DIR" >&3 || true
+    die "No .app found under build dir: $BUILD_DIR — UAT output layouts differ by project/settings. Try enabling Xcode export (USE_XCODE_EXPORT=1) or point the script at the correct output."
   fi
 fi
 
@@ -1779,38 +1777,46 @@ fi
 
 echo "Using signing identity: $SIGN_IDENTITY" >&3
 
-echo "Re-signing app bundle (deep) to seal added dylib" >&3
-/usr/bin/codesign --force --deep --options runtime --timestamp --entitlements "$ENTITLEMENTS_FILE" --sign "$SIGN_IDENTITY" "$APP_PATH"
+# Apple deprecated --deep for distribution signing. The correct approach is to
+# sign all nested dylibs and frameworks individually first, then sign the outer
+# .app. This ensures each component has a valid, independent signature that
+# Gatekeeper and notarization can verify.
+echo "== Re-signing app bundle (per-component, then outer) ==" >&3
+
+while IFS= read -r -d '' lib; do
+  /usr/bin/codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$lib"
+done < <(/usr/bin/find "$APP_PATH/Contents" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 2>/dev/null)
+
+while IFS= read -r -d '' fwk; do
+  /usr/bin/codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$fwk"
+done < <(/usr/bin/find "$APP_PATH/Contents" -type d -name "*.framework" -print0 2>/dev/null)
+
+/usr/bin/codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS_FILE" --sign "$SIGN_IDENTITY" "$APP_PATH"
 
 echo "== Validations (fail fast) ==" >&3
 
 # Resolve the actual executable name from Info.plist
 APP_EXE_NAME=$(/usr/bin/defaults read "$APP_PATH/Contents/Info.plist" CFBundleExecutable 2>/dev/null || true)
 if [[ -z "${APP_EXE_NAME:-}" ]]; then
-  echo "ERROR: Could not read CFBundleExecutable from Info.plist" >&3
-  exit 6
+  die "Could not read CFBundleExecutable from $APP_PATH/Contents/Info.plist"
 fi
 EXE_PATH="$APP_PATH/Contents/MacOS/$APP_EXE_NAME"
 
-
 if [[ ! -f "$EXE_PATH" ]]; then
-  echo "ERROR: Expected executable not found: $EXE_PATH" >&3
-  exit 7
+  die "Expected executable not found: $EXE_PATH"
 fi
 
-# Quick sanity: Shipping builds should not have obvious debug/dev markers.
-# (This is heuristic; the authoritative check is LogInit: Build: Shipping when running with -log.)
-if /usr/bin/strings "$EXE_PATH" | /usr/bin/grep -q "Development"; then
-  echo "WARN: Executable contains 'Development' strings. If you see on-screen debug in-game, confirm LogInit shows Shipping." >&3
-fi
+# NOTE: To verify the build configuration at runtime, launch with -log and look for:
+#   LogInit: Build: Shipping
+# Scanning binary strings for "Development" is not reliable — UE Shipping builds
+# legitimately contain that word in class names, log strings, and linker symbols.
 
 # 1) If Steam is enabled, verify the main exe references Steam as @loader_path
 if [[ "$ENABLE_STEAM" == "1" ]]; then
-  /usr/bin/otool -L "$EXE_PATH" | /usr/bin/grep -q "@loader_path/libsteam_api.dylib" || {
-    echo "ERROR: Executable does not reference @loader_path/libsteam_api.dylib" >&3
-    /usr/bin/otool -L "$EXE_PATH" | /usr/bin/grep steam || true
-    exit 8
-  }
+  if ! /usr/bin/otool -L "$EXE_PATH" | /usr/bin/grep -q "@loader_path/libsteam_api.dylib"; then
+    /usr/bin/otool -L "$EXE_PATH" | /usr/bin/grep -i steam >&3 || true
+    die "Executable does not reference @loader_path/libsteam_api.dylib — Steam dylib was not linked at the expected rpath."
+  fi
 fi
 
 # 2) Verify signatures strictly (no || true)
@@ -1842,8 +1848,7 @@ if [[ "$ENABLE_STEAM" == "1" ]]; then
   echo "TeamIdentifier (app):   ${APP_TEAM:-<none>}" >&3
   echo "TeamIdentifier (dylib): ${DYLIB_TEAM:-<none>}" >&3
   if [[ -n "${APP_TEAM:-}" && -n "${DYLIB_TEAM:-}" && "$APP_TEAM" != "$DYLIB_TEAM" ]]; then
-    echo "ERROR: TeamIdentifier mismatch between app and libsteam_api.dylib (dyld will refuse to load it)." >&3
-    exit 5
+    die "TeamIdentifier mismatch between app ($APP_TEAM) and libsteam_api.dylib ($DYLIB_TEAM) — dyld will refuse to load it."
   fi
 else
   echo "TeamIdentifier (app):   ${APP_TEAM:-<none>}" >&3
@@ -2008,6 +2013,18 @@ if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
 
   if [[ -n "$ZIP_NOTARY_ID" ]]; then
     wait_notary "$ZIP_NOTARY_ID" "ZIP"
+  fi
+
+  if [[ -n "$DMG_NOTARY_ID" ]]; then
+    wait_notary "$DMG_NOTARY_ID" "DMG"
+    echo "== Staple DMG ==" >&3
+    /usr/bin/xcrun stapler staple "$DMG_PATH"
+  fi
+
+  # Staple the app after any successful notarization (ZIP or DMG-only).
+  # Without this, Gatekeeper blocks the app on a fresh Mac even if notarization
+  # succeeded — the ticket must be stapled regardless of which artifact was used.
+  if [[ -n "$ZIP_NOTARY_ID" || -n "$DMG_NOTARY_ID" ]]; then
     echo "== Staple app ==" >&3
     /usr/bin/xcrun stapler staple "$APP_PATH"
 
@@ -2016,12 +2033,6 @@ if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
 
     echo "== Gatekeeper assessment (app) ==" >&3
     /usr/sbin/spctl -a -vv "$APP_PATH" || true
-  fi
-
-  if [[ -n "$DMG_NOTARY_ID" ]]; then
-    wait_notary "$DMG_NOTARY_ID" "DMG"
-    echo "== Staple DMG ==" >&3
-    /usr/bin/xcrun stapler staple "$DMG_PATH"
   fi
 else
   echo "== Notarization disabled (NOTARIZE=no) ==" >&3
