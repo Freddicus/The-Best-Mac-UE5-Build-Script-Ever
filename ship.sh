@@ -146,6 +146,17 @@ exec 3>&1 4>&2
 SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" 2>/dev/null && /bin/pwd -P)"
 ENV_FILE="$SCRIPT_DIR/.env"
 if [[ -f "$ENV_FILE" ]]; then
+  # Safety: refuse to source a .env owned by a different user or world-writable.
+  # .env is sourced as shell code, so a tampered file is a trivial privilege escalation.
+  _env_owner="$(/usr/bin/stat -f "%Su" "$ENV_FILE" 2>/dev/null || true)"
+  _env_mode="$(/usr/bin/stat -f "%p" "$ENV_FILE" 2>/dev/null || true)"
+  if [[ -n "$_env_owner" && "$_env_owner" != "$(/usr/bin/id -un)" ]]; then
+    die ".env is owned by '$_env_owner', not the current user. Refusing to source it: $ENV_FILE"
+  fi
+  if [[ -n "$_env_mode" && $(( _env_mode & 0002 )) -ne 0 ]]; then
+    die ".env is world-writable. Fix with: chmod o-w \"$ENV_FILE\""
+  fi
+  unset _env_owner _env_mode
   # Export variables defined in .env so they behave like real environment variables.
   set -a
   # shellcheck disable=SC1090
@@ -1026,7 +1037,9 @@ autodetect_steam_if_needed() {
   if [[ "${CLI_SET_ENABLE_STEAM:-0}" != "1" && "${ENABLE_STEAM:-0}" == "0" ]]; then
     if detect_steam_from_ini; then
       ENABLE_STEAM="1"
-      info "Detected Steam OSS in Config/DefaultEngine.ini — ENABLE_STEAM=1"
+      warn "Auto-enabled ENABLE_STEAM=1 (Steam OSS detected in Config/DefaultEngine.ini)."
+      warn "This adds security-weakening entitlements: disable-library-validation + allow-dyld-environment-variables."
+      warn "To suppress this for a non-Steam build, set ENABLE_STEAM=0 explicitly."
 
       local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
       local appid
@@ -1280,7 +1293,17 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
 
     --repo-root)            REPO_ROOT="$2"; shift 2 ;;
-    --uproject)             UPROJECT_NAME="$2"; CLI_SET_UPROJECT=1; shift 2 ;;
+    --uproject)
+      # Resolve immediately: absolute path → set both UPROJECT_PATH and UPROJECT_NAME.
+      # Bare filename or relative path → set UPROJECT_NAME only; path resolved later.
+      if [[ "$2" == /* ]]; then
+        UPROJECT_PATH="$2"
+        UPROJECT_NAME="$(/usr/bin/basename "$2")"
+      else
+        UPROJECT_NAME="$2"
+        UPROJECT_PATH=""
+      fi
+      shift 2 ;;
     --ue-root)              UE_ROOT="$2"; shift 2 ;;
     --xcode-workspace)      XCODE_WORKSPACE="$2"; shift 2 ;;
     --xcode-scheme)         XCODE_SCHEME="$2"; shift 2 ;;
@@ -1333,12 +1356,7 @@ if is_placeholder "$DEVELOPMENT_TEAM"; then
   fi
 fi
 
-# If UPROJECT_PATH is provided, normalize it and derive UPROJECT_NAME/REPO_ROOT.
-if [[ "${CLI_SET_UPROJECT:-0}" == "1" ]]; then
-  # CLI takes priority over any existing UPROJECT_PATH.
-  UPROJECT_PATH=""
-fi
-
+# Normalize UPROJECT_PATH if provided via env var (CLI path is already resolved above).
 if [[ -n "${UPROJECT_PATH:-}" ]]; then
   if [[ "$UPROJECT_PATH" != /* ]]; then
     if [[ -n "${REPO_ROOT:-}" ]]; then
@@ -1353,13 +1371,6 @@ if [[ -n "${UPROJECT_PATH:-}" ]]; then
       REPO_ROOT="$(/usr/bin/dirname "$UPROJECT_PATH")"
     fi
   fi
-fi
-
-# If the caller provided absolute paths for uproject/workspace, normalize them.
-if [[ -n "${UPROJECT_NAME:-}" && "$UPROJECT_NAME" == /* ]]; then
-  UPROJECT_PATH="$UPROJECT_NAME"
-  UPROJECT_NAME="$(/usr/bin/basename "$UPROJECT_PATH")"
-  REPO_ROOT="$(/usr/bin/dirname "$UPROJECT_PATH")"
 fi
 
 if [[ -n "${XCODE_WORKSPACE:-}" && "$XCODE_WORKSPACE" == /* ]]; then
@@ -1586,6 +1597,15 @@ fi
 # Tools used later
 command -v codesign  >/dev/null 2>&1 || die "codesign not found (unexpected on macOS)."
 
+# Verify the signing identity exists in the keychain before the multi-hour build.
+# A typo or expired cert will fail here rather than after UAT finishes cooking.
+if ! /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep -qF "$SIGN_IDENTITY"; then
+  echo "Available Developer ID codesigning identities:" >&3
+  /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep "Developer ID" >&3 || echo "  (none found)" >&3
+  die "SIGN_IDENTITY not found in keychain: $SIGN_IDENTITY"
+fi
+good "Signing identity found in keychain."
+
 # Xcode steps are optional
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   # Xcode workspaces are directory bundles (".xcworkspace" folders), not regular files.
@@ -1593,12 +1613,18 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found. Install Xcode and the Command Line Tools."
 fi
 
-# Notarization requires Apple tools and a configured notary profile
+# Notarization requires Apple tools and a configured, accessible notary profile
 if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
   command -v xcrun >/dev/null 2>&1 || die "xcrun not found. Install Xcode Command Line Tools."
   if is_placeholder "$NOTARY_PROFILE"; then
     die "Internal error: NOTARIZE_ENABLED=1 but NOTARY_PROFILE is not configured (should have been auto-disabled earlier)."
   fi
+  # Verify the notary profile is reachable now, not hours later after the build.
+  info "Verifying notary profile accessibility before build"
+  if ! wait_for_notary_profile_with_backoff; then
+    die "Notary profile '$NOTARY_PROFILE' is not accessible. Verify with: xcrun notarytool history --keychain-profile \"$NOTARY_PROFILE\""
+  fi
+  good "Notary profile '$NOTARY_PROFILE' is accessible."
 fi
 
 # Export options plist must exist if you are exporting
@@ -1991,6 +2017,8 @@ OSA
 
   echo "== Sign DMG ==" >&3
   /usr/bin/codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
+  echo "== Verify DMG signature ==" >&3
+  /usr/bin/codesign --verify --verbose=2 "$DMG_PATH"
 else
   info "ENABLE_DMG=0 — skipping DMG creation"
 fi
