@@ -6,6 +6,20 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-03-04] — Robustness improvements (PR #10)
+
+### Added
+- Pre-flight check: `SIGN_IDENTITY` is verified in the keychain via `security find-identity` before the build starts; a typo or expired cert now fails immediately with a list of available identities
+- Pre-flight check: `NOTARY_PROFILE` is verified accessible via `notarytool history` before the build starts when `NOTARIZE=yes`
+- `.env` ownership and permission guard: the script refuses to source `.env` if it is owned by a different user or is world-writable
+- `codesign --verify` runs immediately after DMG signing so a bad signature fails fast rather than surfacing hours later at notarization
+
+### Changed
+- Steam auto-enable now emits `warn` (⚠️) instead of `info` and explicitly names the entitlements being added (`disable-library-validation`, `allow-dyld-environment-variables`)
+- `--uproject` argument is fully resolved at parse time: absolute paths set both `UPROJECT_PATH` and `UPROJECT_NAME` immediately; bare filenames set only `UPROJECT_NAME` for later autodetect. Removes the `CLI_SET_UPROJECT` flag and post-parse normalization dance
+
+---
+
 ## [2026-03-04] — Cleanup Pass (PR #9)
 
 ### Fixed
