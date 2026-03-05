@@ -6,7 +6,7 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
-## [Unreleased] — polish (PR #11)
+## [2026-03-05] — polish (PR #11)
 
 ### Added
 - Block comment at top of `ship.sh` documenting the two-stage FD 3/4 logging architecture
