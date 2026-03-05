@@ -1,5 +1,5 @@
 **About this README**  
-> This README and shell script were written with the help of a large language model, and it represents the *end result* of many back‑and‑forths, dead ends, and genuine frustration while trying to ship a signed and notarized macOS Unreal build.  
+> This README and shell script were written with the help of large language models (initially ChatGPT; currently Claude), and it represents the *end result* of many back‑and‑forths, dead ends, and genuine frustration while trying to ship a signed and notarized macOS Unreal build.  
 > 
 > I’m sharing it because getting all of this right was *hard enough* that it felt irresponsible not to document it once it finally worked.
 

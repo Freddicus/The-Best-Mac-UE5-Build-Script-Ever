@@ -1389,29 +1389,29 @@ Options (highest priority):
   --short-name NAME
   --long-name NAME
 
-  --use-xcode-export 0|1
-  --clean-build-dir 0|1
-  --dry-run 0|1
-  --print-config 0|1
+  --xcode-export / --no-xcode-export
+  --clean-build-dir / --no-clean-build-dir
+  --dry-run / --no-dry-run
+  --print-config / --no-print-config
 
-  --enable-steam 0|1
-  --write-steam-appid 0|1
+  --steam / --no-steam
+  --write-steam-appid / --no-write-steam-appid
   --steam-app-id ID
   --steam-dylib-src PATH
 
-  --macos-icon-sync 0|1
+  --macos-icon-sync / --no-macos-icon-sync
   --macos-icon-xcassets PATH
   --macos-appicon-set-name NAME
 
-  --enable-zip 0|1
-  --enable-dmg 0|1
-  --fancy-dmg 0|1
+  --zip / --no-zip
+  --dmg / --no-dmg
+  --fancy-dmg / --no-fancy-dmg
   --dmg-name NAME
   --dmg-volume-name NAME
   --dmg-output-dir PATH
 
   --build-type shipping|development
-  --notarize yes|no
+  --notarize / --no-notarize
 
   -h, --help
 USAGE
@@ -1445,29 +1445,40 @@ while [[ $# -gt 0 ]]; do
     --short-name)           SHORT_NAME="$2"; shift 2 ;;
     --long-name)            LONG_NAME="$2"; shift 2 ;;
 
-    --use-xcode-export)     USE_XCODE_EXPORT="$2"; shift 2 ;;
-    --clean-build-dir)      CLEAN_BUILD_DIR="$2"; shift 2 ;;
-    --dry-run)              DRY_RUN="$2"; shift 2 ;;
-    --print-config)         PRINT_CONFIG="$2"; shift 2 ;;
+    --xcode-export)         USE_XCODE_EXPORT="1" ;;
+    --no-xcode-export)      USE_XCODE_EXPORT="0" ;;
+    --clean-build-dir)      CLEAN_BUILD_DIR="1" ;;
+    --no-clean-build-dir)   CLEAN_BUILD_DIR="0" ;;
+    --dry-run)              DRY_RUN="1" ;;
+    --no-dry-run)           DRY_RUN="0" ;;
+    --print-config)         PRINT_CONFIG="1" ;;
+    --no-print-config)      PRINT_CONFIG="0" ;;
 
-    --enable-steam) ENABLE_STEAM="$2"; CLI_SET_ENABLE_STEAM=1; shift 2 ;;
-    --write-steam-appid)    WRITE_STEAM_APPID="$2"; shift 2 ;;
+    --steam)                ENABLE_STEAM="1"; CLI_SET_ENABLE_STEAM=1 ;;
+    --no-steam)             ENABLE_STEAM="0"; CLI_SET_ENABLE_STEAM=1 ;;
+    --write-steam-appid)    WRITE_STEAM_APPID="1" ;;
+    --no-write-steam-appid) WRITE_STEAM_APPID="0" ;;
     --steam-app-id)         STEAM_APP_ID="$2"; shift 2 ;;
     --steam-dylib-src)      STEAM_DYLIB_SRC="$2"; shift 2 ;;
 
-    --macos-icon-sync)      MACOS_ICON_SYNC="$2"; shift 2 ;;
+    --macos-icon-sync)      MACOS_ICON_SYNC="1" ;;
+    --no-macos-icon-sync)   MACOS_ICON_SYNC="0" ;;
     --macos-icon-xcassets)  MACOS_ICON_XCASSETS="$2"; CLI_SET_MACOS_ICON_XCASSETS=1; shift 2 ;;
     --macos-appicon-set-name) MACOS_APPICON_SET_NAME="$2"; shift 2 ;;
 
-    --enable-zip)           ENABLE_ZIP="$2"; shift 2 ;;
-    --enable-dmg)           ENABLE_DMG="$2"; shift 2 ;;
-    --fancy-dmg)            FANCY_DMG="$2"; shift 2 ;;
+    --zip)                  ENABLE_ZIP="1" ;;
+    --no-zip)               ENABLE_ZIP="0" ;;
+    --dmg)                  ENABLE_DMG="1" ;;
+    --no-dmg)               ENABLE_DMG="0" ;;
+    --fancy-dmg)            FANCY_DMG="1" ;;
+    --no-fancy-dmg)         FANCY_DMG="0" ;;
     --dmg-name)             DMG_NAME="$2"; shift 2 ;;
     --dmg-volume-name)      DMG_VOLUME_NAME="$2"; shift 2 ;;
     --dmg-output-dir)       DMG_OUTPUT_DIR="$2"; shift 2 ;;
 
     --build-type)           BUILD_TYPE="$2"; shift 2 ;;
-    --notarize)             NOTARIZE="$2"; shift 2 ;;
+    --notarize)             NOTARIZE="yes" ;;
+    --no-notarize)          NOTARIZE="no" ;;
 
     *) die "Unknown option: $1 (use --help)" ;;
   esac
@@ -1641,8 +1652,8 @@ if [[ -n "${NOTARIZE:-}" ]]; then
   # bash 3.2 compatibility: lowercase via tr
   _no_lower="$(echo "$NOTARIZE" | /usr/bin/tr '[:upper:]' '[:lower:]')"
   case "$_no_lower" in
-    yes|y) NOTARIZE_ENABLED=1; NOTARIZE="yes" ;;
-    no|n)  NOTARIZE_ENABLED=0; NOTARIZE="no" ;;
+    yes) NOTARIZE_ENABLED=1; NOTARIZE="yes" ;;
+    no)  NOTARIZE_ENABLED=0; NOTARIZE="no" ;;
     *) die "NOTARIZE must be 'yes' or 'no'" ;;
   esac
   unset _no_lower
@@ -1778,7 +1789,7 @@ if [[ "$USE_XCODE_EXPORT" == "1" && "$MACOS_ICON_SYNC" == "1" ]]; then
       die "Configured --macos-icon-xcassets path not found: $MACOS_ICON_XCASSETS"
     fi
     warn "macOS icon catalog not found at default path: $MACOS_ICON_XCASSETS"
-    warn "Continuing without macOS icon catalog seeding (set --macos-icon-sync 0 to silence this)."
+    warn "Continuing without macOS icon catalog seeding (pass --no-macos-icon-sync to silence this)."
     MACOS_ICON_SYNC="0"
   fi
 fi
