@@ -6,6 +6,22 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-03-05] — macOS app icon seeding (PR #12)
+
+### Added
+- `seed_macos_icon_assets_for_workspace`: syncs a source-controlled `.xcassets` catalog into `Intermediate/SourceControlled/Assets.xcassets` and patches every workspace project's `project.pbxproj` to point at it, so the macOS app icon is no longer sourced from the engine-global `Assets.xcassets`
+- `first_appiconset_name_in_catalog`: helper that returns the first `*.appiconset` name in a catalog, used to auto-detect the icon set when `MACOS_APPICON_SET_NAME` is unset
+- `MACOS_ICON_SYNC` (default `1`): enables/disables icon catalog seeding
+- `MACOS_ICON_XCASSETS`: path to the source-controlled `.xcassets` catalog; defaults to `$REPO_ROOT/macOS-SourceControlled.xcassets`
+- `MACOS_APPICON_SET_NAME`: explicitly names the `*.appiconset` to use; auto-detected when unset
+- CLI flags `--macos-icon-sync`, `--macos-icon-xcassets`, `--macos-appicon-set-name`
+- All three new variables shown in `--print-config` output
+
+### Changed
+- If `MACOS_ICON_XCASSETS` path does not exist at runtime and was not set explicitly via CLI, the script downgrades to a warning and disables icon seeding rather than hard-failing
+
+---
+
 ## [2026-03-05] — polish (PR #11)
 
 ### Added

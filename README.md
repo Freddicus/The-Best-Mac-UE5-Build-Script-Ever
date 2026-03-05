@@ -187,6 +187,29 @@ This script only adds those entitlements when `ENABLE_STEAM=1`, because they are
 
 If you don’t need Steam/launcher-injected libraries: keep `ENABLE_STEAM=0`.
 
+## Optional macOS app icon seeding
+
+By default, the macOS `.app` inherits whichever icon is baked into the engine-global `Assets.xcassets`. This means a UAT build will silently use the Unreal default icon unless you've set it up in the engine itself.
+
+Icon seeding solves this by copying a source-controlled `.xcassets` catalog into `Intermediate/SourceControlled/Assets.xcassets` and patching every `project.pbxproj` in the workspace to reference it — so Xcode picks up your icon without any engine-side changes.
+
+**Enabled by default.** The expected catalog location is `$REPO_ROOT/macOS-SourceControlled.xcassets`. If the path does not exist and was not set explicitly, the script emits a warning and continues without seeding.
+
+To disable entirely:
+```bash
+MACOS_ICON_SYNC="0"
+```
+
+To point at a custom catalog:
+```bash
+MACOS_ICON_XCASSETS="macOS-SourceControlled.xcassets"   # relative to REPO_ROOT or absolute
+```
+
+If the catalog contains a non-standard `*.appiconset` name (i.e. not `AppIcon`), the script auto-detects it. Set explicitly to override:
+```bash
+MACOS_APPICON_SET_NAME="MyCustomIcon"
+```
+
 ## Optional DMG output
 
 If you want a signed DMG (for download distribution), enable DMG output:
