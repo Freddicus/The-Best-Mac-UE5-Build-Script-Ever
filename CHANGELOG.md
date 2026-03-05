@@ -6,6 +6,20 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [Unreleased] — polish (PR #11)
+
+### Added
+- Block comment at top of `ship.sh` documenting the two-stage FD 3/4 logging architecture
+- `ExportOptions.plist.example`: annotated template matching what the script auto-generates interactively
+- `.github/workflows/build.yml.example`: annotated GitHub Actions CI starting point for self-hosted macOS UE5 builds (untested — adapt to your runner setup)
+- `shellcheck` GitHub Actions workflow (`.github/workflows/shellcheck.yml`)
+
+### Changed
+- `.env.example`: added missing `ENTITLEMENTS_FILE` entry (user-configurable since PR #9)
+- `README.md`: shellcheck noted as a development requirement in Contributing section
+
+---
+
 ## [2026-03-04] — Robustness improvements (PR #10)
 
 ### Added
