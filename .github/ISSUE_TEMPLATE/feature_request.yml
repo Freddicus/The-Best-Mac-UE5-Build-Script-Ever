@@ -1,0 +1,24 @@
+name: Feature request
+description: Something ship.sh should do (or do automatically) but doesn't.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Good feature requests fit the project's philosophy: `ship.sh` should automate and infer wherever possible, not add config knobs. If your idea requires the user to know or supply something the script could figure out itself, explain why it can't be detected automatically.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the friction you're hitting. What are you currently doing manually that you'd like the script to handle?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach (optional)
+      description: How might the script detect or handle this? You don't need a solution to file a request.
+    validations:
+      required: false
