@@ -6,6 +6,17 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-03-05] — Standardize CLI flag paradigm (PR #13)
+
+### Changed
+- Boolean CLI flags now use `--flag` / `--no-flag` instead of `--flag 0|1`
+- `--enable-steam`, `--enable-zip`, `--enable-dmg` renamed to `--steam`, `--zip`, `--dmg` (with `--no-steam`, `--no-zip`, `--no-dmg`)
+- `--use-xcode-export` renamed to `--xcode-export` (with `--no-xcode-export`)
+- `--notarize yes|no` replaced by `--notarize` / `--no-notarize`
+- `NOTARIZE` env variable no longer accepts `y`/`n` shorthands; only `yes`/`no` (case-insensitive)
+
+---
+
 ## [2026-03-05] — macOS app icon seeding (PR #12)
 
 ### Added
