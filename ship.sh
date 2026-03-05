@@ -1072,7 +1072,6 @@ JSON
   fi
 }
 
-
 find_first_app_under() {
   # Find the first .app bundle under a root (prefers shallow paths; returns empty if none).
   local root="$1"
@@ -1374,7 +1373,7 @@ DMG_OUTPUT_DIR="${DMG_OUTPUT_DIR:-}"
 usage() {
   cat >&3 <<'USAGE'
 Usage:
-  ./build_archive_sign_notarize_macos.sh [options]
+  ./ship.sh [options]
 
 Options (highest priority):
   --repo-root PATH
