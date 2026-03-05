@@ -1445,40 +1445,40 @@ while [[ $# -gt 0 ]]; do
     --short-name)           SHORT_NAME="$2"; shift 2 ;;
     --long-name)            LONG_NAME="$2"; shift 2 ;;
 
-    --xcode-export)         USE_XCODE_EXPORT="1" ;;
-    --no-xcode-export)      USE_XCODE_EXPORT="0" ;;
-    --clean-build-dir)      CLEAN_BUILD_DIR="1" ;;
-    --no-clean-build-dir)   CLEAN_BUILD_DIR="0" ;;
-    --dry-run)              DRY_RUN="1" ;;
-    --no-dry-run)           DRY_RUN="0" ;;
-    --print-config)         PRINT_CONFIG="1" ;;
-    --no-print-config)      PRINT_CONFIG="0" ;;
+    --xcode-export)         USE_XCODE_EXPORT="1"; shift ;;
+    --no-xcode-export)      USE_XCODE_EXPORT="0"; shift ;;
+    --clean-build-dir)      CLEAN_BUILD_DIR="1"; shift ;;
+    --no-clean-build-dir)   CLEAN_BUILD_DIR="0"; shift ;;
+    --dry-run)              DRY_RUN="1"; shift ;;
+    --no-dry-run)           DRY_RUN="0"; shift ;;
+    --print-config)         PRINT_CONFIG="1"; shift ;;
+    --no-print-config)      PRINT_CONFIG="0"; shift ;;
 
-    --steam)                ENABLE_STEAM="1"; CLI_SET_ENABLE_STEAM=1 ;;
-    --no-steam)             ENABLE_STEAM="0"; CLI_SET_ENABLE_STEAM=1 ;;
-    --write-steam-appid)    WRITE_STEAM_APPID="1" ;;
-    --no-write-steam-appid) WRITE_STEAM_APPID="0" ;;
+    --steam)                ENABLE_STEAM="1"; CLI_SET_ENABLE_STEAM=1; shift ;;
+    --no-steam)             ENABLE_STEAM="0"; CLI_SET_ENABLE_STEAM=1; shift ;;
+    --write-steam-appid)    WRITE_STEAM_APPID="1"; shift ;;
+    --no-write-steam-appid) WRITE_STEAM_APPID="0"; shift ;;
     --steam-app-id)         STEAM_APP_ID="$2"; shift 2 ;;
     --steam-dylib-src)      STEAM_DYLIB_SRC="$2"; shift 2 ;;
 
-    --macos-icon-sync)      MACOS_ICON_SYNC="1" ;;
-    --no-macos-icon-sync)   MACOS_ICON_SYNC="0" ;;
+    --macos-icon-sync)      MACOS_ICON_SYNC="1"; shift ;;
+    --no-macos-icon-sync)   MACOS_ICON_SYNC="0"; shift ;;
     --macos-icon-xcassets)  MACOS_ICON_XCASSETS="$2"; CLI_SET_MACOS_ICON_XCASSETS=1; shift 2 ;;
     --macos-appicon-set-name) MACOS_APPICON_SET_NAME="$2"; shift 2 ;;
 
-    --zip)                  ENABLE_ZIP="1" ;;
-    --no-zip)               ENABLE_ZIP="0" ;;
-    --dmg)                  ENABLE_DMG="1" ;;
-    --no-dmg)               ENABLE_DMG="0" ;;
-    --fancy-dmg)            FANCY_DMG="1" ;;
-    --no-fancy-dmg)         FANCY_DMG="0" ;;
+    --zip)                  ENABLE_ZIP="1"; shift ;;
+    --no-zip)               ENABLE_ZIP="0"; shift ;;
+    --dmg)                  ENABLE_DMG="1"; shift ;;
+    --no-dmg)               ENABLE_DMG="0"; shift ;;
+    --fancy-dmg)            FANCY_DMG="1"; shift ;;
+    --no-fancy-dmg)         FANCY_DMG="0"; shift ;;
     --dmg-name)             DMG_NAME="$2"; shift 2 ;;
     --dmg-volume-name)      DMG_VOLUME_NAME="$2"; shift 2 ;;
     --dmg-output-dir)       DMG_OUTPUT_DIR="$2"; shift 2 ;;
 
     --build-type)           BUILD_TYPE="$2"; shift 2 ;;
-    --notarize)             NOTARIZE="yes" ;;
-    --no-notarize)          NOTARIZE="no" ;;
+    --notarize)             NOTARIZE="yes"; shift ;;
+    --no-notarize)          NOTARIZE="no"; shift ;;
 
     *) die "Unknown option: $1 (use --help)" ;;
   esac
