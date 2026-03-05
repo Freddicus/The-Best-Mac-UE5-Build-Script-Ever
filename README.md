@@ -231,6 +231,12 @@ Artifacts go under (names derived from `SHORT_NAME` / `LONG_NAME`):
   - confirm notarization succeeded and stapling occurred
   - verify with: `spctl -a -vv /path/to/App.app`
 
+## Contributing
+
+PRs welcome. Before submitting, install [shellcheck](https://www.shellcheck.net/) and verify `shellcheck ship.sh` exits clean. The CI workflow in `.github/workflows/shellcheck.yml` runs automatically on every push and pull request.
+
+An annotated CI workflow example for self-hosted macOS runners is provided in `.github/workflows/build.yml.example` (untested — treat it as a reference starting point).
+
 ## What we learned building this
 
 - Unreal packaging is only the start; macOS distribution is a separate pipeline.

@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
 
+# =============================================================================
+# LOGGING ARCHITECTURE
+#
+# This script uses a two-stage file descriptor redirect so that human-facing
+# status lines always reach the terminal even after stdout/stderr are
+# redirected to the log file.
+#
+#   Stage 1 (before .env load, see "exec 3>&1 4>&2" below):
+#     FD 3 = terminal stdout (original FD 1 saved here)
+#     FD 4 = terminal stderr (original FD 2 saved here, reserved)
+#
+#   Stage 2 (after LOG_FILE is resolved, see "exec >>$LOG_FILE 2>&1" below):
+#     FD 1 → log file
+#     FD 2 → log file (via FD 1)
+#
+# After Stage 2:
+#   echo "..."        → log file only   (subprocess output, build commands, etc.)
+#   echo "..." >&3   → terminal only    (status lines visible to the user)
+#
+# All helper functions — die(), warn(), good(), info(), error() — write to FD 3
+# so their output always appears on the terminal regardless of log redirection.
+# =============================================================================
+
 ### ============================================================================
 ### DISPLAY / LOGGING
 ### ============================================================================
@@ -34,6 +57,7 @@ on_error_exit() {
   if [[ -n "${DMG_RW_PATH:-}" && -f "${DMG_RW_PATH:-}" ]]; then
     /bin/rm -f "${DMG_RW_PATH:-}" >/dev/null 2>&1 || true
   fi
+  /bin/rm -f "${_ENTITLEMENTS_TMP:-}" 2>/dev/null || true
   echo "❌ Script failed at line $fail_line (exit $exit_code)" >&3
   echo "Failing command: $fail_cmd" >&3
   print_log_tail
@@ -145,6 +169,17 @@ exec 3>&1 4>&2
 SCRIPT_DIR="$(cd "$(/usr/bin/dirname "$0")" 2>/dev/null && /bin/pwd -P)"
 ENV_FILE="$SCRIPT_DIR/.env"
 if [[ -f "$ENV_FILE" ]]; then
+  # Safety: refuse to source a .env owned by a different user or world-writable.
+  # .env is sourced as shell code, so a tampered file is a trivial privilege escalation.
+  _env_owner="$(/usr/bin/stat -f "%Su" "$ENV_FILE" 2>/dev/null || true)"
+  _env_mode="$(/usr/bin/stat -f "%p" "$ENV_FILE" 2>/dev/null || true)"
+  if [[ -n "$_env_owner" && "$_env_owner" != "$(/usr/bin/id -un)" ]]; then
+    die ".env is owned by '$_env_owner', not the current user. Refusing to source it: $ENV_FILE"
+  fi
+  if [[ -n "$_env_mode" && $(( _env_mode & 0002 )) -ne 0 ]]; then
+    die ".env is world-writable. Fix with: chmod o-w \"$ENV_FILE\""
+  fi
+  unset _env_owner _env_mode
   # Export variables defined in .env so they behave like real environment variables.
   set -a
   # shellcheck disable=SC1090
@@ -643,11 +678,11 @@ check_apple_sdk_json_compat() {
     good "Found ${#ranges[@]} AppleVersionToLLVMVersions entries."
   fi
 
-  local start end
+  local start
   for r in "${ranges[@]}"; do
     start="${r%%-*}"
-    end="${r#*-}"
     # Apple_SDK.json entries are "XcodeVersion-LLVMVersion" mappings.
+    # (The LLVM version after the dash is extracted implicitly; only start is validated here.)
     if [[ -n "$start" && -n "$xcode_norm" && "$start" == "$xcode_norm" ]]; then
       map_ok=1
       break
@@ -870,7 +905,7 @@ autodetect_scheme_if_needed() {
       if [[ "$line" =~ ^[[:space:]]+[^[:space:]] ]]; then
         # Trim leading whitespace
         local trimmed
-        trimmed="${line#${line%%[![:space:]]*}}"
+        trimmed="${line#"${line%%[![:space:]]*}"}"
         schemes+=("$trimmed")
       else
         break
@@ -1094,12 +1129,12 @@ read_ini_value() {
   [[ -n "$line" ]] || { echo ""; return 0; }
 
   val="${line#*=}"
-  val="${val#${val%%[![:space:]]*}}"
-  val="${val%${val##*[![:space:]]}}"
+  val="${val#"${val%%[![:space:]]*}"}"
+  val="${val%"${val##*[![:space:]]}"}"
   val="${val%\"}"; val="${val#\"}"
   val="${val%%;*}"; val="${val%%#*}"
-  val="${val#${val%%[![:space:]]*}}"
-  val="${val%${val##*[![:space:]]}}"
+  val="${val#"${val%%[![:space:]]*}"}"
+  val="${val%"${val##*[![:space:]]}"}"
   echo "$val"
 }
 
@@ -1124,7 +1159,9 @@ autodetect_steam_if_needed() {
   if [[ "${CLI_SET_ENABLE_STEAM:-0}" != "1" && "${ENABLE_STEAM:-0}" == "0" ]]; then
     if detect_steam_from_ini; then
       ENABLE_STEAM="1"
-      info "Detected Steam OSS in Config/DefaultEngine.ini — ENABLE_STEAM=1"
+      warn "Auto-enabled ENABLE_STEAM=1 (Steam OSS detected in Config/DefaultEngine.ini)."
+      warn "This adds security-weakening entitlements: disable-library-validation + allow-dyld-environment-variables."
+      warn "To suppress this for a non-Steam build, set ENABLE_STEAM=0 explicitly."
 
       local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
       local appid
@@ -1386,7 +1423,17 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
 
     --repo-root)            REPO_ROOT="$2"; shift 2 ;;
-    --uproject)             UPROJECT_NAME="$2"; CLI_SET_UPROJECT=1; shift 2 ;;
+    --uproject)
+      # Resolve immediately: absolute path → set both UPROJECT_PATH and UPROJECT_NAME.
+      # Bare filename or relative path → set UPROJECT_NAME only; path resolved later.
+      if [[ "$2" == /* ]]; then
+        UPROJECT_PATH="$2"
+        UPROJECT_NAME="$(/usr/bin/basename "$2")"
+      else
+        UPROJECT_NAME="$2"
+        UPROJECT_PATH=""
+      fi
+      shift 2 ;;
     --ue-root)              UE_ROOT="$2"; shift 2 ;;
     --xcode-workspace)      XCODE_WORKSPACE="$2"; shift 2 ;;
     --xcode-scheme)         XCODE_SCHEME="$2"; shift 2 ;;
@@ -1443,12 +1490,7 @@ if is_placeholder "$DEVELOPMENT_TEAM"; then
   fi
 fi
 
-# If UPROJECT_PATH is provided, normalize it and derive UPROJECT_NAME/REPO_ROOT.
-if [[ "${CLI_SET_UPROJECT:-0}" == "1" ]]; then
-  # CLI takes priority over any existing UPROJECT_PATH.
-  UPROJECT_PATH=""
-fi
-
+# Normalize UPROJECT_PATH if provided via env var (CLI path is already resolved above).
 if [[ -n "${UPROJECT_PATH:-}" ]]; then
   if [[ "$UPROJECT_PATH" != /* ]]; then
     if [[ -n "${REPO_ROOT:-}" ]]; then
@@ -1463,13 +1505,6 @@ if [[ -n "${UPROJECT_PATH:-}" ]]; then
       REPO_ROOT="$(/usr/bin/dirname "$UPROJECT_PATH")"
     fi
   fi
-fi
-
-# If the caller provided absolute paths for uproject/workspace, normalize them.
-if [[ -n "${UPROJECT_NAME:-}" && "$UPROJECT_NAME" == /* ]]; then
-  UPROJECT_PATH="$UPROJECT_NAME"
-  UPROJECT_NAME="$(/usr/bin/basename "$UPROJECT_PATH")"
-  REPO_ROOT="$(/usr/bin/dirname "$UPROJECT_PATH")"
 fi
 
 if [[ -n "${XCODE_WORKSPACE:-}" && "$XCODE_WORKSPACE" == /* ]]; then
@@ -1517,7 +1552,6 @@ if [[ "$MACOS_ICON_XCASSETS" != /* ]]; then
 fi
 
 # Derive common paths (after CLI parsing/autodetect)
-REPO="$REPO_ROOT"
 UPROJECT_PATH="${UPROJECT_PATH:-$REPO_ROOT/$UPROJECT_NAME}"
 WORKSPACE="${WORKSPACE:-$REPO_ROOT/$XCODE_WORKSPACE}"
 SCHEME="$XCODE_SCHEME"
@@ -1704,6 +1738,15 @@ fi
 # Tools used later
 command -v codesign  >/dev/null 2>&1 || die "codesign not found (unexpected on macOS)."
 
+# Verify the signing identity exists in the keychain before the multi-hour build.
+# A typo or expired cert will fail here rather than after UAT finishes cooking.
+if ! /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep -qF "$SIGN_IDENTITY"; then
+  echo "Available Developer ID codesigning identities:" >&3
+  /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep "Developer ID" >&3 || echo "  (none found)" >&3
+  die "SIGN_IDENTITY not found in keychain: $SIGN_IDENTITY"
+fi
+good "Signing identity found in keychain."
+
 # Xcode steps are optional
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   # Xcode workspaces are directory bundles (".xcworkspace" folders), not regular files.
@@ -1711,12 +1754,18 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found. Install Xcode and the Command Line Tools."
 fi
 
-# Notarization requires Apple tools and a configured notary profile
+# Notarization requires Apple tools and a configured, accessible notary profile
 if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
   command -v xcrun >/dev/null 2>&1 || die "xcrun not found. Install Xcode Command Line Tools."
   if is_placeholder "$NOTARY_PROFILE"; then
     die "Internal error: NOTARIZE_ENABLED=1 but NOTARY_PROFILE is not configured (should have been auto-disabled earlier)."
   fi
+  # Verify the notary profile is reachable now, not hours later after the build.
+  info "Verifying notary profile accessibility before build"
+  if ! wait_for_notary_profile_with_backoff; then
+    die "Notary profile '$NOTARY_PROFILE' is not accessible. Verify with: xcrun notarytool history --keychain-profile \"$NOTARY_PROFILE\""
+  fi
+  good "Notary profile '$NOTARY_PROFILE' is accessible."
 fi
 
 # Export options plist must exist if you are exporting
@@ -1824,17 +1873,14 @@ fi
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   APP_PATH="$(find_first_app_under "$EXPORT_DIR")"
   if [[ -z "${APP_PATH:-}" ]]; then
-    echo "ERROR: No .app found under export dir: $EXPORT_DIR" >&3
-    ls -la "$EXPORT_DIR" || true
-    exit 2
+    /bin/ls -la "$EXPORT_DIR" >&3 || true
+    die "No .app found under export dir: $EXPORT_DIR"
   fi
 else
   APP_PATH="$(find_first_app_under "$BUILD_DIR")"
   if [[ -z "${APP_PATH:-}" ]]; then
-    echo "ERROR: No .app found under build dir: $BUILD_DIR" >&3
-    echo "UAT output layouts differ by project/settings. Try enabling Xcode export (USE_XCODE_EXPORT=1) or point the script at the correct output." >&3
-    ls -la "$BUILD_DIR" || true
-    exit 2
+    /bin/ls -la "$BUILD_DIR" >&3 || true
+    die "No .app found under build dir: $BUILD_DIR — UAT output layouts differ by project/settings. Try enabling Xcode export (USE_XCODE_EXPORT=1) or point the script at the correct output."
   fi
 fi
 
@@ -1883,10 +1929,21 @@ TMP_PREFIX="$(sanitize_name_for_tmp "$SHORT_NAME")"
 # Entitlements: hardened runtime is required for Developer ID signing.
 # Steam overlay / Steam client libraries may require disabling library validation.
 # Only enable those entitlements when you actually need them.
-ENTITLEMENTS_FILE="$(/usr/bin/mktemp -t ${TMP_PREFIX}_entitlements_XXXXXX.plist)"
+#
+# If ENTITLEMENTS_FILE is already set (e.g. user-provided via env or future CLI flag),
+# use it as-is and do not generate or clean it up. Otherwise, generate a temp file.
+if is_placeholder "${ENTITLEMENTS_FILE:-}"; then
+  _ENTITLEMENTS_TMP="$(/usr/bin/mktemp -t "${TMP_PREFIX}_entitlements_XXXXXX.plist")"
+  ENTITLEMENTS_FILE="$_ENTITLEMENTS_TMP"
+else
+  _ENTITLEMENTS_TMP=""
+  info "Using user-provided ENTITLEMENTS_FILE: $ENTITLEMENTS_FILE"
+fi
 
-if [[ "$ENABLE_STEAM" == "1" ]]; then
-  cat > "$ENTITLEMENTS_FILE" <<'PLIST'
+if [[ -n "$_ENTITLEMENTS_TMP" ]]; then
+  # Script-generated entitlements: write the appropriate content.
+  if [[ "$ENABLE_STEAM" == "1" ]]; then
+    cat > "$ENTITLEMENTS_FILE" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1898,51 +1955,60 @@ if [[ "$ENABLE_STEAM" == "1" ]]; then
 </dict>
 </plist>
 PLIST
-else
-  # Minimal entitlements file. Keeping it empty is valid for many apps.
-  cat > "$ENTITLEMENTS_FILE" <<'PLIST'
+  else
+    # Minimal entitlements file. Keeping it empty is valid for many apps.
+    cat > "$ENTITLEMENTS_FILE" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict/>
 </plist>
 PLIST
+  fi
 fi
 
 echo "Using signing identity: $SIGN_IDENTITY" >&3
 
-echo "Re-signing app bundle (deep) to seal added dylib" >&3
-/usr/bin/codesign --force --deep --options runtime --timestamp --entitlements "$ENTITLEMENTS_FILE" --sign "$SIGN_IDENTITY" "$APP_PATH"
+# Apple deprecated --deep for distribution signing. The correct approach is to
+# sign all nested dylibs and frameworks individually first, then sign the outer
+# .app. This ensures each component has a valid, independent signature that
+# Gatekeeper and notarization can verify.
+echo "== Re-signing app bundle (per-component, then outer) ==" >&3
+
+while IFS= read -r -d '' lib; do
+  /usr/bin/codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$lib"
+done < <(/usr/bin/find "$APP_PATH/Contents" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 2>/dev/null)
+
+while IFS= read -r -d '' fwk; do
+  /usr/bin/codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$fwk"
+done < <(/usr/bin/find "$APP_PATH/Contents" -type d -name "*.framework" -print0 2>/dev/null)
+
+/usr/bin/codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS_FILE" --sign "$SIGN_IDENTITY" "$APP_PATH"
 
 echo "== Validations (fail fast) ==" >&3
 
 # Resolve the actual executable name from Info.plist
 APP_EXE_NAME=$(/usr/bin/defaults read "$APP_PATH/Contents/Info.plist" CFBundleExecutable 2>/dev/null || true)
 if [[ -z "${APP_EXE_NAME:-}" ]]; then
-  echo "ERROR: Could not read CFBundleExecutable from Info.plist" >&3
-  exit 6
+  die "Could not read CFBundleExecutable from $APP_PATH/Contents/Info.plist"
 fi
 EXE_PATH="$APP_PATH/Contents/MacOS/$APP_EXE_NAME"
 
-
 if [[ ! -f "$EXE_PATH" ]]; then
-  echo "ERROR: Expected executable not found: $EXE_PATH" >&3
-  exit 7
+  die "Expected executable not found: $EXE_PATH"
 fi
 
-# Quick sanity: Shipping builds should not have obvious debug/dev markers.
-# (This is heuristic; the authoritative check is LogInit: Build: Shipping when running with -log.)
-if /usr/bin/strings "$EXE_PATH" | /usr/bin/grep -q "Development"; then
-  echo "WARN: Executable contains 'Development' strings. If you see on-screen debug in-game, confirm LogInit shows Shipping." >&3
-fi
+# NOTE: To verify the build configuration at runtime, launch with -log and look for:
+#   LogInit: Build: Shipping
+# Scanning binary strings for "Development" is not reliable — UE Shipping builds
+# legitimately contain that word in class names, log strings, and linker symbols.
 
 # 1) If Steam is enabled, verify the main exe references Steam as @loader_path
 if [[ "$ENABLE_STEAM" == "1" ]]; then
-  /usr/bin/otool -L "$EXE_PATH" | /usr/bin/grep -q "@loader_path/libsteam_api.dylib" || {
-    echo "ERROR: Executable does not reference @loader_path/libsteam_api.dylib" >&3
-    /usr/bin/otool -L "$EXE_PATH" | /usr/bin/grep steam || true
-    exit 8
-  }
+  if ! /usr/bin/otool -L "$EXE_PATH" | /usr/bin/grep -q "@loader_path/libsteam_api.dylib"; then
+    /usr/bin/otool -L "$EXE_PATH" | /usr/bin/grep -i steam >&3 || true
+    die "Executable does not reference @loader_path/libsteam_api.dylib — Steam dylib was not linked at the expected rpath."
+  fi
 fi
 
 # 2) Verify signatures strictly (no || true)
@@ -1974,8 +2040,7 @@ if [[ "$ENABLE_STEAM" == "1" ]]; then
   echo "TeamIdentifier (app):   ${APP_TEAM:-<none>}" >&3
   echo "TeamIdentifier (dylib): ${DYLIB_TEAM:-<none>}" >&3
   if [[ -n "${APP_TEAM:-}" && -n "${DYLIB_TEAM:-}" && "$APP_TEAM" != "$DYLIB_TEAM" ]]; then
-    echo "ERROR: TeamIdentifier mismatch between app and libsteam_api.dylib (dyld will refuse to load it)." >&3
-    exit 5
+    die "TeamIdentifier mismatch between app ($APP_TEAM) and libsteam_api.dylib ($DYLIB_TEAM) — dyld will refuse to load it."
   fi
 else
   echo "TeamIdentifier (app):   ${APP_TEAM:-<none>}" >&3
@@ -2106,6 +2171,8 @@ OSA
 
   echo "== Sign DMG ==" >&3
   /usr/bin/codesign -s "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
+  echo "== Verify DMG signature ==" >&3
+  /usr/bin/codesign --verify --verbose=2 "$DMG_PATH"
 else
   info "ENABLE_DMG=0 — skipping DMG creation"
 fi
@@ -2140,6 +2207,18 @@ if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
 
   if [[ -n "$ZIP_NOTARY_ID" ]]; then
     wait_notary "$ZIP_NOTARY_ID" "ZIP"
+  fi
+
+  if [[ -n "$DMG_NOTARY_ID" ]]; then
+    wait_notary "$DMG_NOTARY_ID" "DMG"
+    echo "== Staple DMG ==" >&3
+    /usr/bin/xcrun stapler staple "$DMG_PATH"
+  fi
+
+  # Staple the app after any successful notarization (ZIP or DMG-only).
+  # Without this, Gatekeeper blocks the app on a fresh Mac even if notarization
+  # succeeded — the ticket must be stapled regardless of which artifact was used.
+  if [[ -n "$ZIP_NOTARY_ID" || -n "$DMG_NOTARY_ID" ]]; then
     echo "== Staple app ==" >&3
     /usr/bin/xcrun stapler staple "$APP_PATH"
 
@@ -2148,12 +2227,6 @@ if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
 
     echo "== Gatekeeper assessment (app) ==" >&3
     /usr/sbin/spctl -a -vv "$APP_PATH" || true
-  fi
-
-  if [[ -n "$DMG_NOTARY_ID" ]]; then
-    wait_notary "$DMG_NOTARY_ID" "DMG"
-    echo "== Staple DMG ==" >&3
-    /usr/bin/xcrun stapler staple "$DMG_PATH"
   fi
 else
   echo "== Notarization disabled (NOTARIZE=no) ==" >&3
@@ -2176,5 +2249,5 @@ else
   echo "DMG: (not created — ENABLE_DMG=0)" >&3
 fi
 
-# Cleanup temp entitlements file
-rm -f "$ENTITLEMENTS_FILE" 2>/dev/null || true
+# Cleanup script-generated temp entitlements file only (user-provided files are never deleted).
+/bin/rm -f "${_ENTITLEMENTS_TMP:-}" 2>/dev/null || true

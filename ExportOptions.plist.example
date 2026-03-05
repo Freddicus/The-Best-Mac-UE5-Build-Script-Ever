@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ExportOptions.plist — Xcode Developer ID export configuration
+  Used by: xcodebuild -exportArchive -exportOptionsPlist <this file>
+
+  Usage:
+    1. Copy this file to your repo root as "ExportOptions.plist"
+    2. Replace YOUR_TEAM_ID with your 10-character Apple Developer Team ID
+       (find it at: developer.apple.com → Account → Membership)
+    3. Set EXPORT_PLIST in your .env, or pass the path via the export-plist CLI flag.
+       If you place it at the repo root, ship.sh will auto-detect it.
+
+  Alternatively, run ship.sh interactively without an ExportOptions.plist and
+  the script will offer to generate this file for you automatically.
+
+  For additional keys, see: man xcodebuild (search -exportOptionsPlist)
+-->
+<plist version="1.0">
+<dict>
+
+  <!-- Distribution method.
+       "developer-id"  = notarized direct download (most common for indie/B2B)
+       "app-store"     = Mac App Store submission
+       "ad-hoc"        = internal distribution, no notarization
+       "enterprise"    = Apple Developer Enterprise Program -->
+  <key>method</key>
+  <string>developer-id</string>
+
+  <!-- Your 10-character Apple Developer Team ID.
+       Example: ABCDE12345 -->
+  <key>teamID</key>
+  <string>YOUR_TEAM_ID</string>
+
+  <!-- Signing style.
+       "automatic"  = Xcode selects the best matching certificate automatically (recommended)
+       "manual"     = pin a specific provisioning profile (set "provisioningProfiles" key too) -->
+  <key>signingStyle</key>
+  <string>automatic</string>
+
+  <!-- Export destination.
+       "export"  = write the .app to the -exportPath directory (what ship.sh expects)
+       "upload"  = submit directly to App Store Connect (app-store method only) -->
+  <key>destination</key>
+  <string>export</string>
+
+  <!-- Strip Swift standard library symbols to reduce binary size.
+       Safe to leave true for UE5 projects (C++ is the primary language).
+       Set false only if you ship a Swift plugin that requires retained symbols. -->
+  <key>stripSwiftSymbols</key>
+  <true/>
+
+  <!-- Bitcode was deprecated in Xcode 14 and removed in Xcode 16.
+       Keep false — UE5 does not use bitcode. -->
+  <key>compileBitcode</key>
+  <false/>
+
+</dict>
+</plist>
