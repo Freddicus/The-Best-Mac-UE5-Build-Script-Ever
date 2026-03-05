@@ -19,8 +19,8 @@ The CI workflow (`.github/workflows/shellcheck.yml`) runs shellcheck at `warning
 ```bash
 chmod +x ship.sh
 ./ship.sh --help          # print all CLI flags
-./ship.sh --print-config 1  # show resolved config and exit without building
-./ship.sh --dry-run 1     # preview the pipeline without executing
+./ship.sh --print-config    # show resolved config and exit without building
+./ship.sh --dry-run         # preview the pipeline without executing
 ```
 
 Real builds require a macOS machine with Xcode, an Apple Developer account, and a UE5 install. The `.env` file (not committed) provides `DEVELOPMENT_TEAM`, `SIGN_IDENTITY`, etc.
