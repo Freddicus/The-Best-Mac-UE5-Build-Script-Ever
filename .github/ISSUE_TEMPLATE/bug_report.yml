@@ -1,0 +1,48 @@
+name: Bug report
+description: Something broke or behaved unexpectedly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: run `./ship.sh --print-config` and check that your config resolves the way you expect. Many "bugs" are misconfigured `.env` values.
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: "e.g. Sequoia 15.3"
+    validations:
+      required: true
+
+  - type: input
+    id: ue5
+    attributes:
+      label: UE5 version
+      placeholder: "e.g. 5.4.4"
+    validations:
+      required: true
+
+  - type: input
+    id: invocation
+    attributes:
+      label: How you invoked the script
+      description: The flags you passed (omit any secrets).
+      placeholder: "./ship.sh --dry-run --no-notarize"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened
+      description: What did the script do? What did you expect it to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant log output
+      description: Paste the relevant tail of `ship_build_*.log`. The script prints the log path when it exits.
+      render: shell
