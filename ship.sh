@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
 
+# =============================================================================
+# LOGGING ARCHITECTURE
+#
+# This script uses a two-stage file descriptor redirect so that human-facing
+# status lines always reach the terminal even after stdout/stderr are
+# redirected to the log file.
+#
+#   Stage 1 (before .env load, see "exec 3>&1 4>&2" below):
+#     FD 3 = terminal stdout (original FD 1 saved here)
+#     FD 4 = terminal stderr (original FD 2 saved here, reserved)
+#
+#   Stage 2 (after LOG_FILE is resolved, see "exec >>$LOG_FILE 2>&1" below):
+#     FD 1 → log file
+#     FD 2 → log file (via FD 1)
+#
+# After Stage 2:
+#   echo "..."        → log file only   (subprocess output, build commands, etc.)
+#   echo "..." >&3   → terminal only    (status lines visible to the user)
+#
+# All helper functions — die(), warn(), good(), info(), error() — write to FD 3
+# so their output always appears on the terminal regardless of log redirection.
+# =============================================================================
+
 ### ============================================================================
 ### DISPLAY / LOGGING
 ### ============================================================================
@@ -655,11 +678,11 @@ check_apple_sdk_json_compat() {
     good "Found ${#ranges[@]} AppleVersionToLLVMVersions entries."
   fi
 
-  local start end
+  local start
   for r in "${ranges[@]}"; do
     start="${r%%-*}"
-    end="${r#*-}"
     # Apple_SDK.json entries are "XcodeVersion-LLVMVersion" mappings.
+    # (The LLVM version after the dash is extracted implicitly; only start is validated here.)
     if [[ -n "$start" && -n "$xcode_norm" && "$start" == "$xcode_norm" ]]; then
       map_ok=1
       break
@@ -879,7 +902,7 @@ autodetect_scheme_if_needed() {
       if [[ "$line" =~ ^[[:space:]]+[^[:space:]] ]]; then
         # Trim leading whitespace
         local trimmed
-        trimmed="${line#${line%%[![:space:]]*}}"
+        trimmed="${line#"${line%%[![:space:]]*}"}"
         schemes+=("$trimmed")
       else
         break
@@ -1007,12 +1030,12 @@ read_ini_value() {
   [[ -n "$line" ]] || { echo ""; return 0; }
 
   val="${line#*=}"
-  val="${val#${val%%[![:space:]]*}}"
-  val="${val%${val##*[![:space:]]}}"
+  val="${val#"${val%%[![:space:]]*}"}"
+  val="${val%"${val##*[![:space:]]}"}"
   val="${val%\"}"; val="${val#\"}"
   val="${val%%;*}"; val="${val%%#*}"
-  val="${val#${val%%[![:space:]]*}}"
-  val="${val%${val##*[![:space:]]}}"
+  val="${val#"${val%%[![:space:]]*}"}"
+  val="${val%"${val##*[![:space:]]}"}"
   echo "$val"
 }
 
@@ -1410,7 +1433,6 @@ autodetect_steam_if_needed
 autodetect_steam_dylib_src_from_engine_if_needed
 
 # Derive common paths (after CLI parsing/autodetect)
-REPO="$REPO_ROOT"
 UPROJECT_PATH="${UPROJECT_PATH:-$REPO_ROOT/$UPROJECT_NAME}"
 WORKSPACE="${WORKSPACE:-$REPO_ROOT/$XCODE_WORKSPACE}"
 SCHEME="$XCODE_SCHEME"
@@ -1779,7 +1801,7 @@ TMP_PREFIX="$(sanitize_name_for_tmp "$SHORT_NAME")"
 # If ENTITLEMENTS_FILE is already set (e.g. user-provided via env or future CLI flag),
 # use it as-is and do not generate or clean it up. Otherwise, generate a temp file.
 if is_placeholder "${ENTITLEMENTS_FILE:-}"; then
-  _ENTITLEMENTS_TMP="$(/usr/bin/mktemp -t ${TMP_PREFIX}_entitlements_XXXXXX.plist)"
+  _ENTITLEMENTS_TMP="$(/usr/bin/mktemp -t "${TMP_PREFIX}_entitlements_XXXXXX.plist")"
   ENTITLEMENTS_FILE="$_ENTITLEMENTS_TMP"
 else
   _ENTITLEMENTS_TMP=""
