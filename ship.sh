@@ -2142,7 +2142,7 @@ OSA
       /bin/sleep 1
     done
 
-    /usr/bin/sync
+    /bin/sync
     /bin/sleep 2
     if command -v osascript >/dev/null 2>&1; then
       /usr/bin/osascript <<OSA >/dev/null 2>&1 || true
