@@ -751,6 +751,13 @@ print_config() {
   echo "DMG_NAME:          ${DMG_NAME:-<unset>}" >&3
   echo "DMG_VOLUME_NAME:   ${DMG_VOLUME_NAME:-<unset>}" >&3
   echo "DMG_OUTPUT_DIR:    ${DMG_OUTPUT_DIR:-<unset>}" >&3
+  echo "VERSION_MODE:      $VERSION_MODE" >&3
+  if [[ "$VERSION_MODE" != "NONE" ]]; then
+    echo "VERSION_FILE_BUNDLE_PATH: $VERSION_FILE_BUNDLE_PATH" >&3
+  fi
+  if [[ "$VERSION_MODE" == "MANUAL" ]]; then
+    echo "VERSION_STRING:    $VERSION_STRING" >&3
+  fi
   if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     echo "WORKSPACE:         ${WORKSPACE:-<unset>}" >&3
     echo "SCHEME:            ${SCHEME:-<unset>}" >&3
@@ -760,6 +767,47 @@ print_config() {
   if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     echo "EXPORT_PLIST:      ${EXPORT_PLIST:-<unset>}" >&3
   fi
+}
+
+# Write a version.txt file into the app bundle before signing.
+# VERSION_MODE controls behavior: NONE (skip), MANUAL (use VERSION_STRING), DATETIME (auto-generate).
+# The file is written to $APP_PATH/$VERSION_FILE_BUNDLE_PATH — must be called after APP_PATH is set.
+write_version_file() {
+  local _version_string=""
+  local _dest
+  local _dest_dir
+  local _ts
+  local _hash
+  case "$VERSION_MODE" in
+    NONE)
+      info "VERSION_MODE=NONE — skipping version.txt"
+      return 0
+      ;;
+    MANUAL)
+      _version_string="$VERSION_STRING"
+      ;;
+    DATETIME)
+      _ts="$(date +%Y%m%d-%H%M%S)"
+      _hash=""
+      if /usr/bin/git -C "$REPO_ROOT" rev-parse --short HEAD >/dev/null 2>&1; then
+        _hash="$(/usr/bin/git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
+      fi
+      if [[ -n "$_hash" ]]; then
+        _version_string="${_ts}-${_hash}"
+      else
+        _version_string="$_ts"
+      fi
+      ;;
+    *)
+      die "Unknown VERSION_MODE: $VERSION_MODE"
+      ;;
+  esac
+  _dest="$APP_PATH/$VERSION_FILE_BUNDLE_PATH"
+  _dest_dir="$(/usr/bin/dirname "$_dest")"
+  /bin/mkdir -p "$_dest_dir"
+  echo "$_version_string" > "$_dest"
+  /bin/chmod 644 "$_dest"
+  good "Wrote version.txt: $_dest (value: $_version_string)"
 }
 
 autodetect_workspace_if_needed() {
@@ -1365,6 +1413,10 @@ DMG_NAME="${DMG_NAME:-}"
 DMG_VOLUME_NAME="${DMG_VOLUME_NAME:-}"
 DMG_OUTPUT_DIR="${DMG_OUTPUT_DIR:-}"
 
+VERSION_MODE="${VERSION_MODE:-NONE}"
+VERSION_STRING="${VERSION_STRING:-}"
+VERSION_FILE_BUNDLE_PATH="${VERSION_FILE_BUNDLE_PATH:-Contents/version.txt}"
+
 
 # -----------------------------------------------------------------------------
 # Command-line flag overrides (highest priority)
@@ -1412,6 +1464,10 @@ Options (highest priority):
 
   --build-type shipping|development
   --notarize / --no-notarize
+
+  --version-mode NONE|MANUAL|DATETIME
+  --version-string STRING
+  --version-file-bundle-path PATH
 
   -h, --help
 USAGE
@@ -1479,6 +1535,10 @@ while [[ $# -gt 0 ]]; do
     --build-type)           BUILD_TYPE="$2"; shift 2 ;;
     --notarize)             NOTARIZE="yes"; shift ;;
     --no-notarize)          NOTARIZE="no"; shift ;;
+
+    --version-mode)             VERSION_MODE="$2"; shift 2 ;;
+    --version-string)           VERSION_STRING="$2"; shift 2 ;;
+    --version-file-bundle-path) VERSION_FILE_BUNDLE_PATH="$2"; shift 2 ;;
 
     *) die "Unknown option: $1 (use --help)" ;;
   esac
@@ -1621,6 +1681,15 @@ if [[ "$ENABLE_STEAM" == "1" ]]; then
   if is_placeholder "$STEAM_DYLIB_SRC"; then
     die "ENABLE_STEAM=1 but STEAM_DYLIB_SRC is not set. The script tried to infer it from UE_ROOT but couldn't. Provide it via --steam-dylib-src (or env/USER CONFIG), or set ENABLE_STEAM=0."
   fi
+fi
+
+# VERSION_MODE validation
+case "$VERSION_MODE" in
+  NONE|MANUAL|DATETIME) ;;
+  *) die "VERSION_MODE must be NONE, MANUAL, or DATETIME (got: $VERSION_MODE)" ;;
+esac
+if [[ "$VERSION_MODE" == "MANUAL" ]] && is_placeholder "${VERSION_STRING:-}"; then
+  die "VERSION_MODE=MANUAL but VERSION_STRING is not set. Provide it via --version-string or VERSION_STRING in .env."
 fi
 
 # Ask up-front (unless provided via env/CLI)
@@ -1810,6 +1879,9 @@ if [[ "$DRY_RUN" == "1" ]]; then
   else
     steps="$steps → (skip Xcode archive/export)"
   fi
+  if [[ "$VERSION_MODE" != "NONE" ]]; then
+    steps="$steps → write version.txt ($VERSION_MODE)"
+  fi
   steps="$steps → codesign"
   if [[ "$ENABLE_ZIP" == "1" ]]; then
     steps="$steps → zip"
@@ -1934,6 +2006,8 @@ if [[ "$ENABLE_STEAM" == "1" ]]; then
 else
   info "Steam disabled (ENABLE_STEAM=0) — skipping libsteam_api.dylib staging"
 fi
+
+write_version_file
 
 TMP_PREFIX="$(sanitize_name_for_tmp "$SHORT_NAME")"
 # Entitlements: hardened runtime is required for Developer ID signing.
