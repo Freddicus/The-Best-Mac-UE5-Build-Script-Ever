@@ -778,6 +778,13 @@ write_version_file() {
   local _dest_dir
   local _ts
   local _hash
+  _dest="$APP_PATH/$VERSION_FILE_BUNDLE_PATH"
+  # Always remove a stale version.txt from a prior run, regardless of VERSION_MODE.
+  # This prevents a previous MANUAL/DATETIME stamp from being bundled when VERSION_MODE=NONE.
+  if [[ -f "$_dest" ]]; then
+    /bin/rm -f "$_dest"
+    info "Removed stale version.txt: $_dest"
+  fi
   case "$VERSION_MODE" in
     NONE)
       info "VERSION_MODE=NONE — skipping version.txt"
@@ -802,7 +809,6 @@ write_version_file() {
       die "Unknown VERSION_MODE: $VERSION_MODE"
       ;;
   esac
-  _dest="$APP_PATH/$VERSION_FILE_BUNDLE_PATH"
   _dest_dir="$(/usr/bin/dirname "$_dest")"
   /bin/mkdir -p "$_dest_dir"
   echo "$_version_string" > "$_dest"
@@ -1879,8 +1885,10 @@ if [[ "$DRY_RUN" == "1" ]]; then
   else
     steps="$steps → (skip Xcode archive/export)"
   fi
-  if [[ "$VERSION_MODE" != "NONE" ]]; then
-    steps="$steps → write version.txt ($VERSION_MODE)"
+  if [[ "$VERSION_MODE" == "MANUAL" ]]; then
+    steps="$steps → write version.txt \"$VERSION_STRING\""
+  elif [[ "$VERSION_MODE" == "DATETIME" ]]; then
+    steps="$steps → write version.txt (example: $(date +%Y%m%d-%H%M%S)-<git-hash>)"
   fi
   steps="$steps → codesign"
   if [[ "$ENABLE_ZIP" == "1" ]]; then
