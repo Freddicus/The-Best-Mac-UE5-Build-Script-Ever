@@ -569,6 +569,30 @@ semver3_to_int() {
   echo $((a*1000000 + b*1000 + c))
 }
 
+bump_semver() {
+  # Bump a semver string (X.Y.Z or vX.Y.Z) by major, minor, or patch.
+  # Outputs the bumped version, preserving a leading "v" if present.
+  # Lower components are reset to 0 on major/minor bumps.
+  local component="$1" version="$2"
+  local prefix="" rest major minor patch
+  if [[ "$version" == v* ]]; then
+    prefix="v"
+    rest="${version#v}"
+  else
+    rest="$version"
+  fi
+  if ! [[ "$rest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    die "--bump-$component: '$version' is not a valid semver (expected X.Y.Z or vX.Y.Z)"
+  fi
+  IFS='.' read -r major minor patch <<< "$rest"
+  case "$component" in
+    major) major=$((major + 1)); minor=0; patch=0 ;;
+    minor) minor=$((minor + 1)); patch=0 ;;
+    patch) patch=$((patch + 1)) ;;
+  esac
+  echo "${prefix}${major}.${minor}.${patch}"
+}
+
 extract_json_string_value() {
   # Best-effort extraction of a top-level JSON string field value.
   # Example: extract_json_string_value file.json MinVersion
@@ -756,7 +780,7 @@ print_config() {
     echo "VERSION_CONTENT_DIR: $VERSION_CONTENT_DIR" >&3
     echo "VERSION_FILE:      $REPO_ROOT/Content/$VERSION_CONTENT_DIR/version.txt" >&3
   fi
-  if [[ "$VERSION_MODE" == "MANUAL" ]]; then
+  if [[ "$VERSION_MODE" == "MANUAL" || "$VERSION_MODE" == "HYBRID" ]]; then
     echo "VERSION_STRING:    $VERSION_STRING" >&3
   fi
   if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
@@ -786,7 +810,7 @@ restore_content_version_file() {
   fi
 }
 
-# Resolve the version string for the current run (MANUAL or DATETIME).
+# Resolve the version string for the current run.
 _resolve_version_string() {
   local _ts _hash
   case "$VERSION_MODE" in
@@ -803,6 +827,18 @@ _resolve_version_string() {
         echo "${_ts}-${_hash}"
       else
         echo "$_ts"
+      fi
+      ;;
+    HYBRID)
+      # Manual base version + git short hash: e.g. "1.2.3-a1b2c3d"
+      _hash=""
+      if /usr/bin/git -C "$REPO_ROOT" rev-parse --short HEAD >/dev/null 2>&1; then
+        _hash="$(/usr/bin/git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
+      fi
+      if [[ -n "$_hash" ]]; then
+        echo "${VERSION_STRING}-${_hash}"
+      else
+        echo "$VERSION_STRING"
       fi
       ;;
     *)
@@ -1514,9 +1550,12 @@ Options (highest priority):
   --build-type shipping|development
   --notarize / --no-notarize
 
-  --version-mode NONE|MANUAL|DATETIME
+  --version-mode NONE|MANUAL|DATETIME|HYBRID
   --version-string STRING
   --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
+  --bump-major / --bump-minor / --bump-patch
+                                     bump VERSION_STRING from .env or --version-string;
+                                     implies VERSION_MODE=MANUAL if not already set
 
   -h, --help
 USAGE
@@ -1587,7 +1626,15 @@ while [[ $# -gt 0 ]]; do
 
     --version-mode)             VERSION_MODE="$2"; shift 2 ;;
     --version-string)           VERSION_STRING="$2"; shift 2 ;;
-    --version-content-dir) VERSION_CONTENT_DIR="$2"; shift 2 ;;
+    --version-content-dir)      VERSION_CONTENT_DIR="$2"; shift 2 ;;
+    --bump-major|--bump-minor|--bump-patch)
+      if is_placeholder "${VERSION_STRING:-}"; then
+        die "$1 requires a base version. Set VERSION_STRING in .env or pass --version-string X.Y.Z before $1."
+      fi
+      VERSION_STRING="$(bump_semver "${1#--bump-}" "$VERSION_STRING")"
+      if [[ "$VERSION_MODE" == "NONE" ]]; then VERSION_MODE="MANUAL"; fi
+      shift ;;
+
 
     *) die "Unknown option: $1 (use --help)" ;;
   esac
@@ -1734,11 +1781,11 @@ fi
 
 # VERSION_MODE validation
 case "$VERSION_MODE" in
-  NONE|MANUAL|DATETIME) ;;
-  *) die "VERSION_MODE must be NONE, MANUAL, or DATETIME (got: $VERSION_MODE)" ;;
+  NONE|MANUAL|DATETIME|HYBRID) ;;
+  *) die "VERSION_MODE must be NONE, MANUAL, DATETIME, or HYBRID (got: $VERSION_MODE)" ;;
 esac
-if [[ "$VERSION_MODE" == "MANUAL" ]] && is_placeholder "${VERSION_STRING:-}"; then
-  die "VERSION_MODE=MANUAL but VERSION_STRING is not set. Provide it via --version-string or VERSION_STRING in .env."
+if [[ "$VERSION_MODE" == "MANUAL" || "$VERSION_MODE" == "HYBRID" ]] && is_placeholder "${VERSION_STRING:-}"; then
+  die "VERSION_MODE=$VERSION_MODE but VERSION_STRING is not set. Provide it via --version-string or VERSION_STRING in .env."
 fi
 
 # Ask up-front (unless provided via env/CLI)

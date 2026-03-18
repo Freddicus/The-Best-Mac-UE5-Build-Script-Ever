@@ -240,18 +240,47 @@ The script can stamp a `version.txt` into your game's `Content/` folder **before
 Enable by setting `VERSION_MODE` in `.env` or via `--version-mode`:
 
 ```bash
-# Automatic: date + time + git short hash (recommended)
-VERSION_MODE="DATETIME"
-
 # Manual: write a literal string you control
 VERSION_MODE="MANUAL"
-VERSION_STRING="1.2.0-beta"
+VERSION_STRING="1.2.0"
+
+# Hybrid: manual base + git short hash (e.g. "1.2.0-a1b2c3d")
+VERSION_MODE="HYBRID"
+VERSION_STRING="1.2.0"
+
+# Automatic: date + time + git short hash (e.g. "20260318-143022-a1b2c3d")
+VERSION_MODE="DATETIME"
 
 # Off (default)
 VERSION_MODE="NONE"
 ```
 
-`DATETIME` mode produces a string like `20260317-143022-a1b2c3d` (date, time, 7-char git short hash). Falls back to `20260317-143022` if the repo has no git history.
+| Mode | Output example | Requires |
+|---|---|---|
+| `MANUAL` | `1.2.0` | `VERSION_STRING` |
+| `HYBRID` | `1.2.0-a1b2c3d` | `VERSION_STRING` |
+| `DATETIME` | `20260318-143022-a1b2c3d` | — |
+
+Both `HYBRID` and `DATETIME` fall back to omitting the hash if the repo has no git history.
+
+### Version bumping
+
+Use `--bump-major`, `--bump-minor`, or `--bump-patch` to auto-increment `VERSION_STRING` from `.env` (or from a preceding `--version-string`) for the current run. Supports `X.Y.Z` and `vX.Y.Z`.
+
+```bash
+# .env has VERSION_STRING="1.2.3" — ship patch bump as hybrid
+./ship.sh --bump-patch --version-mode HYBRID
+
+# explicit base + bump
+./ship.sh --version-string 2.0.0 --bump-minor --version-mode MANUAL
+# → VERSION_STRING becomes 2.1.0
+
+# v-prefix is preserved
+./ship.sh --version-string v1.4.9 --bump-major
+# → VERSION_STRING becomes v2.0.0
+```
+
+`--bump-*` implies `VERSION_MODE=MANUAL` if `VERSION_MODE` is still `NONE`.
 
 The file is written to `Content/<VERSION_CONTENT_DIR>/version.txt` (default: `Content/BuildInfo/version.txt`). Override the subdirectory with:
 
