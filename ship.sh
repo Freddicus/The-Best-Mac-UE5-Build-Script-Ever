@@ -779,7 +779,7 @@ restore_content_version_file() {
   [[ -z "${_CONTENT_VERSION_FILE_TO_RESTORE:-}" ]] && return 0
   local _f="$_CONTENT_VERSION_FILE_TO_RESTORE"
   _CONTENT_VERSION_FILE_TO_RESTORE=""
-  if echo "dev" > "$_f"; then
+  if printf '%s' "dev" > "$_f"; then
     info "Reset $_f → 'dev'"
   else
     warn "Failed to reset $_f to 'dev' — restore manually"
@@ -819,7 +819,7 @@ write_version_to_content() {
   local _version_string
   _version_string="$(_resolve_version_string)"
   /bin/mkdir -p "$(/usr/bin/dirname "$_dest")"
-  echo "$_version_string" > "$_dest"
+  printf '%s' "$_version_string" > "$_dest"
   /bin/chmod 644 "$_dest"
   _CONTENT_VERSION_FILE_TO_RESTORE="$_dest"
   good "Stamped $_dest → '$_version_string' (will reset to 'dev' on exit)"
