@@ -882,7 +882,7 @@ ensure_game_ini_staging_entry() {
   if [[ -f "$ini_file" ]] && /usr/bin/grep -qF "$section" "$ini_file"; then
     # Section exists — insert entry immediately after the header line.
     tmp_ini="$(/usr/bin/mktemp "${TMPDIR:-/tmp}DefaultGame_ini_XXXXXX")"
-    while IFS= read -r _line; do
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
       printf '%s\n' "$_line"
       if [[ "$_line" == "$section" ]]; then
         printf '%s\n' "$entry"
@@ -913,7 +913,7 @@ write_bumped_version_to_env() {
 
   if /usr/bin/grep -q "^VERSION_STRING=" "$ENV_FILE"; then
     tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}env_update_XXXXXX")"
-    while IFS= read -r _line; do
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
       if [[ "$_line" == VERSION_STRING=* ]]; then
         printf '%s\n' "$new_line"
       else
