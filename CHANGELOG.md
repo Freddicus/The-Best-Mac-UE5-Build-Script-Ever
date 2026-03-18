@@ -13,6 +13,7 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 - `--bump-major`, `--bump-minor`, `--bump-patch`: increment `VERSION_STRING` (from `.env` or a preceding `--version-string`) for the current run without editing any file. Supports `X.Y.Z` and `vX.Y.Z`; preserves the `v` prefix. Implies `VERSION_MODE=MANUAL` if `VERSION_MODE` was `NONE`.
 - `bump_semver()` internal helper used by the bump flags.
 - `VERSION_STRING` is now shown in `--print-config` output for both `MANUAL` and `HYBRID` modes.
+- On a successful build, the bumped `VERSION_STRING` is written back to `.env` (`VERSION_STRING=` line updated in-place if present, otherwise appended). This means the next run automatically continues from the bumped value. No-op when no bump flag was used.
 - Documented in README, CHANGELOG, and `.env.example`.
 
 ---

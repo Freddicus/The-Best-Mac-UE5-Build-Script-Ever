@@ -796,6 +796,8 @@ print_config() {
 
 # Tracks the Content/<dir>/version.txt written before UAT; reset to "dev" on EXIT.
 _CONTENT_VERSION_FILE_TO_RESTORE=""
+# Set to 1 when --bump-* fires; causes VERSION_STRING to be persisted to .env on success.
+_VERSION_BUMPED=""
 
 # Reset Content/<dir>/version.txt to "dev" so the editor stays clean.
 # Registered as an EXIT trap — safe to call multiple times.
@@ -893,6 +895,36 @@ ensure_game_ini_staging_entry() {
     printf '\n%s\n%s\n' "$section" "$entry" >> "$ini_file"
   fi
   good "Added staging entry to DefaultGame.ini: $entry"
+}
+
+# Persist the bumped VERSION_STRING back to .env on successful builds.
+# If VERSION_STRING= is already in .env it is updated in-place; otherwise it is appended.
+# Only runs when --bump-* was used this invocation.
+write_bumped_version_to_env() {
+  [[ -z "${_VERSION_BUMPED:-}" ]] && return 0
+  local new_line="VERSION_STRING=\"$VERSION_STRING\""
+  local tmp _line
+
+  if [[ ! -f "$ENV_FILE" ]]; then
+    printf '%s\n' "$new_line" > "$ENV_FILE"
+    good "Created $ENV_FILE with $new_line"
+    return 0
+  fi
+
+  if /usr/bin/grep -q "^VERSION_STRING=" "$ENV_FILE"; then
+    tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}env_update_XXXXXX")"
+    while IFS= read -r _line; do
+      if [[ "$_line" == VERSION_STRING=* ]]; then
+        printf '%s\n' "$new_line"
+      else
+        printf '%s\n' "$_line"
+      fi
+    done < "$ENV_FILE" > "$tmp"
+    /bin/mv "$tmp" "$ENV_FILE"
+  else
+    printf '\n%s\n' "$new_line" >> "$ENV_FILE"
+  fi
+  good "Persisted to $ENV_FILE: $new_line"
 }
 
 autodetect_workspace_if_needed() {
@@ -1633,6 +1665,7 @@ while [[ $# -gt 0 ]]; do
       fi
       VERSION_STRING="$(bump_semver "${1#--bump-}" "$VERSION_STRING")"
       if [[ "$VERSION_MODE" == "NONE" ]]; then VERSION_MODE="MANUAL"; fi
+      _VERSION_BUMPED=1
       shift ;;
 
 
@@ -2423,6 +2456,7 @@ echo "REMINDER: Test your distribution path." >&3
 echo "  - If distributing via a launcher (Steam, Epic, etc.), test launching from that launcher." >&3
 echo "  - If distributing direct-download, test on a separate Mac (or a clean user account) with Gatekeeper enabled." >&3
 
+write_bumped_version_to_env
 echo "✅ Done" >&3
 echo "App: $APP_PATH" >&3
 if [[ "$ENABLE_ZIP" == "1" ]]; then

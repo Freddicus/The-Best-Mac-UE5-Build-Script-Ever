@@ -282,6 +282,8 @@ Use `--bump-major`, `--bump-minor`, or `--bump-patch` to auto-increment `VERSION
 
 `--bump-*` implies `VERSION_MODE=MANUAL` if `VERSION_MODE` is still `NONE`.
 
+On a **successful build**, the bumped value is written back to `.env` (`VERSION_STRING=` updated in-place if present, appended otherwise), so the next run picks up where this one left off. `.env` is never modified on a failed or dry-run build.
+
 The file is written to `Content/<VERSION_CONTENT_DIR>/version.txt` (default: `Content/BuildInfo/version.txt`). Override the subdirectory with:
 
 ```bash
