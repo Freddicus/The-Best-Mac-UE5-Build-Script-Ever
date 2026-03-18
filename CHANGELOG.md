@@ -6,6 +6,20 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-03-17] — Optional version.txt stamp (PR #16)
+
+### Added
+- `VERSION_MODE` (default `NONE`): controls whether a `version.txt` is written into the app bundle before signing. Values: `NONE` (skip), `MANUAL` (literal string), `DATETIME` (auto-generated timestamp + git hash)
+- `VERSION_STRING`: the literal version string to write when `VERSION_MODE=MANUAL`
+- `VERSION_FILE_BUNDLE_PATH` (default `Contents/version.txt`): path inside the `.app` where the file is written, relative to the app root
+- `write_version_file()` helper: called after app discovery, before codesign, so the file is included in the Developer ID signature and notarized artifact
+- CLI flags `--version-mode`, `--version-string`, `--version-file-bundle-path`
+- `DATETIME` format: `yyyyMMdd-HHmmss-<git-short-hash>` (e.g. `20260317-143022-a1b2c3d`); falls back to `yyyyMMdd-HHmmss` if no git history
+- All three new variables shown in `--print-config` output and dry-run pipeline summary
+- Documented in README and `.env.example`
+
+---
+
 ## [2026-03-05] — Standardize CLI flag paradigm (PR #13)
 
 ### Changed

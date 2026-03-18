@@ -233,6 +233,34 @@ When enabled, the script creates and signs the DMG. If `NOTARIZE=yes`, it also n
 `FANCY_DMG=1` is experimental and may not behave consistently across machines and Finder states.
 It also requires a GUI session and Finder Automation permission for your terminal.
 
+## Optional version.txt (runtime version stamp)
+
+The script can write a small `version.txt` file **inside the `.app` bundle before signing**, so the version string travels with the distributable and can be read at runtime.
+
+Enable by setting `VERSION_MODE` in `.env` or via `--version-mode`:
+
+```bash
+# Automatic: date + time + git short hash (recommended)
+VERSION_MODE="DATETIME"
+
+# Manual: write a literal string you control
+VERSION_MODE="MANUAL"
+VERSION_STRING="1.2.0-beta"
+
+# Off (default)
+VERSION_MODE="NONE"
+```
+
+`DATETIME` mode produces a string like `20260317-143022-a1b2c3d` (date, time, 7-char git short hash). Falls back to `20260317-143022` if the repo has no git history.
+
+The file lands at `$APP_PATH/Contents/version.txt` by default. Override with:
+
+```bash
+VERSION_FILE_BUNDLE_PATH="Contents/version.txt"   # default; path relative to .app root
+```
+
+Because the file is written before the codesign step, it is included in the Developer ID signature and the notarized artifact.
+
 ## Output
 
 Artifacts go under (names derived from `SHORT_NAME` / `LONG_NAME`):
