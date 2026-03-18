@@ -2025,11 +2025,11 @@ TMP_PREFIX="$(sanitize_name_for_tmp "$SHORT_NAME")"
 # If ENTITLEMENTS_FILE is already set (e.g. user-provided via env or future CLI flag),
 # use it as-is and do not generate or clean it up. Otherwise, generate a temp file.
 if is_placeholder "${ENTITLEMENTS_FILE:-}"; then
-  # Use the full-path form of mktemp (not -t) so XXXXXX is substituted in-place
-  # before the .plist extension. With -t, macOS treats the argument as a plain
-  # prefix and appends its own random suffix *after* the extension, producing a
-  # malformed filename like "…_XXXXXX.plist.AbCdEf" that codesign cannot parse.
-  _ENTITLEMENTS_TMP="$(/usr/bin/mktemp "${TMPDIR:-/tmp}${TMP_PREFIX}_entitlements_XXXXXX.plist")"
+  # macOS mktemp requires XXXXXX at the very end of the template; any suffix
+  # after them (e.g. ".plist") prevents substitution and creates a file with
+  # the literal name "…XXXXXX.plist". Drop the extension — codesign reads the
+  # file by path and does not care about the filename extension.
+  _ENTITLEMENTS_TMP="$(/usr/bin/mktemp "${TMPDIR:-/tmp}${TMP_PREFIX}_entitlements_XXXXXX")"
   ENTITLEMENTS_FILE="$_ENTITLEMENTS_TMP"
 else
   _ENTITLEMENTS_TMP=""
