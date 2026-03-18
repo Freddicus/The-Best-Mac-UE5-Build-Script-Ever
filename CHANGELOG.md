@@ -6,6 +6,23 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-03-17] — Fix entitlements mktemp + pre-UAT version stamping (PR #17)
+
+### Fixed
+- `codesign: cannot read entitlement data` — `mktemp -t` on macOS treats its argument as a plain prefix and appends the random suffix *after* the extension, producing a malformed filename like `…XXXXXX.plist.AbCdEf`. Switched to the full-path form with `XXXXXX` at the end and no extension (codesign does not require `.plist`).
+
+### Changed
+- `VERSION_FILE_BUNDLE_PATH` / `--version-file-bundle-path` removed. Replaced by `VERSION_CONTENT_DIR` / `--version-content-dir` (see below).
+- `version.txt` is now stamped **before UAT runs** (in `Content/<VERSION_CONTENT_DIR>/`) rather than written into the exported `.app` bundle after the fact. UAT bundles it automatically via the `DirectoriesToAlwaysStageAsNonUFS` project packaging setting, eliminating all manual post-export staging and codesign interaction.
+- An `EXIT` trap resets `Content/<VERSION_CONTENT_DIR>/version.txt` back to `dev` after every run — whether the build succeeds, fails, or exits early — so the editor never sees a stamped file.
+
+### Added
+- `VERSION_CONTENT_DIR` (default `BuildInfo`): subdirectory under `Content/` where `version.txt` lives. Must stay inside `Content/` so UAT can stage it.
+- `--version-content-dir DIR` CLI flag.
+- `ensure_game_ini_staging_entry()`: idempotently adds `+DirectoriesToAlwaysStageAsNonUFS=(Path="BuildInfo")` under `[/Script/UnrealEd.ProjectPackagingSettings]` in `DefaultGame.ini` when `VERSION_MODE != NONE`, so teams do not need to configure it manually.
+
+---
+
 ## [2026-03-17] — Optional version.txt stamp (PR #16)
 
 ### Added

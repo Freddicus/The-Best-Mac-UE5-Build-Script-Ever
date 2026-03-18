@@ -235,7 +235,7 @@ It also requires a GUI session and Finder Automation permission for your termina
 
 ## Optional version.txt (runtime version stamp)
 
-The script can write a small `version.txt` file **inside the `.app` bundle before signing**, so the version string travels with the distributable and can be read at runtime.
+The script can stamp a `version.txt` into your game's `Content/` folder **before UAT runs**, so UAT bundles it automatically and the string is accessible at runtime via Unreal's file I/O.
 
 Enable by setting `VERSION_MODE` in `.env` or via `--version-mode`:
 
@@ -253,13 +253,28 @@ VERSION_MODE="NONE"
 
 `DATETIME` mode produces a string like `20260317-143022-a1b2c3d` (date, time, 7-char git short hash). Falls back to `20260317-143022` if the repo has no git history.
 
-The file lands at `$APP_PATH/Contents/version.txt` by default. Override with:
+The file is written to `Content/<VERSION_CONTENT_DIR>/version.txt` (default: `Content/BuildInfo/version.txt`). Override the subdirectory with:
 
 ```bash
-VERSION_FILE_BUNDLE_PATH="Contents/version.txt"   # default; path relative to .app root
+VERSION_CONTENT_DIR="BuildInfo"   # default; must be a subdirectory of Content/
 ```
 
-Because the file is written before the codesign step, it is included in the Developer ID signature and the notarized artifact.
+Or via CLI: `--version-content-dir DIR`.
+
+### DefaultGame.ini staging entry
+
+For UAT to bundle the directory, your project needs this line under `[/Script/UnrealEd.ProjectPackagingSettings]` in `Config/DefaultGame.ini`:
+
+```ini
+[/Script/UnrealEd.ProjectPackagingSettings]
++DirectoriesToAlwaysStageAsNonUFS=(Path="BuildInfo")
+```
+
+The script adds it automatically if it is missing when `VERSION_MODE != NONE`. If you use a custom `VERSION_CONTENT_DIR`, the entry is written with your directory name instead.
+
+### Editor cleanup
+
+The file is reset to `dev` after every run (success, failure, or early exit) via an `EXIT` trap, so the Unreal Editor never sees a build-stamped version string.
 
 ## Output
 
