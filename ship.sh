@@ -1421,7 +1421,7 @@ DMG_OUTPUT_DIR="${DMG_OUTPUT_DIR:-}"
 
 VERSION_MODE="${VERSION_MODE:-NONE}"
 VERSION_STRING="${VERSION_STRING:-}"
-VERSION_FILE_BUNDLE_PATH="${VERSION_FILE_BUNDLE_PATH:-Contents/version.txt}"
+VERSION_FILE_BUNDLE_PATH="${VERSION_FILE_BUNDLE_PATH:-Contents/Resources/version.txt}"
 
 
 # -----------------------------------------------------------------------------
@@ -2078,15 +2078,6 @@ done < <(/usr/bin/find "$APP_PATH/Contents" -type f \( -name "*.dylib" -o -name 
 while IFS= read -r -d '' fwk; do
   /usr/bin/codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$fwk"
 done < <(/usr/bin/find "$APP_PATH/Contents" -type d -name "*.framework" -print0 2>/dev/null)
-
-# codesign treats any file with the execute bit as a code object requiring its
-# own signature. Non-Mach-O files (e.g. version.txt) that accidentally carry +x
-# will block the outer .app signature with "code object is not signed at all".
-# Strip execute bits from non-Mach-O files so codesign seals them as resources.
-while IFS= read -r -d '' f; do
-  /usr/bin/file "$f" | /usr/bin/grep -q "Mach-O" || /bin/chmod a-x "$f"
-done < <(/usr/bin/find "$APP_PATH/Contents" -type f -perm /111 \
-    -not -name "*.dylib" -not -name "*.so" -print0 2>/dev/null)
 
 /usr/bin/codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS_FILE" --sign "$SIGN_IDENTITY" "$APP_PATH"
 
