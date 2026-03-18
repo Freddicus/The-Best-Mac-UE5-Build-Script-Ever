@@ -753,7 +753,8 @@ print_config() {
   echo "DMG_OUTPUT_DIR:    ${DMG_OUTPUT_DIR:-<unset>}" >&3
   echo "VERSION_MODE:      $VERSION_MODE" >&3
   if [[ "$VERSION_MODE" != "NONE" ]]; then
-    echo "VERSION_FILE_BUNDLE_PATH: $VERSION_FILE_BUNDLE_PATH" >&3
+    echo "VERSION_CONTENT_DIR: $VERSION_CONTENT_DIR" >&3
+    echo "VERSION_FILE:      $REPO_ROOT/Content/$VERSION_CONTENT_DIR/version.txt" >&3
   fi
   if [[ "$VERSION_MODE" == "MANUAL" ]]; then
     echo "VERSION_STRING:    $VERSION_STRING" >&3
@@ -769,29 +770,28 @@ print_config() {
   fi
 }
 
-# Write a version.txt file into the app bundle before signing.
-# VERSION_MODE controls behavior: NONE (skip), MANUAL (use VERSION_STRING), DATETIME (auto-generate).
-# The file is written to $APP_PATH/$VERSION_FILE_BUNDLE_PATH — must be called after APP_PATH is set.
-write_version_file() {
-  local _version_string=""
-  local _dest
-  local _dest_dir
-  local _ts
-  local _hash
-  _dest="$APP_PATH/$VERSION_FILE_BUNDLE_PATH"
-  # Always remove a stale version.txt from a prior run, regardless of VERSION_MODE.
-  # This prevents a previous MANUAL/DATETIME stamp from being bundled when VERSION_MODE=NONE.
-  if [[ -f "$_dest" ]]; then
-    /bin/rm -f "$_dest"
-    info "Removed stale version.txt: $_dest"
+# Tracks the Content/<dir>/version.txt written before UAT; reset to "dev" on EXIT.
+_CONTENT_VERSION_FILE_TO_RESTORE=""
+
+# Reset Content/<dir>/version.txt to "dev" so the editor stays clean.
+# Registered as an EXIT trap — safe to call multiple times.
+restore_content_version_file() {
+  [[ -z "${_CONTENT_VERSION_FILE_TO_RESTORE:-}" ]] && return 0
+  local _f="$_CONTENT_VERSION_FILE_TO_RESTORE"
+  _CONTENT_VERSION_FILE_TO_RESTORE=""
+  if printf '%s' "dev" > "$_f"; then
+    info "Reset $_f → 'dev'"
+  else
+    warn "Failed to reset $_f to 'dev' — restore manually"
   fi
+}
+
+# Resolve the version string for the current run (MANUAL or DATETIME).
+_resolve_version_string() {
+  local _ts _hash
   case "$VERSION_MODE" in
-    NONE)
-      info "VERSION_MODE=NONE — skipping version.txt"
-      return 0
-      ;;
     MANUAL)
-      _version_string="$VERSION_STRING"
+      echo "$VERSION_STRING"
       ;;
     DATETIME)
       _ts="$(date +%Y%m%d-%H%M%S)"
@@ -800,20 +800,63 @@ write_version_file() {
         _hash="$(/usr/bin/git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
       fi
       if [[ -n "$_hash" ]]; then
-        _version_string="${_ts}-${_hash}"
+        echo "${_ts}-${_hash}"
       else
-        _version_string="$_ts"
+        echo "$_ts"
       fi
       ;;
     *)
       die "Unknown VERSION_MODE: $VERSION_MODE"
       ;;
   esac
-  _dest_dir="$(/usr/bin/dirname "$_dest")"
-  /bin/mkdir -p "$_dest_dir"
-  echo "$_version_string" > "$_dest"
+}
+
+# Stamp Content/<VERSION_CONTENT_DIR>/version.txt with the build version before
+# UAT runs, so UAT bundles it automatically.  The EXIT trap resets it to "dev".
+write_version_to_content() {
+  [[ "$VERSION_MODE" == "NONE" ]] && return 0
+  local _dest="$REPO_ROOT/Content/$VERSION_CONTENT_DIR/version.txt"
+  local _version_string
+  _version_string="$(_resolve_version_string)"
+  /bin/mkdir -p "$(/usr/bin/dirname "$_dest")"
+  printf '%s' "$_version_string" > "$_dest"
   /bin/chmod 644 "$_dest"
-  good "Wrote version.txt: $_dest (value: $_version_string)"
+  _CONTENT_VERSION_FILE_TO_RESTORE="$_dest"
+  good "Stamped $_dest → '$_version_string' (will reset to 'dev' on exit)"
+}
+
+# Add "+DirectoriesToAlwaysStageAsNonUFS=(Path="<dir>")" under
+# [/Script/UnrealEd.ProjectPackagingSettings] in DefaultGame.ini if absent.
+# This tells UAT to bundle the version directory into every build.
+# Idempotent: does nothing if the entry is already present.
+ensure_game_ini_staging_entry() {
+  [[ "$VERSION_MODE" == "NONE" ]] && return 0
+  local ini_file="$REPO_ROOT/Config/DefaultGame.ini"
+  local section="[/Script/UnrealEd.ProjectPackagingSettings]"
+  local entry="+DirectoriesToAlwaysStageAsNonUFS=(Path=\"$VERSION_CONTENT_DIR\")"
+  local _line tmp_ini
+
+  if [[ -f "$ini_file" ]] && /usr/bin/grep -qF "$entry" "$ini_file"; then
+    info "DefaultGame.ini already contains staging entry for $VERSION_CONTENT_DIR"
+    return 0
+  fi
+
+  if [[ -f "$ini_file" ]] && /usr/bin/grep -qF "$section" "$ini_file"; then
+    # Section exists — insert entry immediately after the header line.
+    tmp_ini="$(/usr/bin/mktemp "${TMPDIR:-/tmp}DefaultGame_ini_XXXXXX")"
+    while IFS= read -r _line; do
+      printf '%s\n' "$_line"
+      if [[ "$_line" == "$section" ]]; then
+        printf '%s\n' "$entry"
+      fi
+    done < "$ini_file" > "$tmp_ini"
+    /bin/mv "$tmp_ini" "$ini_file"
+  else
+    # Section absent (or file absent) — append section and entry.
+    /bin/mkdir -p "$(/usr/bin/dirname "$ini_file")"
+    printf '\n%s\n%s\n' "$section" "$entry" >> "$ini_file"
+  fi
+  good "Added staging entry to DefaultGame.ini: $entry"
 }
 
 autodetect_workspace_if_needed() {
@@ -1421,7 +1464,7 @@ DMG_OUTPUT_DIR="${DMG_OUTPUT_DIR:-}"
 
 VERSION_MODE="${VERSION_MODE:-NONE}"
 VERSION_STRING="${VERSION_STRING:-}"
-VERSION_FILE_BUNDLE_PATH="${VERSION_FILE_BUNDLE_PATH:-Contents/version.txt}"
+VERSION_CONTENT_DIR="${VERSION_CONTENT_DIR:-BuildInfo}"
 
 
 # -----------------------------------------------------------------------------
@@ -1473,7 +1516,7 @@ Options (highest priority):
 
   --version-mode NONE|MANUAL|DATETIME
   --version-string STRING
-  --version-file-bundle-path PATH
+  --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
 
   -h, --help
 USAGE
@@ -1544,7 +1587,7 @@ while [[ $# -gt 0 ]]; do
 
     --version-mode)             VERSION_MODE="$2"; shift 2 ;;
     --version-string)           VERSION_STRING="$2"; shift 2 ;;
-    --version-file-bundle-path) VERSION_FILE_BUNDLE_PATH="$2"; shift 2 ;;
+    --version-content-dir) VERSION_CONTENT_DIR="$2"; shift 2 ;;
 
     *) die "Unknown option: $1 (use --help)" ;;
   esac
@@ -1795,6 +1838,7 @@ exec >>"$LOG_FILE" 2>&1
 echo "Log file: $LOG_FILE" >&3
 
 trap on_error_exit ERR
+trap 'restore_content_version_file' EXIT
 
 # Build outputs
 ARCHIVE_PATH="$BUILD_DIR/${SHORT_NAME}.xcarchive"
@@ -1879,16 +1923,15 @@ fi
 if [[ "$DRY_RUN" == "1" ]]; then
   print_config
   echo "== DRY RUN ==" >&3
-  steps="UAT BuildCookRun"
+  if [[ "$VERSION_MODE" != "NONE" ]]; then
+    steps="stamp Content/$VERSION_CONTENT_DIR/version.txt → UAT BuildCookRun"
+  else
+    steps="UAT BuildCookRun"
+  fi
   if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     steps="$steps → Xcode archive/export"
   else
     steps="$steps → (skip Xcode archive/export)"
-  fi
-  if [[ "$VERSION_MODE" == "MANUAL" ]]; then
-    steps="$steps → write version.txt \"$VERSION_STRING\""
-  elif [[ "$VERSION_MODE" == "DATETIME" ]]; then
-    steps="$steps → write version.txt (example: $(date +%Y%m%d-%H%M%S)-<git-hash>)"
   fi
   steps="$steps → codesign"
   if [[ "$ENABLE_ZIP" == "1" ]]; then
@@ -1917,6 +1960,9 @@ if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
   rm -rf "$BUILD_DIR"
 fi
 mkdir -p "$BUILD_DIR"
+
+ensure_game_ini_staging_entry
+write_version_to_content
 
 info "Building game (UAT BuildCookRun)"
 
@@ -2015,8 +2061,6 @@ else
   info "Steam disabled (ENABLE_STEAM=0) — skipping libsteam_api.dylib staging"
 fi
 
-write_version_file
-
 TMP_PREFIX="$(sanitize_name_for_tmp "$SHORT_NAME")"
 # Entitlements: hardened runtime is required for Developer ID signing.
 # Steam overlay / Steam client libraries may require disabling library validation.
@@ -2025,7 +2069,11 @@ TMP_PREFIX="$(sanitize_name_for_tmp "$SHORT_NAME")"
 # If ENTITLEMENTS_FILE is already set (e.g. user-provided via env or future CLI flag),
 # use it as-is and do not generate or clean it up. Otherwise, generate a temp file.
 if is_placeholder "${ENTITLEMENTS_FILE:-}"; then
-  _ENTITLEMENTS_TMP="$(/usr/bin/mktemp -t "${TMP_PREFIX}_entitlements_XXXXXX.plist")"
+  # macOS mktemp requires XXXXXX at the very end of the template; any suffix
+  # after them (e.g. ".plist") prevents substitution and creates a file with
+  # the literal name "…XXXXXX.plist". Drop the extension — codesign reads the
+  # file by path and does not care about the filename extension.
+  _ENTITLEMENTS_TMP="$(/usr/bin/mktemp "${TMPDIR:-/tmp}${TMP_PREFIX}_entitlements_XXXXXX")"
   ENTITLEMENTS_FILE="$_ENTITLEMENTS_TMP"
 else
   _ENTITLEMENTS_TMP=""
