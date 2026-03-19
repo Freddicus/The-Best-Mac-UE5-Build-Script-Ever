@@ -569,6 +569,30 @@ semver3_to_int() {
   echo $((a*1000000 + b*1000 + c))
 }
 
+bump_semver() {
+  # Bump a semver string (X.Y.Z or vX.Y.Z) by major, minor, or patch.
+  # Outputs the bumped version, preserving a leading "v" if present.
+  # Lower components are reset to 0 on major/minor bumps.
+  local component="$1" version="$2"
+  local prefix="" rest major minor patch
+  if [[ "$version" == v* ]]; then
+    prefix="v"
+    rest="${version#v}"
+  else
+    rest="$version"
+  fi
+  if ! [[ "$rest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    die "--bump-$component: '$version' is not a valid semver (expected X.Y.Z or vX.Y.Z)"
+  fi
+  IFS='.' read -r major minor patch <<< "$rest"
+  case "$component" in
+    major) major=$((major + 1)); minor=0; patch=0 ;;
+    minor) minor=$((minor + 1)); patch=0 ;;
+    patch) patch=$((patch + 1)) ;;
+  esac
+  echo "${prefix}${major}.${minor}.${patch}"
+}
+
 extract_json_string_value() {
   # Best-effort extraction of a top-level JSON string field value.
   # Example: extract_json_string_value file.json MinVersion
@@ -756,7 +780,7 @@ print_config() {
     echo "VERSION_CONTENT_DIR: $VERSION_CONTENT_DIR" >&3
     echo "VERSION_FILE:      $REPO_ROOT/Content/$VERSION_CONTENT_DIR/version.txt" >&3
   fi
-  if [[ "$VERSION_MODE" == "MANUAL" ]]; then
+  if [[ "$VERSION_MODE" == "MANUAL" || "$VERSION_MODE" == "HYBRID" ]]; then
     echo "VERSION_STRING:    $VERSION_STRING" >&3
   fi
   if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
@@ -772,6 +796,8 @@ print_config() {
 
 # Tracks the Content/<dir>/version.txt written before UAT; reset to "dev" on EXIT.
 _CONTENT_VERSION_FILE_TO_RESTORE=""
+# Set to 1 when --bump-* fires; causes VERSION_STRING to be persisted to .env on success.
+_VERSION_BUMPED=""
 
 # Reset Content/<dir>/version.txt to "dev" so the editor stays clean.
 # Registered as an EXIT trap — safe to call multiple times.
@@ -786,7 +812,7 @@ restore_content_version_file() {
   fi
 }
 
-# Resolve the version string for the current run (MANUAL or DATETIME).
+# Resolve the version string for the current run.
 _resolve_version_string() {
   local _ts _hash
   case "$VERSION_MODE" in
@@ -803,6 +829,18 @@ _resolve_version_string() {
         echo "${_ts}-${_hash}"
       else
         echo "$_ts"
+      fi
+      ;;
+    HYBRID)
+      # Manual base version + git short hash: e.g. "1.2.3-a1b2c3d"
+      _hash=""
+      if /usr/bin/git -C "$REPO_ROOT" rev-parse --short HEAD >/dev/null 2>&1; then
+        _hash="$(/usr/bin/git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)"
+      fi
+      if [[ -n "$_hash" ]]; then
+        echo "${VERSION_STRING}-${_hash}"
+      else
+        echo "$VERSION_STRING"
       fi
       ;;
     *)
@@ -844,7 +882,7 @@ ensure_game_ini_staging_entry() {
   if [[ -f "$ini_file" ]] && /usr/bin/grep -qF "$section" "$ini_file"; then
     # Section exists — insert entry immediately after the header line.
     tmp_ini="$(/usr/bin/mktemp "${TMPDIR:-/tmp}DefaultGame_ini_XXXXXX")"
-    while IFS= read -r _line; do
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
       printf '%s\n' "$_line"
       if [[ "$_line" == "$section" ]]; then
         printf '%s\n' "$entry"
@@ -857,6 +895,36 @@ ensure_game_ini_staging_entry() {
     printf '\n%s\n%s\n' "$section" "$entry" >> "$ini_file"
   fi
   good "Added staging entry to DefaultGame.ini: $entry"
+}
+
+# Persist the bumped VERSION_STRING back to .env on successful builds.
+# If VERSION_STRING= is already in .env it is updated in-place; otherwise it is appended.
+# Only runs when --bump-* was used this invocation.
+write_bumped_version_to_env() {
+  [[ -z "${_VERSION_BUMPED:-}" ]] && return 0
+  local new_line="VERSION_STRING=\"$VERSION_STRING\""
+  local tmp _line
+
+  if [[ ! -f "$ENV_FILE" ]]; then
+    printf '%s\n' "$new_line" > "$ENV_FILE"
+    good "Created $ENV_FILE with $new_line"
+    return 0
+  fi
+
+  if /usr/bin/grep -q "^VERSION_STRING=" "$ENV_FILE"; then
+    tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}env_update_XXXXXX")"
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+      if [[ "$_line" == VERSION_STRING=* ]]; then
+        printf '%s\n' "$new_line"
+      else
+        printf '%s\n' "$_line"
+      fi
+    done < "$ENV_FILE" > "$tmp"
+    /bin/mv "$tmp" "$ENV_FILE"
+  else
+    printf '\n%s\n' "$new_line" >> "$ENV_FILE"
+  fi
+  good "Persisted to $ENV_FILE: $new_line"
 }
 
 autodetect_workspace_if_needed() {
@@ -1514,9 +1582,12 @@ Options (highest priority):
   --build-type shipping|development
   --notarize / --no-notarize
 
-  --version-mode NONE|MANUAL|DATETIME
+  --version-mode NONE|MANUAL|DATETIME|HYBRID
   --version-string STRING
   --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
+  --bump-major / --bump-minor / --bump-patch
+                                     bump VERSION_STRING from .env or --version-string;
+                                     implies VERSION_MODE=MANUAL if not already set
 
   -h, --help
 USAGE
@@ -1587,7 +1658,16 @@ while [[ $# -gt 0 ]]; do
 
     --version-mode)             VERSION_MODE="$2"; shift 2 ;;
     --version-string)           VERSION_STRING="$2"; shift 2 ;;
-    --version-content-dir) VERSION_CONTENT_DIR="$2"; shift 2 ;;
+    --version-content-dir)      VERSION_CONTENT_DIR="$2"; shift 2 ;;
+    --bump-major|--bump-minor|--bump-patch)
+      if is_placeholder "${VERSION_STRING:-}"; then
+        die "$1 requires a base version. Set VERSION_STRING in .env or pass --version-string X.Y.Z before $1."
+      fi
+      VERSION_STRING="$(bump_semver "${1#--bump-}" "$VERSION_STRING")"
+      if [[ "$VERSION_MODE" == "NONE" ]]; then VERSION_MODE="MANUAL"; fi
+      _VERSION_BUMPED=1
+      shift ;;
+
 
     *) die "Unknown option: $1 (use --help)" ;;
   esac
@@ -1734,11 +1814,11 @@ fi
 
 # VERSION_MODE validation
 case "$VERSION_MODE" in
-  NONE|MANUAL|DATETIME) ;;
-  *) die "VERSION_MODE must be NONE, MANUAL, or DATETIME (got: $VERSION_MODE)" ;;
+  NONE|MANUAL|DATETIME|HYBRID) ;;
+  *) die "VERSION_MODE must be NONE, MANUAL, DATETIME, or HYBRID (got: $VERSION_MODE)" ;;
 esac
-if [[ "$VERSION_MODE" == "MANUAL" ]] && is_placeholder "${VERSION_STRING:-}"; then
-  die "VERSION_MODE=MANUAL but VERSION_STRING is not set. Provide it via --version-string or VERSION_STRING in .env."
+if [[ "$VERSION_MODE" == "MANUAL" || "$VERSION_MODE" == "HYBRID" ]] && is_placeholder "${VERSION_STRING:-}"; then
+  die "VERSION_MODE=$VERSION_MODE but VERSION_STRING is not set. Provide it via --version-string or VERSION_STRING in .env."
 fi
 
 # Ask up-front (unless provided via env/CLI)
@@ -2376,6 +2456,7 @@ echo "REMINDER: Test your distribution path." >&3
 echo "  - If distributing via a launcher (Steam, Epic, etc.), test launching from that launcher." >&3
 echo "  - If distributing direct-download, test on a separate Mac (or a clean user account) with Gatekeeper enabled." >&3
 
+write_bumped_version_to_env
 echo "✅ Done" >&3
 echo "App: $APP_PATH" >&3
 if [[ "$ENABLE_ZIP" == "1" ]]; then
