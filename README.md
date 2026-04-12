@@ -307,6 +307,63 @@ The script adds it automatically if it is missing when `VERSION_MODE != NONE`. I
 
 The file is reset to `dev` after every run (success, failure, or early exit) via an `EXIT` trap, so the Unreal Editor never sees a build-stamped version string.
 
+## Optional Info.plist stamping via xcconfig
+
+When the script runs, it also updates the UE-generated xcconfig at:
+
+```
+Intermediate/ProjectFiles/XcconfigsMac/<project>.xcconfig
+```
+
+This file is produced by Unreal's `GenerateProjectFiles.sh`. Xcode reads it during archiving and injects the values into `Info.plist` automatically. The script only rewrites the specific keys listed below — everything else in the file is untouched.
+
+> **Prerequisite**: the xcconfig must already exist. If it's missing (e.g. on a fresh clone that hasn't run `GenerateProjectFiles` yet), the script skips this step with an informational message.
+
+### Keys written
+
+| xcconfig key | Info.plist key | Source |
+|---|---|---|
+| `CURRENT_PROJECT_VERSION` | `CFBundleVersion` | Resolved version string (only when `VERSION_MODE != NONE`) |
+| `MARKETING_VERSION` | `CFBundleShortVersionString` | `MARKETING_VERSION` config (default: `1.0.0`) |
+| `INFOPLIST_KEY_LSApplicationCategoryType` | `LSApplicationCategoryType` | `APP_CATEGORY` config (optional override; existing value preserved if unset) |
+| `INFOPLIST_KEY_LSSupportsGameMode` | `LSSupportsGameMode` | `ENABLE_GAME_MODE` config (default: `YES`); placed immediately after the category key |
+| `INFOPLIST_KEY_GCSupportsGameMode` | `GCSupportsGameMode` | `ENABLE_GAME_MODE` config (default: `YES`); placed immediately after the category key |
+
+### MARKETING_VERSION
+
+The user-visible version string shown in Finder, the About dialog, etc. (`CFBundleShortVersionString`). Defaults to `1.0.0` with a warning if not set:
+
+```bash
+MARKETING_VERSION="1.2.0"
+```
+
+Or via CLI: `--marketing-version 1.2.0`
+
+### ENABLE_GAME_MODE
+
+macOS Game Mode (introduced in macOS Sonoma 14) gives your app elevated CPU and GPU priority while a game controller is connected. Defaults to enabled (`YES`) with a warning if not explicitly set:
+
+```bash
+ENABLE_GAME_MODE="1"   # YES (default)
+ENABLE_GAME_MODE="0"   # NO
+```
+
+Or via CLI: `--game-mode` / `--no-game-mode`
+
+Stamping `NO` opts the app out of Game Mode without requiring a separate Info.plist edit. The two game mode keys are always placed immediately after `INFOPLIST_KEY_LSApplicationCategoryType` in the xcconfig.
+
+### APP_CATEGORY
+
+Optional override for `INFOPLIST_KEY_LSApplicationCategoryType` (`LSApplicationCategoryType`). If not set, whatever value is already in the xcconfig is preserved unchanged.
+
+```bash
+APP_CATEGORY="public.app-category.games"
+```
+
+Or via CLI: `--app-category public.app-category.games`
+
+Full list of valid category identifiers: https://developer.apple.com/documentation/bundleresources/information-property-list/lsapplicationcategorytype
+
 ## Output
 
 Artifacts go under (names derived from `SHORT_NAME` / `LONG_NAME`):
