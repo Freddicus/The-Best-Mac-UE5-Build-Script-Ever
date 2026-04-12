@@ -6,6 +6,18 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-04-12] — Info.plist xcconfig stamping: MARKETING_VERSION + Game Mode (PR #19)
+
+### Added
+- `update_xcconfig_versions()`: stamps the UE-generated xcconfig (`Intermediate/ProjectFiles/XcconfigsMac/<project>.xcconfig`) before the Xcode archive step. Only rewrites the specific keys below; everything else in the file is untouched. Skips with an informational message if the xcconfig does not exist yet.
+- `CURRENT_PROJECT_VERSION` (`CFBundleVersion`): written from the resolved version string when `VERSION_MODE != NONE`.
+- `MARKETING_VERSION` (`CFBundleShortVersionString`): new config variable and `--marketing-version STRING` CLI flag. Defaults to `1.0.0` with a warning if not explicitly set.
+- `ENABLE_GAME_MODE`: new config variable and `--game-mode` / `--no-game-mode` CLI flags. Stamps `INFOPLIST_KEY_LSSupportsGameMode` and `INFOPLIST_KEY_GCSupportsGameMode` (`YES`/`NO`). Defaults to `YES` with a warning if not explicitly set. macOS Game Mode (Sonoma 14+) gives the app elevated CPU/GPU priority when a controller is connected. Both keys are placed immediately after `INFOPLIST_KEY_LSApplicationCategoryType` in the xcconfig.
+- `APP_CATEGORY`: new optional config variable and `--app-category STRING` CLI flag. Overrides `INFOPLIST_KEY_LSApplicationCategoryType` in the xcconfig. If unset, the existing value in the file is preserved unchanged. Valid identifiers: https://developer.apple.com/documentation/bundleresources/information-property-list/lsapplicationcategorytype
+- All new variables appear in `--print-config` output and are documented in `.env.example` and README.
+
+---
+
 ## [2026-03-18] — HYBRID version mode + --bump-* flags (PR #18)
 
 ### Added
