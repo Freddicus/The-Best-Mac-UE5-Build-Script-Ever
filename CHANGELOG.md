@@ -6,6 +6,21 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-04-14] — Restructure docs: slim README + supplemental docs/ (PR #20)
+
+### Added
+- `docs/configuration.md`: full `.env` variable reference, CLI flags, Xcode workspace auto-detection, scheme setup, `ExportOptions.plist`, and a minimal CI config block.
+- `docs/versioning.md`: `VERSION_MODE` reference, bump flags, xcconfig/Info.plist stamping (`MARKETING_VERSION`, `ENABLE_GAME_MODE`, `APP_CATEGORY`).
+- `docs/output.md`: artifact paths, ZIP/DMG options, icon seeding.
+- `docs/steam.md`: dylib staging, entitlements, `steam_appid.txt`.
+- `docs/troubleshooting.md`: common failure scenarios with concrete fix steps and commands.
+- `docs/gotchas.md`: lessons learned about macOS signing and notarization (`--deep` codesign, injected dylibs, Shared scheme requirement, xcconfig regeneration, UAT vs Xcode pipeline, notarization log, Game Mode vs App Sandbox).
+
+### Changed
+- `README.md`: rewritten to focus on quick start and pipeline execution order. All configuration and feature detail moved to `docs/`.
+
+---
+
 ## [2026-04-12] — Info.plist xcconfig stamping: MARKETING_VERSION + Game Mode (PR #19)
 
 ### Added
