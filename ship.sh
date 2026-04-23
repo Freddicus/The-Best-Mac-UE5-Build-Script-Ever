@@ -897,6 +897,13 @@ print_config() {
     echo "IOS_ICON_SYNC:     $IOS_ICON_SYNC" >&3
     echo "IOS_ICON_XCASSETS: ${IOS_ICON_XCASSETS:-<unset>}" >&3
     echo "IOS_APPICON_SET_NAME: ${IOS_APPICON_SET_NAME:-<unset>}" >&3
+    echo "IOS_ASC_VALIDATE:  $IOS_ASC_VALIDATE" >&3
+    echo "IOS_ASC_UPLOAD:    $IOS_ASC_UPLOAD" >&3
+    if [[ "$IOS_ASC_VALIDATE" == "1" || "$IOS_ASC_UPLOAD" == "1" ]]; then
+      echo "IOS_ASC_API_KEY_ID:   ${IOS_ASC_API_KEY_ID:-<unset>}" >&3
+      echo "IOS_ASC_API_ISSUER:   ${IOS_ASC_API_ISSUER:-<unset>}" >&3
+      echo "IOS_ASC_API_KEY_PATH: ${IOS_ASC_API_KEY_PATH:-<unset>}" >&3
+    fi
   fi
   echo "ENABLE_ZIP:        ${ENABLE_ZIP:-<unset>}" >&3
   echo "ENABLE_DMG:        $ENABLE_DMG" >&3
@@ -1183,6 +1190,16 @@ update_ios_xcconfig_versions() {
   if [[ -z "$_marketing_ver" ]]; then
     warn "IOS_MARKETING_VERSION not set — defaulting to 1.0.0"
     _marketing_ver="1.0.0"
+  fi
+
+  # App Store Connect requires CFBundleVersion to be purely numeric (no leading "v").
+  if [[ -n "$_bundle_version" && "$_bundle_version" == v* ]]; then
+    warn "iOS CURRENT_PROJECT_VERSION: stripping 'v' prefix from '$_bundle_version' (CFBundleVersion must be numeric-only for App Store Connect)"
+    _bundle_version="${_bundle_version#v}"
+  fi
+  if [[ "$_marketing_ver" == v* ]]; then
+    warn "iOS MARKETING_VERSION: stripping 'v' prefix from '$_marketing_ver'"
+    _marketing_ver="${_marketing_ver#v}"
   fi
 
   local _tmp _line
@@ -1511,6 +1528,45 @@ autodetect_ios_scheme_if_needed() {
       fi
     done
     warn "Multiple iOS schemes found, none matched project name. Set IOS_SCHEME explicitly."
+  fi
+}
+
+autodetect_ios_asc_credentials_if_needed() {
+  [[ "$ENABLE_IOS" == "1" ]] || return 0
+  [[ "$IOS_ASC_VALIDATE" == "1" || "$IOS_ASC_UPLOAD" == "1" ]] || return 0
+  local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
+  [[ -f "$engine_ini" ]] || return 0
+
+  if is_placeholder "${IOS_ASC_API_KEY_ID:-}"; then
+    local _key_id
+    _key_id="$(read_ini_value "$engine_ini" "AppStoreConnectKeyID")"
+    if [[ -n "$_key_id" ]]; then
+      IOS_ASC_API_KEY_ID="$_key_id"
+      info "Auto-detected IOS_ASC_API_KEY_ID from DefaultEngine.ini: $IOS_ASC_API_KEY_ID"
+    fi
+  fi
+
+  if is_placeholder "${IOS_ASC_API_ISSUER:-}"; then
+    local _issuer
+    _issuer="$(read_ini_value "$engine_ini" "AppStoreConnectIssuerID")"
+    if [[ -n "$_issuer" ]]; then
+      IOS_ASC_API_ISSUER="$_issuer"
+      info "Auto-detected IOS_ASC_API_ISSUER from DefaultEngine.ini: $IOS_ASC_API_ISSUER"
+    fi
+  fi
+
+  if is_placeholder "${IOS_ASC_API_KEY_PATH:-}"; then
+    local _raw _path
+    _raw="$(read_ini_value "$engine_ini" "AppStoreConnectKeyPath")"
+    if [[ -n "$_raw" ]]; then
+      # UE stores this as: (FilePath="/path/to/AuthKey_ID.p8") — extract the quoted path
+      _path="${_raw#*\"}"
+      _path="${_path%\"*}"
+      if [[ -n "$_path" ]]; then
+        IOS_ASC_API_KEY_PATH="$_path"
+        info "Auto-detected IOS_ASC_API_KEY_PATH from DefaultEngine.ini: $IOS_ASC_API_KEY_PATH"
+      fi
+    fi
   fi
 }
 
@@ -2004,6 +2060,11 @@ MARKETING_VERSION="${MARKETING_VERSION:-}"
 ENABLE_GAME_MODE="${ENABLE_GAME_MODE:-}"
 APP_CATEGORY="${APP_CATEGORY:-}"
 IOS_MARKETING_VERSION="${IOS_MARKETING_VERSION:-}"
+IOS_ASC_VALIDATE="${IOS_ASC_VALIDATE:-0}"
+IOS_ASC_UPLOAD="${IOS_ASC_UPLOAD:-0}"
+IOS_ASC_API_KEY_ID="${IOS_ASC_API_KEY_ID:-}"
+IOS_ASC_API_ISSUER="${IOS_ASC_API_ISSUER:-}"
+IOS_ASC_API_KEY_PATH="${IOS_ASC_API_KEY_PATH:-}"
 
 
 # -----------------------------------------------------------------------------
@@ -2051,6 +2112,11 @@ Options (highest priority):
   --ios-icon-sync / --no-ios-icon-sync
   --ios-icon-xcassets PATH
   --ios-appicon-set-name NAME
+  --ios-validate-ipa                 validate IPA with App Store Connect (xcrun altool --validate-app)
+  --ios-upload-ipa                   upload IPA to App Store Connect; implies --ios-validate-ipa
+  --ios-asc-api-key-id ID            App Store Connect API key ID (10-char)
+  --ios-asc-api-issuer UUID          App Store Connect API issuer UUID
+  --ios-asc-api-key-path PATH        path to the .p8 API key file
 
   --zip / --no-zip
   --dmg / --no-dmg
@@ -2136,6 +2202,11 @@ while [[ $# -gt 0 ]]; do
     --no-ios-icon-sync)     IOS_ICON_SYNC="0"; shift ;;
     --ios-icon-xcassets)    IOS_ICON_XCASSETS="$2"; CLI_SET_IOS_ICON_XCASSETS=1; shift 2 ;;
     --ios-appicon-set-name) IOS_APPICON_SET_NAME="$2"; shift 2 ;;
+    --ios-validate-ipa)     IOS_ASC_VALIDATE="1"; shift ;;
+    --ios-upload-ipa)       IOS_ASC_UPLOAD="1"; shift ;;
+    --ios-asc-api-key-id)   IOS_ASC_API_KEY_ID="$2"; shift 2 ;;
+    --ios-asc-api-issuer)   IOS_ASC_API_ISSUER="$2"; shift 2 ;;
+    --ios-asc-api-key-path) IOS_ASC_API_KEY_PATH="$2"; shift 2 ;;
 
     --zip)                  ENABLE_ZIP="1"; shift ;;
     --no-zip)               ENABLE_ZIP="0"; shift ;;
@@ -2180,6 +2251,10 @@ if [[ "$IOS_ONLY" == "1" ]]; then
   ENABLE_ZIP="0"
   ENABLE_DMG="0"
   NOTARIZE="no"
+fi
+
+if [[ "$IOS_ASC_UPLOAD" == "1" ]]; then
+  IOS_ASC_VALIDATE="1"
 fi
 
 # If REPO_ROOT is still a placeholder/empty, assume this script lives in the project root.
@@ -2332,6 +2407,7 @@ fi
 if [[ "$ENABLE_IOS" == "1" ]]; then
   autodetect_ios_workspace_if_needed
   autodetect_ios_scheme_if_needed
+  autodetect_ios_asc_credentials_if_needed
 
   require_not_placeholder "IOS_WORKSPACE" "${IOS_WORKSPACE:-}" "Example: YourProject (iOS).xcworkspace"
   require_not_placeholder "IOS_SCHEME" "${IOS_SCHEME:-}" "Example: YourProject"
@@ -2545,6 +2621,14 @@ if [[ "$ENABLE_IOS" == "1" ]]; then
   fi
 fi
 
+if [[ "$IOS_ASC_VALIDATE" == "1" || "$IOS_ASC_UPLOAD" == "1" ]]; then
+  require_not_placeholder "IOS_ASC_API_KEY_ID" "${IOS_ASC_API_KEY_ID:-}" "Example: ABCDE12345"
+  require_not_placeholder "IOS_ASC_API_ISSUER" "${IOS_ASC_API_ISSUER:-}" "Example: 12345678-abcd-1234-abcd-123456789abc"
+  require_not_placeholder "IOS_ASC_API_KEY_PATH" "${IOS_ASC_API_KEY_PATH:-}" "Example: ~/.appstoreconnect/private_keys/AuthKey_ABCDE12345.p8"
+  [[ -f "$IOS_ASC_API_KEY_PATH" ]] || die "App Store Connect API key (.p8) not found: $IOS_ASC_API_KEY_PATH"
+  command -v xcrun >/dev/null 2>&1 || die "xcrun not found. Install Xcode Command Line Tools."
+fi
+
 if [[ "$ENABLE_DMG" == "1" ]]; then
   command -v hdiutil >/dev/null 2>&1 || die "hdiutil not found (required to create DMG)."
   if [[ "$FANCY_DMG" == "1" ]] && ! command -v osascript >/dev/null 2>&1; then
@@ -2557,6 +2641,8 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "== DRY RUN ==" >&3
   if [[ "$IOS_ONLY" == "1" ]]; then
     steps="iOS UAT BuildCookRun → iOS archive/export → IPA"
+    if [[ "$IOS_ASC_VALIDATE" == "1" ]]; then steps="$steps → ASC validate"; fi
+    if [[ "$IOS_ASC_UPLOAD" == "1" ]]; then steps="$steps → ASC upload"; fi
   else
     if [[ "$VERSION_MODE" != "NONE" ]]; then
       steps="stamp Content/$VERSION_CONTENT_DIR/version.txt → UAT BuildCookRun"
@@ -2583,6 +2669,8 @@ if [[ "$DRY_RUN" == "1" ]]; then
     fi
     if [[ "$ENABLE_IOS" == "1" ]]; then
       steps="$steps → iOS UAT BuildCookRun → iOS archive/export → IPA"
+      if [[ "$IOS_ASC_VALIDATE" == "1" ]]; then steps="$steps → ASC validate"; fi
+      if [[ "$IOS_ASC_UPLOAD" == "1" ]]; then steps="$steps → ASC upload"; fi
     fi
   fi
   if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
@@ -2689,6 +2777,28 @@ if [[ "$ENABLE_IOS" == "1" ]]; then
     die "No .ipa found under iOS export dir: $IOS_EXPORT_DIR"
   fi
   echo "IPA: $IOS_IPA_PATH" >&3
+
+  if [[ "$IOS_ASC_VALIDATE" == "1" ]]; then
+    echo "== iOS Validate (App Store Connect) ==" >&3
+    /usr/bin/xcrun altool --validate-app \
+      -f "$IOS_IPA_PATH" \
+      -t ios \
+      --apiKey "$IOS_ASC_API_KEY_ID" \
+      --apiIssuer "$IOS_ASC_API_ISSUER" \
+      --private-key "$IOS_ASC_API_KEY_PATH"
+    good "iOS IPA passed App Store Connect validation."
+  fi
+
+  if [[ "$IOS_ASC_UPLOAD" == "1" ]]; then
+    echo "== iOS Upload (App Store Connect) ==" >&3
+    /usr/bin/xcrun altool --upload-app \
+      -f "$IOS_IPA_PATH" \
+      -t ios \
+      --apiKey "$IOS_ASC_API_KEY_ID" \
+      --apiIssuer "$IOS_ASC_API_ISSUER" \
+      --private-key "$IOS_ASC_API_KEY_PATH"
+    good "iOS IPA uploaded to App Store Connect."
+  fi
 fi
 
 if [[ "$IOS_ONLY" != "1" ]]; then
@@ -3085,6 +3195,9 @@ if [[ "$IOS_ONLY" != "1" ]]; then
 fi
 if [[ "$ENABLE_IOS" == "1" ]]; then
   echo "IPA: ${IOS_IPA_PATH:-<not found>}" >&3
+  if [[ "$IOS_ASC_UPLOAD" == "1" ]]; then
+    echo "ASC upload: submitted" >&3
+  fi
 fi
 
 # Cleanup script-generated temp entitlements file only (user-provided files are never deleted).
