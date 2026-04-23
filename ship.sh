@@ -517,6 +517,125 @@ PLIST
   return 0
 }
 
+autodetect_ios_export_plist_if_needed() {
+  [[ "$ENABLE_IOS" == "1" ]] || return 0
+  if ! is_placeholder "${IOS_EXPORT_PLIST:-}"; then
+    return 0
+  fi
+
+  # Fast path: conventional name.
+  local conventional="$REPO_ROOT/iOS-ExportOptions.plist"
+  if [[ -f "$conventional" ]]; then
+    IOS_EXPORT_PLIST="$conventional"
+    info "Auto-detected iOS ExportOptions.plist (by name): $IOS_EXPORT_PLIST"
+    return 0
+  fi
+
+  # Scan repo root plists for iOS distribution methods.
+  # Exclude developer-id and mac-application which are macOS-only.
+  local matches=() p
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    local flat
+    flat="$(/bin/cat "$p" 2>/dev/null | /usr/bin/tr -d '[:space:]')"
+    if echo "$flat" | /usr/bin/grep -qiE '<key>method</key><string>(developer-id|mac-application)</string>'; then
+      continue
+    fi
+    if echo "$flat" | /usr/bin/grep -qiE '<key>method</key><string>(app-store-connect|release-testing|ad-hoc|enterprise|debugging|development)</string>'; then
+      matches+=("$p")
+    fi
+  done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 1 -type f -name '*.plist' 2>/dev/null | /usr/bin/sort)
+
+  if [[ "${#matches[@]}" -eq 1 ]]; then
+    IOS_EXPORT_PLIST="${matches[0]}"
+    info "Auto-detected iOS ExportOptions.plist (by contents): $IOS_EXPORT_PLIST"
+    return 0
+  fi
+
+  if [[ "${#matches[@]}" -gt 1 ]]; then
+    echo "== IOS_EXPORT_PLIST not set — found multiple iOS ExportOptions-like plist candidates ==" >&3
+    local i=1
+    for p in "${matches[@]}"; do
+      echo "  [$i] $p" >&3
+      i=$((i+1))
+    done
+
+    if [[ ! -t 0 ]]; then
+      warn "Multiple iOS ExportOptions-like plist files found. Pass --ios-export-plist PATH to select one."
+      return 0
+    fi
+
+    local choice
+    read -r -p "Select iOS ExportOptions.plist [1]: " choice
+    choice="${choice:-1}"
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "${#matches[@]}" ]]; then
+      IOS_EXPORT_PLIST="${matches[$((choice-1))]}"
+      info "Selected iOS ExportOptions.plist: $IOS_EXPORT_PLIST"
+      return 0
+    fi
+
+    warn "Invalid selection '$choice'. Provide --ios-export-plist PATH instead."
+    return 0
+  fi
+
+  # No match found; offer to generate one interactively.
+  maybe_generate_ios_export_plist_interactively || true
+}
+
+maybe_generate_ios_export_plist_interactively() {
+  if [[ ! -t 0 ]]; then
+    return 1
+  fi
+
+  local out
+  out="$REPO_ROOT/iOS-ExportOptions.plist"
+
+  echo "No iOS ExportOptions.plist was detected." >&3
+  echo "I can generate a minimal one. Choose the distribution method:" >&3
+  echo "  1) app-store-connect  — submit to App Store / TestFlight" >&3
+  echo "  2) release-testing    — install directly on registered devices (replaces ad-hoc)" >&3
+
+  local method_choice method
+  read -r -p "Method [1]: " method_choice
+  case "${method_choice:-1}" in
+    1|app-store-connect)  method="app-store-connect" ;;
+    2|release-testing)    method="release-testing" ;;
+    *) warn "Unrecognised choice '$method_choice'. Defaulting to app-store-connect."; method="app-store-connect" ;;
+  esac
+
+  local ans
+  read -r -p "Generate iOS-ExportOptions.plist (method=$method) at '$out'? (Y/n) " ans
+  if [[ "${ans:-Y}" =~ ^[Nn]$ ]]; then
+    return 1
+  fi
+
+  if [[ -f "$out" ]]; then
+    local ow
+    read -r -p "File already exists. Overwrite? (y/N) " ow
+    if [[ ! "${ow:-N}" =~ ^[Yy]$ ]]; then
+      return 1
+    fi
+  fi
+
+  info "Generating iOS-ExportOptions.plist: $out"
+  /bin/cat > "$out" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key><string>$method</string>
+  <key>teamID</key><string>$DEVELOPMENT_TEAM</string>
+  <key>signingStyle</key><string>automatic</string>
+  <key>compileBitcode</key><false/>
+</dict>
+</plist>
+PLIST
+
+  IOS_EXPORT_PLIST="$out"
+  return 0
+}
+
 
 sanitize_name_for_tmp() {
   # mktemp's -t template is happier without spaces/special chars.
@@ -769,6 +888,23 @@ print_config() {
   echo "MACOS_ICON_SYNC:   $MACOS_ICON_SYNC" >&3
   echo "MACOS_ICON_XCASSETS: ${MACOS_ICON_XCASSETS:-<unset>}" >&3
   echo "MACOS_APPICON_SET_NAME: ${MACOS_APPICON_SET_NAME:-<unset>}" >&3
+  echo "ENABLE_IOS:        $ENABLE_IOS" >&3
+  echo "IOS_ONLY:          $IOS_ONLY" >&3
+  if [[ "$ENABLE_IOS" == "1" ]]; then
+    echo "IOS_WORKSPACE:     ${IOS_WORKSPACE:-<unset>}" >&3
+    echo "IOS_SCHEME:        ${IOS_SCHEME:-<unset>}" >&3
+    echo "IOS_EXPORT_PLIST:  ${IOS_EXPORT_PLIST:-<unset>}" >&3
+    echo "IOS_ICON_SYNC:     $IOS_ICON_SYNC" >&3
+    echo "IOS_ICON_XCASSETS: ${IOS_ICON_XCASSETS:-<unset>}" >&3
+    echo "IOS_APPICON_SET_NAME: ${IOS_APPICON_SET_NAME:-<unset>}" >&3
+    echo "IOS_ASC_VALIDATE:  $IOS_ASC_VALIDATE" >&3
+    echo "IOS_ASC_UPLOAD:    $IOS_ASC_UPLOAD" >&3
+    if [[ "$IOS_ASC_VALIDATE" == "1" || "$IOS_ASC_UPLOAD" == "1" ]]; then
+      echo "IOS_ASC_API_KEY_ID:   ${IOS_ASC_API_KEY_ID:-<unset>}" >&3
+      echo "IOS_ASC_API_ISSUER:   ${IOS_ASC_API_ISSUER:-<unset>}" >&3
+      echo "IOS_ASC_API_KEY_PATH: ${IOS_ASC_API_KEY_PATH:-<unset>}" >&3
+    fi
+  fi
   echo "ENABLE_ZIP:        ${ENABLE_ZIP:-<unset>}" >&3
   echo "ENABLE_DMG:        $ENABLE_DMG" >&3
   echo "FANCY_DMG:         $FANCY_DMG" >&3
@@ -780,6 +916,7 @@ print_config() {
     echo "VERSION_CONTENT_DIR: $VERSION_CONTENT_DIR" >&3
     echo "VERSION_FILE:      $REPO_ROOT/Content/$VERSION_CONTENT_DIR/version.txt" >&3
     echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, will default to 1.0.0>}" >&3
+    echo "IOS_MARKETING_VERSION: ${IOS_MARKETING_VERSION:-<unset, falls back to MARKETING_VERSION>}" >&3
     echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, will default to YES>}" >&3
     echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, existing xcconfig value preserved>}" >&3
     echo "XCCONFIG:          $REPO_ROOT/Intermediate/ProjectFiles/XcconfigsMac/${LONG_NAME}.xcconfig" >&3
@@ -1030,6 +1167,72 @@ update_xcconfig_versions() {
   fi
 }
 
+update_ios_xcconfig_versions() {
+  [[ "$ENABLE_IOS" == "1" ]] || return 0
+
+  local _xcconfig_path="$REPO_ROOT/Intermediate/ProjectFiles/XcconfigsIOS/${LONG_NAME}.xcconfig"
+
+  if [[ ! -f "$_xcconfig_path" ]]; then
+    info "iOS xcconfig not found at $_xcconfig_path — skipping iOS Info.plist stamp (run GenerateProjectFiles first)"
+    return 0
+  fi
+
+  local _bundle_version=""
+  if [[ "$VERSION_MODE" != "NONE" ]]; then
+    _bundle_version="$(_resolve_version_string)"
+  fi
+
+  # IOS_MARKETING_VERSION falls back to MARKETING_VERSION, then to 1.0.0.
+  local _marketing_ver="${IOS_MARKETING_VERSION:-}"
+  if [[ -z "$_marketing_ver" ]]; then
+    _marketing_ver="${MARKETING_VERSION:-}"
+  fi
+  if [[ -z "$_marketing_ver" ]]; then
+    warn "IOS_MARKETING_VERSION not set — defaulting to 1.0.0"
+    _marketing_ver="1.0.0"
+  fi
+
+  # App Store Connect requires CFBundleVersion to be purely numeric (no leading "v").
+  if [[ -n "$_bundle_version" && "$_bundle_version" == v* ]]; then
+    warn "iOS CURRENT_PROJECT_VERSION: stripping 'v' prefix from '$_bundle_version' (CFBundleVersion must be numeric-only for App Store Connect)"
+    _bundle_version="${_bundle_version#v}"
+  fi
+  if [[ "$_marketing_ver" == v* ]]; then
+    warn "iOS MARKETING_VERSION: stripping 'v' prefix from '$_marketing_ver'"
+    _marketing_ver="${_marketing_ver#v}"
+  fi
+
+  local _tmp _line
+  local _found_cpv=0 _found_mv=0
+  _tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}ios_xcconfig_update_XXXXXX")"
+
+  while IFS= read -r _line || [[ -n "$_line" ]]; do
+    if [[ "$_line" == CURRENT_PROJECT_VERSION* && -n "$_bundle_version" ]]; then
+      printf '%s\n' "CURRENT_PROJECT_VERSION = $_bundle_version"
+      _found_cpv=1
+    elif [[ "$_line" == MARKETING_VERSION* ]]; then
+      printf '%s\n' "MARKETING_VERSION = $_marketing_ver"
+      _found_mv=1
+    else
+      printf '%s\n' "$_line"
+    fi
+  done < "$_xcconfig_path" > "$_tmp"
+
+  if [[ "$_found_cpv" -eq 0 && -n "$_bundle_version" ]]; then
+    printf '%s\n' "CURRENT_PROJECT_VERSION = $_bundle_version" >> "$_tmp"
+  fi
+  if [[ "$_found_mv" -eq 0 ]]; then
+    printf '%s\n' "MARKETING_VERSION = $_marketing_ver" >> "$_tmp"
+  fi
+
+  /bin/mv "$_tmp" "$_xcconfig_path"
+  if [[ -n "$_bundle_version" ]]; then
+    good "Stamped $_xcconfig_path → CURRENT_PROJECT_VERSION=$_bundle_version, MARKETING_VERSION=$_marketing_ver"
+  else
+    good "Stamped $_xcconfig_path → MARKETING_VERSION=$_marketing_ver"
+  fi
+}
+
 autodetect_workspace_if_needed() {
   # If the workspace is placeholder/empty AND Xcode export is enabled, try to discover it.
   if [[ "$USE_XCODE_EXPORT" == "1" ]] && is_placeholder "$XCODE_WORKSPACE"; then
@@ -1244,6 +1447,209 @@ autodetect_scheme_if_needed() {
   fi
 }
 
+autodetect_ios_workspace_if_needed() {
+  [[ "$ENABLE_IOS" == "1" ]] || return 0
+  is_placeholder "${IOS_WORKSPACE:-}" || return 0
+
+  local base guess
+  base="${UPROJECT_NAME%.uproject}"
+  guess="$REPO_ROOT/${base} (iOS).xcworkspace"
+  if [[ -d "$guess" ]]; then
+    IOS_WORKSPACE="$guess"
+    info "Auto-detected iOS workspace by convention: $IOS_WORKSPACE"
+    return 0
+  fi
+
+  local found=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && found+=("$line")
+  done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 2 -type d -name '*iOS*.xcworkspace' 2>/dev/null)
+
+  if [[ "${#found[@]}" -eq 1 ]]; then
+    IOS_WORKSPACE="${found[0]}"
+    info "Auto-detected iOS workspace: $IOS_WORKSPACE"
+    return 0
+  fi
+
+  if [[ "${#found[@]}" -gt 1 ]]; then
+    warn "Multiple iOS .xcworkspace candidates found. Set IOS_WORKSPACE explicitly."
+  fi
+}
+
+autodetect_ios_scheme_if_needed() {
+  [[ "$ENABLE_IOS" == "1" ]] || return 0
+  is_placeholder "${IOS_SCHEME:-}" || return 0
+  [[ -d "${IOS_WORKSPACE:-}" ]] || return 0
+
+  if ! is_placeholder "${XCODE_SCHEME:-}"; then
+    IOS_SCHEME="$XCODE_SCHEME"
+    info "iOS scheme inferred from Mac scheme: $IOS_SCHEME"
+    return 0
+  fi
+
+  info "IOS_SCHEME not set — attempting auto-detect from iOS workspace"
+  local list
+  list=$(xcodebuild -list -workspace "$IOS_WORKSPACE" 2>/dev/null || true)
+  if [[ -z "$list" ]]; then
+    warn "Could not list schemes from iOS workspace: $IOS_WORKSPACE"
+    return 0
+  fi
+
+  local schemes=() in_section=0
+  while IFS= read -r line; do
+    if [[ "$in_section" -eq 0 ]]; then
+      if [[ "$line" =~ ^[[:space:]]*Schemes:[[:space:]]*$ ]]; then
+        in_section=1
+      fi
+      continue
+    fi
+    [[ -z "$line" ]] && continue
+    if [[ "$line" =~ ^[[:space:]]+[^[:space:]] ]]; then
+      local trimmed
+      trimmed="${line#"${line%%[![:space:]]*}"}"
+      schemes+=("$trimmed")
+    else
+      break
+    fi
+  done <<< "$list"
+
+  if [[ "${#schemes[@]}" -eq 1 ]]; then
+    IOS_SCHEME="${schemes[0]}"
+    info "Auto-detected iOS scheme: $IOS_SCHEME"
+  elif [[ "${#schemes[@]}" -gt 1 ]]; then
+    local base expected s
+    base="${UPROJECT_NAME%.uproject}"
+    expected="$base"
+    for s in "${schemes[@]}"; do
+      if [[ "$s" == "$expected" ]]; then
+        IOS_SCHEME="$s"
+        info "Auto-selected iOS scheme (name match): $IOS_SCHEME"
+        return 0
+      fi
+    done
+    warn "Multiple iOS schemes found, none matched project name. Set IOS_SCHEME explicitly."
+  fi
+}
+
+autodetect_ios_asc_credentials_if_needed() {
+  [[ "$ENABLE_IOS" == "1" ]] || return 0
+  [[ "$IOS_ASC_VALIDATE" == "1" || "$IOS_ASC_UPLOAD" == "1" ]] || return 0
+  local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
+  [[ -f "$engine_ini" ]] || return 0
+
+  if is_placeholder "${IOS_ASC_API_KEY_ID:-}"; then
+    local _key_id
+    _key_id="$(read_ini_value "$engine_ini" "AppStoreConnectKeyID")"
+    if [[ -n "$_key_id" ]]; then
+      IOS_ASC_API_KEY_ID="$_key_id"
+      info "Auto-detected IOS_ASC_API_KEY_ID from DefaultEngine.ini: $IOS_ASC_API_KEY_ID"
+    fi
+  fi
+
+  if is_placeholder "${IOS_ASC_API_ISSUER:-}"; then
+    local _issuer
+    _issuer="$(read_ini_value "$engine_ini" "AppStoreConnectIssuerID")"
+    if [[ -n "$_issuer" ]]; then
+      IOS_ASC_API_ISSUER="$_issuer"
+      info "Auto-detected IOS_ASC_API_ISSUER from DefaultEngine.ini: $IOS_ASC_API_ISSUER"
+    fi
+  fi
+
+  if is_placeholder "${IOS_ASC_API_KEY_PATH:-}"; then
+    local _raw _path
+    _raw="$(read_ini_value "$engine_ini" "AppStoreConnectKeyPath")"
+    if [[ -n "$_raw" ]]; then
+      # UE stores this as: (FilePath="/path/to/AuthKey_ID.p8") — extract the quoted path
+      _path="${_raw#*\"}"
+      _path="${_path%\"*}"
+      if [[ -n "$_path" ]]; then
+        IOS_ASC_API_KEY_PATH="$_path"
+        info "Auto-detected IOS_ASC_API_KEY_PATH from DefaultEngine.ini: $IOS_ASC_API_KEY_PATH"
+      fi
+    fi
+  fi
+}
+
+seed_ios_icon_assets_for_workspace() {
+  [[ "$ENABLE_IOS" == "1" ]] || return 0
+  [[ "${IOS_ICON_SYNC:-0}" == "1" ]] || return 0
+
+  [[ -f "$IOS_WORKSPACE/contents.xcworkspacedata" ]] || die "iOS workspace metadata missing: $IOS_WORKSPACE/contents.xcworkspacedata"
+  [[ -d "$IOS_ICON_XCASSETS" ]] || die "Configured iOS icon catalog not found: $IOS_ICON_XCASSETS"
+
+  local stage_root stage_catalog
+  stage_root="$REPO_ROOT/Intermediate/SourceControlled-iOS"
+  stage_catalog="$stage_root/Assets.xcassets"
+
+  /bin/rm -rf "$stage_catalog"
+  /bin/mkdir -p "$stage_catalog"
+  /usr/bin/rsync -a --delete "$IOS_ICON_XCASSETS"/ "$stage_catalog"/
+
+  local source_appicon_name
+  source_appicon_name="${IOS_APPICON_SET_NAME:-}"
+  if is_placeholder "$source_appicon_name"; then
+    if [[ -d "$stage_catalog/AppIcon.appiconset" ]]; then
+      source_appicon_name="AppIcon"
+    else
+      source_appicon_name="$(first_appiconset_name_in_catalog "$stage_catalog")"
+    fi
+  fi
+
+  if is_placeholder "$source_appicon_name" || [[ ! -d "$stage_catalog/$source_appicon_name.appiconset" ]]; then
+    die "No usable *.appiconset found in $IOS_ICON_XCASSETS (set IOS_APPICON_SET_NAME if needed)."
+  fi
+
+  if [[ "$source_appicon_name" != "AppIcon" ]]; then
+    /bin/rm -rf "$stage_catalog/AppIcon.appiconset"
+    /bin/cp -R "$stage_catalog/$source_appicon_name.appiconset" "$stage_catalog/AppIcon.appiconset"
+  fi
+
+  if [[ ! -f "$stage_catalog/Contents.json" ]]; then
+    /bin/cat > "$stage_catalog/Contents.json" <<'JSON'
+{
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}
+JSON
+  fi
+
+  local stage_catalog_abs escaped_path workspace_xml rel_proj pbxproj changed_count
+  stage_catalog_abs="$(abspath_existing "$stage_catalog")"
+  [[ -n "$stage_catalog_abs" ]] || die "Unable to resolve staged iOS asset catalog path: $stage_catalog"
+  escaped_path="$(printf '%s\n' "$stage_catalog_abs" | /usr/bin/sed 's/[&#\\]/\\&/g')"
+  workspace_xml="$IOS_WORKSPACE/contents.xcworkspacedata"
+  changed_count=0
+
+  while IFS= read -r rel_proj; do
+    [[ -n "$rel_proj" ]] || continue
+    pbxproj="$REPO_ROOT/$rel_proj/project.pbxproj"
+    if [[ ! -f "$pbxproj" ]]; then
+      warn "iOS workspace project missing (skipping icon path patch): $pbxproj"
+      continue
+    fi
+    if ! /usr/bin/grep -q 'folder.assetcatalog; name = "Assets.xcassets";' "$pbxproj"; then
+      continue
+    fi
+    /usr/bin/sed -i '' \
+      "/folder\\.assetcatalog; name = \"Assets\\.xcassets\"/ s#path = \"[^\"]*\";#path = \"$escaped_path\";#" \
+      "$pbxproj"
+    changed_count=$((changed_count + 1))
+  done < <(
+    /usr/bin/grep -Eo 'location = "group:[^"]+\.xcodeproj"' "$workspace_xml" \
+      | /usr/bin/sed -E 's/^location = "group:([^"]+)\.xcodeproj"$/\1.xcodeproj/' \
+      | /usr/bin/sort -u
+  )
+
+  if [[ "$changed_count" -eq 0 ]]; then
+    warn "No iOS workspace project references to Assets.xcassets were patched for icon seeding."
+  else
+    info "Seeded iOS icon catalog from: $IOS_ICON_XCASSETS"
+    info "iOS workspace projects patched to use: $stage_catalog_abs"
+  fi
+}
+
 first_appiconset_name_in_catalog() {
   # Return the first *.appiconset folder name (without suffix) from an asset catalog.
   local catalog_dir="$1"
@@ -1344,6 +1750,11 @@ find_first_app_under() {
   # Find the first .app bundle under a root (prefers shallow paths; returns empty if none).
   local root="$1"
   /usr/bin/find "$root" -maxdepth 5 -type d -name '*.app' -print -quit 2>/dev/null || true
+}
+
+find_first_ipa_under() {
+  local root="$1"
+  /usr/bin/find "$root" -maxdepth 3 -type f -name '*.ipa' -print -quit 2>/dev/null || true
 }
 
 abspath_existing() {
@@ -1626,6 +2037,15 @@ MACOS_ICON_SYNC="${MACOS_ICON_SYNC:-1}"
 MACOS_ICON_XCASSETS="${MACOS_ICON_XCASSETS:-}"
 MACOS_APPICON_SET_NAME="${MACOS_APPICON_SET_NAME:-}"
 
+ENABLE_IOS="${ENABLE_IOS:-0}"
+IOS_ONLY="${IOS_ONLY:-0}"
+IOS_WORKSPACE="${IOS_WORKSPACE:-}"
+IOS_SCHEME="${IOS_SCHEME:-}"
+IOS_EXPORT_PLIST="${IOS_EXPORT_PLIST:-}"
+IOS_ICON_SYNC="${IOS_ICON_SYNC:-1}"
+IOS_ICON_XCASSETS="${IOS_ICON_XCASSETS:-}"
+IOS_APPICON_SET_NAME="${IOS_APPICON_SET_NAME:-}"
+
 ENABLE_ZIP="${ENABLE_ZIP:-}"
 ENABLE_DMG="${ENABLE_DMG:-0}"
 FANCY_DMG="${FANCY_DMG:-0}"
@@ -1639,6 +2059,12 @@ VERSION_CONTENT_DIR="${VERSION_CONTENT_DIR:-BuildInfo}"
 MARKETING_VERSION="${MARKETING_VERSION:-}"
 ENABLE_GAME_MODE="${ENABLE_GAME_MODE:-}"
 APP_CATEGORY="${APP_CATEGORY:-}"
+IOS_MARKETING_VERSION="${IOS_MARKETING_VERSION:-}"
+IOS_ASC_VALIDATE="${IOS_ASC_VALIDATE:-0}"
+IOS_ASC_UPLOAD="${IOS_ASC_UPLOAD:-0}"
+IOS_ASC_API_KEY_ID="${IOS_ASC_API_KEY_ID:-}"
+IOS_ASC_API_ISSUER="${IOS_ASC_API_ISSUER:-}"
+IOS_ASC_API_KEY_PATH="${IOS_ASC_API_KEY_PATH:-}"
 
 
 # -----------------------------------------------------------------------------
@@ -1678,6 +2104,20 @@ Options (highest priority):
   --macos-icon-xcassets PATH
   --macos-appicon-set-name NAME
 
+  --ios / --no-ios
+  --ios-only                         skip Mac build entirely; implies --ios --no-xcode-export --no-steam --no-zip --no-dmg --no-notarize
+  --ios-workspace FILE_OR_PATH       (e.g. "MyGame (iOS).xcworkspace")
+  --ios-scheme NAME
+  --ios-export-plist PATH
+  --ios-icon-sync / --no-ios-icon-sync
+  --ios-icon-xcassets PATH
+  --ios-appicon-set-name NAME
+  --ios-validate-ipa                 validate IPA with App Store Connect (xcrun altool --validate-app)
+  --ios-upload-ipa                   upload IPA to App Store Connect; implies --ios-validate-ipa
+  --ios-asc-api-key-id ID            App Store Connect API key ID (10-char)
+  --ios-asc-api-issuer UUID          App Store Connect API issuer UUID
+  --ios-asc-api-key-path PATH        path to the .p8 API key file
+
   --zip / --no-zip
   --dmg / --no-dmg
   --fancy-dmg / --no-fancy-dmg
@@ -1691,7 +2131,8 @@ Options (highest priority):
   --version-mode NONE|MANUAL|DATETIME|HYBRID
   --version-string STRING
   --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
-  --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
+  --marketing-version STRING         (CFBundleShortVersionString stamped into Mac xcconfig, default: 1.0.0)
+  --ios-marketing-version STRING     (CFBundleShortVersionString stamped into iOS xcconfig; falls back to --marketing-version)
   --game-mode / --no-game-mode       (stamp LSSupportsGameMode + GCSupportsGameMode in xcconfig, default: YES)
   --app-category STRING              (INFOPLIST_KEY_LSApplicationCategoryType, e.g. public.app-category.games)
   --bump-major / --bump-minor / --bump-patch
@@ -1751,6 +2192,22 @@ while [[ $# -gt 0 ]]; do
     --macos-icon-xcassets)  MACOS_ICON_XCASSETS="$2"; CLI_SET_MACOS_ICON_XCASSETS=1; shift 2 ;;
     --macos-appicon-set-name) MACOS_APPICON_SET_NAME="$2"; shift 2 ;;
 
+    --ios)                  ENABLE_IOS="1"; shift ;;
+    --no-ios)               ENABLE_IOS="0"; shift ;;
+    --ios-only)             IOS_ONLY="1"; shift ;;
+    --ios-workspace)        IOS_WORKSPACE="$2"; shift 2 ;;
+    --ios-scheme)           IOS_SCHEME="$2"; shift 2 ;;
+    --ios-export-plist)     IOS_EXPORT_PLIST="$2"; shift 2 ;;
+    --ios-icon-sync)        IOS_ICON_SYNC="1"; shift ;;
+    --no-ios-icon-sync)     IOS_ICON_SYNC="0"; shift ;;
+    --ios-icon-xcassets)    IOS_ICON_XCASSETS="$2"; CLI_SET_IOS_ICON_XCASSETS=1; shift 2 ;;
+    --ios-appicon-set-name) IOS_APPICON_SET_NAME="$2"; shift 2 ;;
+    --ios-validate-ipa)     IOS_ASC_VALIDATE="1"; shift ;;
+    --ios-upload-ipa)       IOS_ASC_UPLOAD="1"; shift ;;
+    --ios-asc-api-key-id)   IOS_ASC_API_KEY_ID="$2"; shift 2 ;;
+    --ios-asc-api-issuer)   IOS_ASC_API_ISSUER="$2"; shift 2 ;;
+    --ios-asc-api-key-path) IOS_ASC_API_KEY_PATH="$2"; shift 2 ;;
+
     --zip)                  ENABLE_ZIP="1"; shift ;;
     --no-zip)               ENABLE_ZIP="0"; shift ;;
     --dmg)                  ENABLE_DMG="1"; shift ;;
@@ -1769,6 +2226,7 @@ while [[ $# -gt 0 ]]; do
     --version-string)           VERSION_STRING="$2"; shift 2 ;;
     --version-content-dir)      VERSION_CONTENT_DIR="$2"; shift 2 ;;
     --marketing-version)        MARKETING_VERSION="$2"; shift 2 ;;
+    --ios-marketing-version)    IOS_MARKETING_VERSION="$2"; shift 2 ;;
     --game-mode)                ENABLE_GAME_MODE="1"; shift ;;
     --no-game-mode)             ENABLE_GAME_MODE="0"; shift ;;
     --app-category)             APP_CATEGORY="$2"; shift 2 ;;
@@ -1785,6 +2243,19 @@ while [[ $# -gt 0 ]]; do
     *) die "Unknown option: $1 (use --help)" ;;
   esac
 done
+
+if [[ "$IOS_ONLY" == "1" ]]; then
+  ENABLE_IOS="1"
+  USE_XCODE_EXPORT="0"
+  ENABLE_STEAM="0"
+  ENABLE_ZIP="0"
+  ENABLE_DMG="0"
+  NOTARIZE="no"
+fi
+
+if [[ "$IOS_ASC_UPLOAD" == "1" ]]; then
+  IOS_ASC_VALIDATE="1"
+fi
 
 # If REPO_ROOT is still a placeholder/empty, assume this script lives in the project root.
 if is_placeholder "${REPO_ROOT:-}"; then
@@ -1852,6 +2323,7 @@ autodetect_names_if_needed
 # Try the common "<Project> (Mac).xcworkspace" guess before the more general workspace find.
 autodetect_workspace_guess_if_needed
 autodetect_export_plist_if_needed
+autodetect_ios_export_plist_if_needed
 autodetect_steam_if_needed
 autodetect_steam_dylib_src_from_engine_if_needed
 
@@ -1861,6 +2333,19 @@ if is_placeholder "${MACOS_ICON_XCASSETS:-}"; then
 fi
 if [[ "$MACOS_ICON_XCASSETS" != /* ]]; then
   MACOS_ICON_XCASSETS="$(abspath_from "$REPO_ROOT" "$MACOS_ICON_XCASSETS")"
+fi
+
+if is_placeholder "${IOS_ICON_XCASSETS:-}"; then
+  IOS_ICON_XCASSETS="$REPO_ROOT/iOS-SourceControlled.xcassets"
+fi
+if [[ "$IOS_ICON_XCASSETS" != /* ]]; then
+  IOS_ICON_XCASSETS="$(abspath_from "$REPO_ROOT" "$IOS_ICON_XCASSETS")"
+fi
+if [[ "$ENABLE_IOS" == "1" && -n "${IOS_WORKSPACE:-}" && "$IOS_WORKSPACE" != /* ]]; then
+  IOS_WORKSPACE="$(abspath_from "$REPO_ROOT" "$IOS_WORKSPACE")"
+fi
+if [[ "$ENABLE_IOS" == "1" && -n "${IOS_EXPORT_PLIST:-}" && "$IOS_EXPORT_PLIST" != /* ]]; then
+  IOS_EXPORT_PLIST="$(abspath_from "$REPO_ROOT" "$IOS_EXPORT_PLIST")"
 fi
 
 # Derive common paths (after CLI parsing/autodetect)
@@ -1898,7 +2383,9 @@ require_not_placeholder "UPROJECT_NAME" "$UPROJECT_NAME" "Example: MyGame.uproje
 require_not_placeholder "UPROJECT_PATH" "$UPROJECT_PATH" "Example: /path/to/MyGame.uproject"
 require_not_placeholder "UE_ROOT" "$UE_ROOT" "Example: /Users/Shared/Epic Games/UE_5.7"
 require_not_placeholder "DEVELOPMENT_TEAM" "$DEVELOPMENT_TEAM" "Example: ABCDE12345"
-require_not_placeholder "SIGN_IDENTITY" "$SIGN_IDENTITY" "Example: Developer ID Application: Your Company (ABCDE12345)"
+if [[ "$IOS_ONLY" != "1" ]]; then
+  require_not_placeholder "SIGN_IDENTITY" "$SIGN_IDENTITY" "Example: Developer ID Application: Your Company (ABCDE12345)"
+fi
 require_not_placeholder "SHORT_NAME" "$SHORT_NAME" "Example: MG"
 require_not_placeholder "LONG_NAME" "$LONG_NAME" "Example: MyGame"
 
@@ -1917,6 +2404,18 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   require_not_placeholder "XCODE_SCHEME" "$XCODE_SCHEME" "Example: YourProject"
 fi
 
+if [[ "$ENABLE_IOS" == "1" ]]; then
+  autodetect_ios_workspace_if_needed
+  autodetect_ios_scheme_if_needed
+  autodetect_ios_asc_credentials_if_needed
+
+  require_not_placeholder "IOS_WORKSPACE" "${IOS_WORKSPACE:-}" "Example: YourProject (iOS).xcworkspace"
+  require_not_placeholder "IOS_SCHEME" "${IOS_SCHEME:-}" "Example: YourProject"
+  require_not_placeholder "IOS_EXPORT_PLIST" "${IOS_EXPORT_PLIST:-}" "Example: iOS-ExportOptions.plist (method: app-store-connect or release-testing)"
+  if [[ -d "$IOS_WORKSPACE" ]]; then
+    IOS_WORKSPACE="$(abspath_existing "$IOS_WORKSPACE")"
+  fi
+fi
 
 # Optional Steam validation (only when enabled)
 if [[ "$ENABLE_STEAM" == "1" ]]; then
@@ -2037,6 +2536,8 @@ trap 'restore_content_version_file' EXIT
 ARCHIVE_PATH="$BUILD_DIR/${SHORT_NAME}.xcarchive"
 EXPORT_DIR="$BUILD_DIR/${SHORT_NAME}-export"
 ZIP_PATH="$BUILD_DIR/${LONG_NAME}.zip"
+IOS_ARCHIVE_PATH="$BUILD_DIR/${SHORT_NAME}-iOS.xcarchive"
+IOS_EXPORT_DIR="$BUILD_DIR/${SHORT_NAME}-iOS-export"
 
 # NOTE: ZIP_PATH name is cosmetic (uses LONG_NAME). Change LONG_NAME to match your game.
 ### ===================================
@@ -2106,6 +2607,28 @@ if [[ "$USE_XCODE_EXPORT" == "1" && "$MACOS_ICON_SYNC" == "1" ]]; then
   fi
 fi
 
+if [[ "$ENABLE_IOS" == "1" ]]; then
+  [[ -f "$IOS_EXPORT_PLIST" ]] || die "iOS ExportOptions.plist not found: $IOS_EXPORT_PLIST"
+  if [[ "$IOS_ICON_SYNC" == "1" ]]; then
+    if [[ ! -d "$IOS_ICON_XCASSETS" ]]; then
+      if [[ "${CLI_SET_IOS_ICON_XCASSETS:-0}" == "1" ]]; then
+        die "Configured --ios-icon-xcassets path not found: $IOS_ICON_XCASSETS"
+      fi
+      warn "iOS icon catalog not found at default path: $IOS_ICON_XCASSETS"
+      warn "Continuing without iOS icon catalog seeding (pass --no-ios-icon-sync to silence this)."
+      IOS_ICON_SYNC="0"
+    fi
+  fi
+fi
+
+if [[ "$IOS_ASC_VALIDATE" == "1" || "$IOS_ASC_UPLOAD" == "1" ]]; then
+  require_not_placeholder "IOS_ASC_API_KEY_ID" "${IOS_ASC_API_KEY_ID:-}" "Example: ABCDE12345"
+  require_not_placeholder "IOS_ASC_API_ISSUER" "${IOS_ASC_API_ISSUER:-}" "Example: 12345678-abcd-1234-abcd-123456789abc"
+  require_not_placeholder "IOS_ASC_API_KEY_PATH" "${IOS_ASC_API_KEY_PATH:-}" "Example: ~/.appstoreconnect/private_keys/AuthKey_ABCDE12345.p8"
+  [[ -f "$IOS_ASC_API_KEY_PATH" ]] || die "App Store Connect API key (.p8) not found: $IOS_ASC_API_KEY_PATH"
+  command -v xcrun >/dev/null 2>&1 || die "xcrun not found. Install Xcode Command Line Tools."
+fi
+
 if [[ "$ENABLE_DMG" == "1" ]]; then
   command -v hdiutil >/dev/null 2>&1 || die "hdiutil not found (required to create DMG)."
   if [[ "$FANCY_DMG" == "1" ]] && ! command -v osascript >/dev/null 2>&1; then
@@ -2116,28 +2639,39 @@ fi
 if [[ "$DRY_RUN" == "1" ]]; then
   print_config
   echo "== DRY RUN ==" >&3
-  if [[ "$VERSION_MODE" != "NONE" ]]; then
-    steps="stamp Content/$VERSION_CONTENT_DIR/version.txt → UAT BuildCookRun"
+  if [[ "$IOS_ONLY" == "1" ]]; then
+    steps="iOS UAT BuildCookRun → iOS archive/export → IPA"
+    if [[ "$IOS_ASC_VALIDATE" == "1" ]]; then steps="$steps → ASC validate"; fi
+    if [[ "$IOS_ASC_UPLOAD" == "1" ]]; then steps="$steps → ASC upload"; fi
   else
-    steps="UAT BuildCookRun"
-  fi
-  if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
-    steps="$steps → Xcode archive/export"
-  else
-    steps="$steps → (skip Xcode archive/export)"
-  fi
-  steps="$steps → codesign"
-  if [[ "$ENABLE_ZIP" == "1" ]]; then
-    steps="$steps → zip"
-  fi
-  if [[ "$ENABLE_DMG" == "1" ]]; then
-    steps="$steps → DMG create+sign"
-    if [[ "$FANCY_DMG" == "1" ]]; then
-      steps="$steps → DMG Finder layout (experimental)"
+    if [[ "$VERSION_MODE" != "NONE" ]]; then
+      steps="stamp Content/$VERSION_CONTENT_DIR/version.txt → UAT BuildCookRun"
+    else
+      steps="UAT BuildCookRun"
     fi
-  fi
-  if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
-    steps="$steps → notarize+staple"
+    if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+      steps="$steps → Xcode archive/export"
+    else
+      steps="$steps → (skip Xcode archive/export)"
+    fi
+    steps="$steps → codesign"
+    if [[ "$ENABLE_ZIP" == "1" ]]; then
+      steps="$steps → zip"
+    fi
+    if [[ "$ENABLE_DMG" == "1" ]]; then
+      steps="$steps → DMG create+sign"
+      if [[ "$FANCY_DMG" == "1" ]]; then
+        steps="$steps → DMG Finder layout (experimental)"
+      fi
+    fi
+    if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
+      steps="$steps → notarize+staple"
+    fi
+    if [[ "$ENABLE_IOS" == "1" ]]; then
+      steps="$steps → iOS UAT BuildCookRun → iOS archive/export → IPA"
+      if [[ "$IOS_ASC_VALIDATE" == "1" ]]; then steps="$steps → ASC validate"; fi
+      if [[ "$IOS_ASC_UPLOAD" == "1" ]]; then steps="$steps → ASC upload"; fi
+    fi
   fi
   if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
     echo "Would wipe build dir: $BUILD_DIR" >&3
@@ -2148,6 +2682,9 @@ fi
 
 echo "== Prep output locations ==" >&3
 rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR" "$ZIP_PATH"
+if [[ "$ENABLE_IOS" == "1" ]]; then
+  rm -rf "$IOS_ARCHIVE_PATH" "$IOS_EXPORT_DIR"
+fi
 if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
   warn "CLEAN_BUILD_DIR=1 — wiping entire build dir: $BUILD_DIR"
   rm -rf "$BUILD_DIR"
@@ -2156,18 +2693,22 @@ mkdir -p "$BUILD_DIR"
 
 ensure_game_ini_staging_entry
 write_version_to_content
-update_xcconfig_versions
+if [[ "$IOS_ONLY" != "1" ]]; then
+  update_xcconfig_versions
+fi
 
-info "Building game (UAT BuildCookRun)"
+if [[ "$IOS_ONLY" != "1" ]]; then
+  info "Building game (UAT BuildCookRun)"
 
-"$SCRIPTS/RunUAT.sh" BuildCookRun \
-  -unrealexe="$UE_EDITOR" \
-  -project="$UPROJECT_PATH" \
-  -noP4 -build -cook -pak -iostore \
-  -targetplatform=Mac -clientconfig="$UE_CLIENT_CONFIG" \
-  -stage -package \
-  -archive -archivedirectory="$BUILD_DIR" \
-  -utf8output -verbose -specifiedarchitecture=arm64+x86_64
+  "$SCRIPTS/RunUAT.sh" BuildCookRun \
+    -unrealexe="$UE_EDITOR" \
+    -project="$UPROJECT_PATH" \
+    -noP4 -build -cook -pak -iostore \
+    -targetplatform=Mac -clientconfig="$UE_CLIENT_CONFIG" \
+    -stage -package \
+    -archive -archivedirectory="$BUILD_DIR" \
+    -utf8output -verbose -specifiedarchitecture=arm64+x86_64
+fi
 
 echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3
 
@@ -2196,6 +2737,71 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
 else
   info "USE_XCODE_EXPORT=0 — skipping Xcode archive/export"
 fi
+
+if [[ "$ENABLE_IOS" == "1" ]]; then
+  info "Building iOS (UAT BuildCookRun)"
+  "$SCRIPTS/RunUAT.sh" BuildCookRun \
+    -unrealexe="$UE_EDITOR" \
+    -project="$UPROJECT_PATH" \
+    -noP4 -build -cook -pak -iostore \
+    -targetplatform=IOS -clientconfig="$UE_CLIENT_CONFIG" \
+    -stage -package \
+    -archive -archivedirectory="$BUILD_DIR" \
+    -utf8output -verbose
+
+  update_ios_xcconfig_versions
+  seed_ios_icon_assets_for_workspace
+
+  echo "== iOS Archive ==" >&3
+  xcodebuild \
+    -workspace "$IOS_WORKSPACE" \
+    -scheme "$IOS_SCHEME" \
+    -configuration "$XCODE_CONFIG" \
+    -destination 'generic/platform=iOS' \
+    -archivePath "$IOS_ARCHIVE_PATH" \
+    -allowProvisioningUpdates \
+    archive \
+    CODE_SIGN_STYLE=Automatic \
+    DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM"
+
+  echo "== iOS Export ==" >&3
+  xcodebuild -exportArchive \
+    -archivePath "$IOS_ARCHIVE_PATH" \
+    -exportPath "$IOS_EXPORT_DIR" \
+    -exportOptionsPlist "$IOS_EXPORT_PLIST" \
+    -allowProvisioningUpdates
+
+  IOS_IPA_PATH="$(find_first_ipa_under "$IOS_EXPORT_DIR")"
+  if [[ -z "${IOS_IPA_PATH:-}" ]]; then
+    /bin/ls -la "$IOS_EXPORT_DIR" >&3 || true
+    die "No .ipa found under iOS export dir: $IOS_EXPORT_DIR"
+  fi
+  echo "IPA: $IOS_IPA_PATH" >&3
+
+  if [[ "$IOS_ASC_VALIDATE" == "1" ]]; then
+    echo "== iOS Validate (App Store Connect) ==" >&3
+    /usr/bin/xcrun altool --validate-app \
+      -f "$IOS_IPA_PATH" \
+      -t ios \
+      --apiKey "$IOS_ASC_API_KEY_ID" \
+      --apiIssuer "$IOS_ASC_API_ISSUER" \
+      --private-key "$IOS_ASC_API_KEY_PATH"
+    good "iOS IPA passed App Store Connect validation."
+  fi
+
+  if [[ "$IOS_ASC_UPLOAD" == "1" ]]; then
+    echo "== iOS Upload (App Store Connect) ==" >&3
+    /usr/bin/xcrun altool --upload-app \
+      -f "$IOS_IPA_PATH" \
+      -t ios \
+      --apiKey "$IOS_ASC_API_KEY_ID" \
+      --apiIssuer "$IOS_ASC_API_ISSUER" \
+      --private-key "$IOS_ASC_API_KEY_PATH"
+    good "iOS IPA uploaded to App Store Connect."
+  fi
+fi
+
+if [[ "$IOS_ONLY" != "1" ]]; then
 
 # Locate the .app bundle.
 # - If using Xcode export, it should be in EXPORT_DIR.
@@ -2570,18 +3176,28 @@ echo "REMINDER: Test your distribution path." >&3
 echo "  - If distributing via a launcher (Steam, Epic, etc.), test launching from that launcher." >&3
 echo "  - If distributing direct-download, test on a separate Mac (or a clean user account) with Gatekeeper enabled." >&3
 
+fi # end IOS_ONLY != 1
+
 write_bumped_version_to_env
 echo "✅ Done" >&3
-echo "App: $APP_PATH" >&3
-if [[ "$ENABLE_ZIP" == "1" ]]; then
-  echo "Zip: $ZIP_PATH" >&3
-else
-  echo "Zip: (not created — ENABLE_ZIP=0)" >&3
+if [[ "$IOS_ONLY" != "1" ]]; then
+  echo "App: $APP_PATH" >&3
+  if [[ "$ENABLE_ZIP" == "1" ]]; then
+    echo "Zip: $ZIP_PATH" >&3
+  else
+    echo "Zip: (not created — ENABLE_ZIP=0)" >&3
+  fi
+  if [[ "$ENABLE_DMG" == "1" ]]; then
+    echo "DMG: $DMG_PATH" >&3
+  else
+    echo "DMG: (not created — ENABLE_DMG=0)" >&3
+  fi
 fi
-if [[ "$ENABLE_DMG" == "1" ]]; then
-  echo "DMG: $DMG_PATH" >&3
-else
-  echo "DMG: (not created — ENABLE_DMG=0)" >&3
+if [[ "$ENABLE_IOS" == "1" ]]; then
+  echo "IPA: ${IOS_IPA_PATH:-<not found>}" >&3
+  if [[ "$IOS_ASC_UPLOAD" == "1" ]]; then
+    echo "ASC upload: submitted" >&3
+  fi
 fi
 
 # Cleanup script-generated temp entitlements file only (user-provided files are never deleted).

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-A single-file bash script (`ship.sh`) that automates the macOS UE5 game distribution pipeline: UAT build → Xcode archive → Developer ID sign → notarize → staple. It is not an application; there is nothing to compile or install.
+A single-file bash script (`ship.sh`) that automates the UE5 game distribution pipeline for macOS (UAT build → Xcode archive → Developer ID sign → notarize → staple) and optionally iOS (UAT build → Xcode archive → IPA export → App Store Connect upload). It is not an application; there is nothing to compile or install.
 
 ## Linting (only automated check in CI)
 
@@ -57,8 +57,9 @@ The script is one file with a deliberate top-to-bottom layout. Key sections in o
 
 ## Files
 
-- `ship.sh` — the entire implementation (~1800 lines)
-- `ExportOptions.plist.example` — annotated template; copy to `ExportOptions.plist` in the target repo root
+- `ship.sh` — the entire implementation (~3100 lines)
+- `ExportOptions.plist.example` — annotated template for macOS Developer ID exports
+- `iOS-ExportOptions.plist.example` — annotated template for iOS App Store Connect / ad hoc exports
 - `.github/workflows/shellcheck.yml` — CI lint
 - `.github/workflows/build.yml.example` — untested self-hosted CI reference (not run in CI)
 - `CHANGELOG.md` — tracks all changes by PR; no semantic versioning

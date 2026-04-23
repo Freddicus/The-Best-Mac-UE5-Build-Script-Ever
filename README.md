@@ -2,7 +2,7 @@
 
 # The Best Mac Unreal Build Script Ever™
 
-A bash script that runs the full macOS Developer ID distribution pipeline for UE5 projects: UAT build → Xcode archive → sign → notarize → staple.
+A bash script that runs the full macOS Developer ID distribution pipeline for UE5 projects: UAT build → Xcode archive → sign → notarize → staple. Optional iOS pipeline included.
 
 Drop it in your project root and run it.
 
@@ -12,6 +12,7 @@ Drop it in your project root and run it.
 - Unreal Engine 5.x
 - Apple Developer account — Team ID + Developer ID Application certificate in Keychain
 - For notarization: a stored `notarytool` credential (`xcrun notarytool store-credentials`)
+- For iOS (optional): iOS support enabled in the Epic Games Launcher, a provisioning profile downloaded in Xcode (Settings → Accounts → Download Manual Profiles), and an App Store Connect API key if using `--ios-upload-ipa`
 
 ## Quick start
 
@@ -51,13 +52,16 @@ When you run `./ship.sh`, this is the execution order:
 10. **ZIP / DMG** — packages the signed app for distribution.
 11. **Notarization** — submits ZIP and DMG to Apple in parallel, then waits for both.
 12. **Stapling** — attaches the notarization ticket to the app, ZIP, and DMG.
+13. **iOS pipeline** *(if `ENABLE_IOS=1`)* — UAT BuildCookRun for iOS → `xcodebuild archive` → `xcodebuild -exportArchive` → `.ipa`. Optionally validates and uploads to App Store Connect. Use `--ios-only` to skip steps 4–12 entirely.
+
+Run `./ship.sh --ios-only` to build iOS without running the Mac pipeline at all.
 
 Full build log: `Logs/build_YYYY-MM-DD_HH-MM-SS.log`. Artifacts land in `Build/`.
 
 ## Docs
 
-- [Configuration reference](docs/configuration.md) — all `.env` variables, CLI flags, workspace and scheme setup
-- [Versioning](docs/versioning.md) — `VERSION_MODE`, bump flags, xcconfig and Info.plist stamping
+- [Configuration reference](docs/configuration.md) — all `.env` variables, CLI flags, workspace and scheme setup, iOS pipeline
+- [Versioning](docs/versioning.md) — `VERSION_MODE`, bump flags, xcconfig and Info.plist stamping (Mac + iOS)
 - [Output and packaging](docs/output.md) — DMG, ZIP, icon seeding, artifact paths
 - [Steam support](docs/steam.md) — dylib staging, entitlements, `steam_appid.txt`
 - [Troubleshooting](docs/troubleshooting.md) — common failures and how to fix them
