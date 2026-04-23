@@ -889,6 +889,7 @@ print_config() {
   echo "MACOS_ICON_XCASSETS: ${MACOS_ICON_XCASSETS:-<unset>}" >&3
   echo "MACOS_APPICON_SET_NAME: ${MACOS_APPICON_SET_NAME:-<unset>}" >&3
   echo "ENABLE_IOS:        $ENABLE_IOS" >&3
+  echo "IOS_ONLY:          $IOS_ONLY" >&3
   if [[ "$ENABLE_IOS" == "1" ]]; then
     echo "IOS_WORKSPACE:     ${IOS_WORKSPACE:-<unset>}" >&3
     echo "IOS_SCHEME:        ${IOS_SCHEME:-<unset>}" >&3
@@ -1981,6 +1982,7 @@ MACOS_ICON_XCASSETS="${MACOS_ICON_XCASSETS:-}"
 MACOS_APPICON_SET_NAME="${MACOS_APPICON_SET_NAME:-}"
 
 ENABLE_IOS="${ENABLE_IOS:-0}"
+IOS_ONLY="${IOS_ONLY:-0}"
 IOS_WORKSPACE="${IOS_WORKSPACE:-}"
 IOS_SCHEME="${IOS_SCHEME:-}"
 IOS_EXPORT_PLIST="${IOS_EXPORT_PLIST:-}"
@@ -2042,6 +2044,7 @@ Options (highest priority):
   --macos-appicon-set-name NAME
 
   --ios / --no-ios
+  --ios-only                         skip Mac build entirely; implies --ios --no-xcode-export --no-steam --no-zip --no-dmg --no-notarize
   --ios-workspace FILE_OR_PATH       (e.g. "MyGame (iOS).xcworkspace")
   --ios-scheme NAME
   --ios-export-plist PATH
@@ -2125,6 +2128,7 @@ while [[ $# -gt 0 ]]; do
 
     --ios)                  ENABLE_IOS="1"; shift ;;
     --no-ios)               ENABLE_IOS="0"; shift ;;
+    --ios-only)             IOS_ONLY="1"; shift ;;
     --ios-workspace)        IOS_WORKSPACE="$2"; shift 2 ;;
     --ios-scheme)           IOS_SCHEME="$2"; shift 2 ;;
     --ios-export-plist)     IOS_EXPORT_PLIST="$2"; shift 2 ;;
@@ -2168,6 +2172,15 @@ while [[ $# -gt 0 ]]; do
     *) die "Unknown option: $1 (use --help)" ;;
   esac
 done
+
+if [[ "$IOS_ONLY" == "1" ]]; then
+  ENABLE_IOS="1"
+  USE_XCODE_EXPORT="0"
+  ENABLE_STEAM="0"
+  ENABLE_ZIP="0"
+  ENABLE_DMG="0"
+  NOTARIZE="no"
+fi
 
 # If REPO_ROOT is still a placeholder/empty, assume this script lives in the project root.
 if is_placeholder "${REPO_ROOT:-}"; then
@@ -2295,7 +2308,9 @@ require_not_placeholder "UPROJECT_NAME" "$UPROJECT_NAME" "Example: MyGame.uproje
 require_not_placeholder "UPROJECT_PATH" "$UPROJECT_PATH" "Example: /path/to/MyGame.uproject"
 require_not_placeholder "UE_ROOT" "$UE_ROOT" "Example: /Users/Shared/Epic Games/UE_5.7"
 require_not_placeholder "DEVELOPMENT_TEAM" "$DEVELOPMENT_TEAM" "Example: ABCDE12345"
-require_not_placeholder "SIGN_IDENTITY" "$SIGN_IDENTITY" "Example: Developer ID Application: Your Company (ABCDE12345)"
+if [[ "$IOS_ONLY" != "1" ]]; then
+  require_not_placeholder "SIGN_IDENTITY" "$SIGN_IDENTITY" "Example: Developer ID Application: Your Company (ABCDE12345)"
+fi
 require_not_placeholder "SHORT_NAME" "$SHORT_NAME" "Example: MG"
 require_not_placeholder "LONG_NAME" "$LONG_NAME" "Example: MyGame"
 
@@ -2540,31 +2555,35 @@ fi
 if [[ "$DRY_RUN" == "1" ]]; then
   print_config
   echo "== DRY RUN ==" >&3
-  if [[ "$VERSION_MODE" != "NONE" ]]; then
-    steps="stamp Content/$VERSION_CONTENT_DIR/version.txt → UAT BuildCookRun"
+  if [[ "$IOS_ONLY" == "1" ]]; then
+    steps="iOS UAT BuildCookRun → iOS archive/export → IPA"
   else
-    steps="UAT BuildCookRun"
-  fi
-  if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
-    steps="$steps → Xcode archive/export"
-  else
-    steps="$steps → (skip Xcode archive/export)"
-  fi
-  steps="$steps → codesign"
-  if [[ "$ENABLE_ZIP" == "1" ]]; then
-    steps="$steps → zip"
-  fi
-  if [[ "$ENABLE_DMG" == "1" ]]; then
-    steps="$steps → DMG create+sign"
-    if [[ "$FANCY_DMG" == "1" ]]; then
-      steps="$steps → DMG Finder layout (experimental)"
+    if [[ "$VERSION_MODE" != "NONE" ]]; then
+      steps="stamp Content/$VERSION_CONTENT_DIR/version.txt → UAT BuildCookRun"
+    else
+      steps="UAT BuildCookRun"
     fi
-  fi
-  if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
-    steps="$steps → notarize+staple"
-  fi
-  if [[ "$ENABLE_IOS" == "1" ]]; then
-    steps="$steps → iOS UAT BuildCookRun → iOS archive/export → IPA"
+    if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+      steps="$steps → Xcode archive/export"
+    else
+      steps="$steps → (skip Xcode archive/export)"
+    fi
+    steps="$steps → codesign"
+    if [[ "$ENABLE_ZIP" == "1" ]]; then
+      steps="$steps → zip"
+    fi
+    if [[ "$ENABLE_DMG" == "1" ]]; then
+      steps="$steps → DMG create+sign"
+      if [[ "$FANCY_DMG" == "1" ]]; then
+        steps="$steps → DMG Finder layout (experimental)"
+      fi
+    fi
+    if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
+      steps="$steps → notarize+staple"
+    fi
+    if [[ "$ENABLE_IOS" == "1" ]]; then
+      steps="$steps → iOS UAT BuildCookRun → iOS archive/export → IPA"
+    fi
   fi
   if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
     echo "Would wipe build dir: $BUILD_DIR" >&3
@@ -2586,18 +2605,22 @@ mkdir -p "$BUILD_DIR"
 
 ensure_game_ini_staging_entry
 write_version_to_content
-update_xcconfig_versions
+if [[ "$IOS_ONLY" != "1" ]]; then
+  update_xcconfig_versions
+fi
 
-info "Building game (UAT BuildCookRun)"
+if [[ "$IOS_ONLY" != "1" ]]; then
+  info "Building game (UAT BuildCookRun)"
 
-"$SCRIPTS/RunUAT.sh" BuildCookRun \
-  -unrealexe="$UE_EDITOR" \
-  -project="$UPROJECT_PATH" \
-  -noP4 -build -cook -pak -iostore \
-  -targetplatform=Mac -clientconfig="$UE_CLIENT_CONFIG" \
-  -stage -package \
-  -archive -archivedirectory="$BUILD_DIR" \
-  -utf8output -verbose -specifiedarchitecture=arm64+x86_64
+  "$SCRIPTS/RunUAT.sh" BuildCookRun \
+    -unrealexe="$UE_EDITOR" \
+    -project="$UPROJECT_PATH" \
+    -noP4 -build -cook -pak -iostore \
+    -targetplatform=Mac -clientconfig="$UE_CLIENT_CONFIG" \
+    -stage -package \
+    -archive -archivedirectory="$BUILD_DIR" \
+    -utf8output -verbose -specifiedarchitecture=arm64+x86_64
+fi
 
 echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3
 
@@ -2667,6 +2690,8 @@ if [[ "$ENABLE_IOS" == "1" ]]; then
   fi
   echo "IPA: $IOS_IPA_PATH" >&3
 fi
+
+if [[ "$IOS_ONLY" != "1" ]]; then
 
 # Locate the .app bundle.
 # - If using Xcode export, it should be in EXPORT_DIR.
@@ -3041,18 +3066,22 @@ echo "REMINDER: Test your distribution path." >&3
 echo "  - If distributing via a launcher (Steam, Epic, etc.), test launching from that launcher." >&3
 echo "  - If distributing direct-download, test on a separate Mac (or a clean user account) with Gatekeeper enabled." >&3
 
+fi # end IOS_ONLY != 1
+
 write_bumped_version_to_env
 echo "✅ Done" >&3
-echo "App: $APP_PATH" >&3
-if [[ "$ENABLE_ZIP" == "1" ]]; then
-  echo "Zip: $ZIP_PATH" >&3
-else
-  echo "Zip: (not created — ENABLE_ZIP=0)" >&3
-fi
-if [[ "$ENABLE_DMG" == "1" ]]; then
-  echo "DMG: $DMG_PATH" >&3
-else
-  echo "DMG: (not created — ENABLE_DMG=0)" >&3
+if [[ "$IOS_ONLY" != "1" ]]; then
+  echo "App: $APP_PATH" >&3
+  if [[ "$ENABLE_ZIP" == "1" ]]; then
+    echo "Zip: $ZIP_PATH" >&3
+  else
+    echo "Zip: (not created — ENABLE_ZIP=0)" >&3
+  fi
+  if [[ "$ENABLE_DMG" == "1" ]]; then
+    echo "DMG: $DMG_PATH" >&3
+  else
+    echo "DMG: (not created — ENABLE_DMG=0)" >&3
+  fi
 fi
 if [[ "$ENABLE_IOS" == "1" ]]; then
   echo "IPA: ${IOS_IPA_PATH:-<not found>}" >&3
