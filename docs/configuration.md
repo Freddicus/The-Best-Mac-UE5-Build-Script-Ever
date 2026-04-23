@@ -113,7 +113,82 @@ If `xcodebuild -list -workspace YourProject.xcworkspace` doesn't list your schem
 
 For interactive runs, the script tries to auto-detect an existing plist or offers to generate a minimal one. For CI, set `EXPORT_PLIST` explicitly.
 
-## Minimal CI config
+## iOS pipeline
+
+The iOS pipeline is opt-in. Enable it with `ENABLE_IOS=1` or `--ios`. It runs after the Mac pipeline and produces an IPA.
+
+**Prerequisite:** iOS support must be enabled in the Epic Games Launcher before running `GenerateProjectFiles.sh`. This generates both `<Project> (Mac).xcworkspace` and `<Project> (iOS).xcworkspace` in a single pass.
+
+### iOS variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENABLE_IOS` | `0` | Set to `1` to enable the iOS pipeline |
+| `IOS_ONLY` | `0` | Set to `1` to skip the entire Mac pipeline and run only iOS steps |
+| `IOS_WORKSPACE` | auto-detected | Path to `<Project> (iOS).xcworkspace` |
+| `IOS_SCHEME` | auto-detected | Xcode scheme name (inferred from Mac scheme, then `xcodebuild -list`) |
+| `IOS_EXPORT_PLIST` | auto-detected | Path to your iOS `ExportOptions.plist` |
+| `IOS_ICON_SYNC` | `1` | Copy source-controlled icon assets into the workspace before archiving |
+| `IOS_ICON_XCASSETS` | `iOS-SourceControlled.xcassets` | Source `.xcassets` catalog for iOS icons |
+| `IOS_APPICON_SET_NAME` | auto-detected | `*.appiconset` name inside the catalog |
+| `IOS_MARKETING_VERSION` | falls back to `MARKETING_VERSION` | `CFBundleShortVersionString` stamped into iOS xcconfig |
+| `IOS_ASC_VALIDATE` | `0` | Validate IPA with App Store Connect after export |
+| `IOS_ASC_UPLOAD` | `0` | Upload IPA to App Store Connect (implies validate) |
+| `IOS_ASC_API_KEY_ID` | auto-detected from `DefaultEngine.ini` | App Store Connect API key ID (10-char) |
+| `IOS_ASC_API_ISSUER` | auto-detected from `DefaultEngine.ini` | App Store Connect API issuer UUID |
+| `IOS_ASC_API_KEY_PATH` | auto-detected from `DefaultEngine.ini` | Path to the `.p8` API key file |
+
+### iOS workspace and scheme
+
+Auto-detection follows the same logic as the Mac path:
+- Workspace: looks for `<ProjectName> (iOS).xcworkspace` first, then scans for any `*iOS*.xcworkspace`.
+- Scheme: inferred from the Mac scheme if already resolved; otherwise detected via `xcodebuild -list` and matched by name.
+
+Set `IOS_WORKSPACE` and `IOS_SCHEME` explicitly in CI.
+
+### iOS ExportOptions.plist
+
+The iOS plist uses different method values than the Mac one. An annotated template is provided in `iOS-ExportOptions.plist.example`. Common methods:
+
+| Method | Use |
+|---|---|
+| `app-store-connect` | Submit to App Store / TestFlight |
+| `release-testing` | Ad hoc distribution (registered devices, no App Review) |
+
+For interactive runs, the script auto-detects an existing iOS plist or offers to generate one. For CI, set `IOS_EXPORT_PLIST` explicitly.
+
+### App Store Connect upload
+
+`--ios-upload-ipa` automates Xcode's "Distribute App → App Store Connect" flow via `xcrun altool`. The API credentials are auto-detected from `Config/DefaultEngine.ini` if you've already configured them in Xcode's Signing & Capabilities panel (keys: `AppStoreConnectKeyID`, `AppStoreConnectIssuerID`, `AppStoreConnectKeyPath`). Generate an API key at App Store Connect → Users and Access → Integrations → App Store Connect API.
+
+After upload, use App Store Connect to designate the build as internal TestFlight, external TestFlight, or submit for App Review — the upload method is the same in all cases.
+
+### iOS-only builds
+
+```bash
+./ship.sh --ios-only
+```
+
+Skips everything Mac-specific (UAT Mac cook, Xcode Mac archive/export, codesign, ZIP, DMG, notarization) and runs only the iOS UAT → archive → export → optional validate/upload sequence. `SIGN_IDENTITY` is not required.
+
+### Minimal iOS CI config
+
+```bash
+DEVELOPMENT_TEAM="ABCDE12345"
+ENABLE_IOS="1"
+IOS_WORKSPACE="MyGame (iOS).xcworkspace"
+IOS_SCHEME="MyGame"
+IOS_EXPORT_PLIST="iOS-ExportOptions.plist"
+IOS_MARKETING_VERSION="1.2.0"
+IOS_ASC_UPLOAD="1"
+IOS_ASC_API_KEY_ID="ABCDE12345"
+IOS_ASC_API_ISSUER="12345678-abcd-1234-abcd-123456789abc"
+IOS_ASC_API_KEY_PATH="/path/to/AuthKey_ABCDE12345.p8"
+```
+
+---
+
+## Minimal CI config (Mac)
 
 ```bash
 DEVELOPMENT_TEAM="ABCDE12345"

@@ -122,3 +122,42 @@ APP_CATEGORY="public.app-category.games"
 CLI: `--app-category public.app-category.games`
 
 Valid identifiers: https://developer.apple.com/documentation/bundleresources/information-property-list/lsapplicationcategorytype
+
+---
+
+## iOS xcconfig stamping
+
+Before the iOS Xcode archive step, the script updates the UE-generated xcconfig at:
+
+```
+Intermediate/ProjectFiles/XcconfigsIOS/<project>.xcconfig
+```
+
+Only two keys are written — the macOS-specific keys (`LSSupportsGameMode`, `LSApplicationCategoryType`, etc.) are not applicable to iOS and are left alone.
+
+| xcconfig key | Info.plist key | Source |
+|---|---|---|
+| `CURRENT_PROJECT_VERSION` | `CFBundleVersion` | Resolved version string (only when `VERSION_MODE != NONE`) |
+| `MARKETING_VERSION` | `CFBundleShortVersionString` | `IOS_MARKETING_VERSION` → `MARKETING_VERSION` → `1.0.0` |
+
+### v-prefix stripping
+
+App Store Connect requires `CFBundleVersion` to be composed of integers only — no `v` prefix. If your version string is `v1.2.3`, the script strips the `v` automatically and prints a warning at the terminal:
+
+```
+⚠ iOS CURRENT_PROJECT_VERSION: stripping 'v' prefix from 'v1.2.3' (CFBundleVersion must be numeric-only for App Store Connect)
+```
+
+The Mac xcconfig is not affected — `Developer ID` notarization does not impose this restriction.
+
+### IOS_MARKETING_VERSION
+
+Set a separate marketing version for iOS if it differs from Mac:
+
+```bash
+IOS_MARKETING_VERSION="2.0.0"
+```
+
+CLI: `--ios-marketing-version 2.0.0`
+
+If not set, falls back to `MARKETING_VERSION`, then `1.0.0` with a warning.
