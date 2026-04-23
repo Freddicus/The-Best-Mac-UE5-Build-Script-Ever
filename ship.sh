@@ -908,6 +908,7 @@ print_config() {
     echo "VERSION_CONTENT_DIR: $VERSION_CONTENT_DIR" >&3
     echo "VERSION_FILE:      $REPO_ROOT/Content/$VERSION_CONTENT_DIR/version.txt" >&3
     echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, will default to 1.0.0>}" >&3
+    echo "IOS_MARKETING_VERSION: ${IOS_MARKETING_VERSION:-<unset, falls back to MARKETING_VERSION>}" >&3
     echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, will default to YES>}" >&3
     echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, existing xcconfig value preserved>}" >&3
     echo "XCCONFIG:          $REPO_ROOT/Intermediate/ProjectFiles/XcconfigsMac/${LONG_NAME}.xcconfig" >&3
@@ -1155,6 +1156,62 @@ update_xcconfig_versions() {
     good "Stamped $_xcconfig_path → CURRENT_PROJECT_VERSION=$_bundle_version, MARKETING_VERSION=$_marketing_ver, game mode=$_game_mode_val"
   else
     good "Stamped $_xcconfig_path → MARKETING_VERSION=$_marketing_ver, game mode=$_game_mode_val"
+  fi
+}
+
+update_ios_xcconfig_versions() {
+  [[ "$ENABLE_IOS" == "1" ]] || return 0
+
+  local _xcconfig_path="$REPO_ROOT/Intermediate/ProjectFiles/XcconfigsIOS/${LONG_NAME}.xcconfig"
+
+  if [[ ! -f "$_xcconfig_path" ]]; then
+    info "iOS xcconfig not found at $_xcconfig_path — skipping iOS Info.plist stamp (run GenerateProjectFiles first)"
+    return 0
+  fi
+
+  local _bundle_version=""
+  if [[ "$VERSION_MODE" != "NONE" ]]; then
+    _bundle_version="$(_resolve_version_string)"
+  fi
+
+  # IOS_MARKETING_VERSION falls back to MARKETING_VERSION, then to 1.0.0.
+  local _marketing_ver="${IOS_MARKETING_VERSION:-}"
+  if [[ -z "$_marketing_ver" ]]; then
+    _marketing_ver="${MARKETING_VERSION:-}"
+  fi
+  if [[ -z "$_marketing_ver" ]]; then
+    warn "IOS_MARKETING_VERSION not set — defaulting to 1.0.0"
+    _marketing_ver="1.0.0"
+  fi
+
+  local _tmp _line
+  local _found_cpv=0 _found_mv=0
+  _tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}ios_xcconfig_update_XXXXXX")"
+
+  while IFS= read -r _line || [[ -n "$_line" ]]; do
+    if [[ "$_line" == CURRENT_PROJECT_VERSION* && -n "$_bundle_version" ]]; then
+      printf '%s\n' "CURRENT_PROJECT_VERSION = $_bundle_version"
+      _found_cpv=1
+    elif [[ "$_line" == MARKETING_VERSION* ]]; then
+      printf '%s\n' "MARKETING_VERSION = $_marketing_ver"
+      _found_mv=1
+    else
+      printf '%s\n' "$_line"
+    fi
+  done < "$_xcconfig_path" > "$_tmp"
+
+  if [[ "$_found_cpv" -eq 0 && -n "$_bundle_version" ]]; then
+    printf '%s\n' "CURRENT_PROJECT_VERSION = $_bundle_version" >> "$_tmp"
+  fi
+  if [[ "$_found_mv" -eq 0 ]]; then
+    printf '%s\n' "MARKETING_VERSION = $_marketing_ver" >> "$_tmp"
+  fi
+
+  /bin/mv "$_tmp" "$_xcconfig_path"
+  if [[ -n "$_bundle_version" ]]; then
+    good "Stamped $_xcconfig_path → CURRENT_PROJECT_VERSION=$_bundle_version, MARKETING_VERSION=$_marketing_ver"
+  else
+    good "Stamped $_xcconfig_path → MARKETING_VERSION=$_marketing_ver"
   fi
 }
 
@@ -1944,6 +2001,7 @@ VERSION_CONTENT_DIR="${VERSION_CONTENT_DIR:-BuildInfo}"
 MARKETING_VERSION="${MARKETING_VERSION:-}"
 ENABLE_GAME_MODE="${ENABLE_GAME_MODE:-}"
 APP_CATEGORY="${APP_CATEGORY:-}"
+IOS_MARKETING_VERSION="${IOS_MARKETING_VERSION:-}"
 
 
 # -----------------------------------------------------------------------------
@@ -2004,7 +2062,8 @@ Options (highest priority):
   --version-mode NONE|MANUAL|DATETIME|HYBRID
   --version-string STRING
   --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
-  --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
+  --marketing-version STRING         (CFBundleShortVersionString stamped into Mac xcconfig, default: 1.0.0)
+  --ios-marketing-version STRING     (CFBundleShortVersionString stamped into iOS xcconfig; falls back to --marketing-version)
   --game-mode / --no-game-mode       (stamp LSSupportsGameMode + GCSupportsGameMode in xcconfig, default: YES)
   --app-category STRING              (INFOPLIST_KEY_LSApplicationCategoryType, e.g. public.app-category.games)
   --bump-major / --bump-minor / --bump-patch
@@ -2092,6 +2151,7 @@ while [[ $# -gt 0 ]]; do
     --version-string)           VERSION_STRING="$2"; shift 2 ;;
     --version-content-dir)      VERSION_CONTENT_DIR="$2"; shift 2 ;;
     --marketing-version)        MARKETING_VERSION="$2"; shift 2 ;;
+    --ios-marketing-version)    IOS_MARKETING_VERSION="$2"; shift 2 ;;
     --game-mode)                ENABLE_GAME_MODE="1"; shift ;;
     --no-game-mode)             ENABLE_GAME_MODE="0"; shift ;;
     --app-category)             APP_CATEGORY="$2"; shift 2 ;;
@@ -2578,6 +2638,7 @@ if [[ "$ENABLE_IOS" == "1" ]]; then
     -archive -archivedirectory="$BUILD_DIR" \
     -utf8output -verbose
 
+  update_ios_xcconfig_versions
   seed_ios_icon_assets_for_workspace
 
   echo "== iOS Archive ==" >&3
@@ -2596,7 +2657,8 @@ if [[ "$ENABLE_IOS" == "1" ]]; then
   xcodebuild -exportArchive \
     -archivePath "$IOS_ARCHIVE_PATH" \
     -exportPath "$IOS_EXPORT_DIR" \
-    -exportOptionsPlist "$IOS_EXPORT_PLIST"
+    -exportOptionsPlist "$IOS_EXPORT_PLIST" \
+    -allowProvisioningUpdates
 
   IOS_IPA_PATH="$(find_first_ipa_under "$IOS_EXPORT_DIR")"
   if [[ -z "${IOS_IPA_PATH:-}" ]]; then
