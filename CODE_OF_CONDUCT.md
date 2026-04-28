@@ -1,6 +1,6 @@
 # Code of Conduct
 
-**Don't be a dick.**
+**Don't be a jerk.**
 
 More precisely:
 
