@@ -6,6 +6,31 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-04-23] — iOS build pipeline: UAT → archive → IPA → App Store Connect (PR #21)
+
+### Added
+- `ENABLE_IOS=1` / `--ios`: optional iOS build pass that runs after the Mac pipeline. Produces an IPA via UAT BuildCookRun → `xcodebuild archive` (destination `generic/platform=iOS`) → `xcodebuild -exportArchive`.
+- `IOS_ONLY=1` / `--ios-only`: skip the entire Mac pipeline (UAT, signing, ZIP, DMG, notarization) and run only the iOS steps.
+- iOS workspace auto-detection: looks for `<ProjectName> (iOS).xcworkspace` by convention first, then falls back to a `find`-based scan. UE generates both Mac and iOS workspaces together via `GenerateProjectFiles.sh` when iOS support is enabled in the Epic Games Launcher.
+- iOS scheme auto-detection: inferred from the Mac scheme when already resolved, otherwise detected via `xcodebuild -list` with the same name-match logic as the Mac path.
+- iOS `ExportOptions.plist` auto-detection (conventional name `iOS-ExportOptions.plist`, content-scan for `app-store-connect` / `release-testing` methods) and interactive generation when not found.
+- `IOS_WORKSPACE` / `--ios-workspace`: override the detected iOS workspace path.
+- `IOS_SCHEME` / `--ios-scheme`: override the detected iOS scheme name.
+- `IOS_EXPORT_PLIST` / `--ios-export-plist`: path to the iOS `ExportOptions.plist`.
+- `IOS_ICON_SYNC=1` / `--ios-icon-sync`: seeds icon assets from `IOS_ICON_XCASSETS` (default: `iOS-SourceControlled.xcassets`) into the iOS workspace before archiving, mirroring the macOS icon sync behavior.
+- `IOS_ICON_XCASSETS` / `--ios-icon-xcassets`, `IOS_APPICON_SET_NAME` / `--ios-appicon-set-name`: control the source catalog and appiconset name for iOS icon seeding.
+- `IOS_MARKETING_VERSION` / `--ios-marketing-version`: iOS-specific `CFBundleShortVersionString`. Falls back to `MARKETING_VERSION`, then `1.0.0`.
+- `update_ios_xcconfig_versions()`: stamps `Intermediate/ProjectFiles/XcconfigsIOS/<project>.xcconfig` with `MARKETING_VERSION` and `CURRENT_PROJECT_VERSION`. Leading `v` prefix is stripped automatically with a terminal warning — App Store Connect requires `CFBundleVersion` to be purely numeric.
+- `IOS_ASC_VALIDATE=1` / `--ios-validate-ipa`: validates the IPA against App Store Connect (`xcrun altool --validate-app`) after export. Equivalent to Xcode's "Validate App" button — catches bundle ID mismatches, entitlement rejections, and missing privacy strings before committing to an upload.
+- `IOS_ASC_UPLOAD=1` / `--ios-upload-ipa`: uploads the IPA to App Store Connect (`xcrun altool --upload-app`). Implies `--ios-validate-ipa`. From there, mark as internal or external TestFlight, or submit for App Review, in the App Store Connect UI.
+- `IOS_ASC_API_KEY_ID`, `IOS_ASC_API_ISSUER`, `IOS_ASC_API_KEY_PATH` / `--ios-asc-api-key-id`, `--ios-asc-api-issuer`, `--ios-asc-api-key-path`: App Store Connect API credentials. Auto-detected from `Config/DefaultEngine.ini` keys `AppStoreConnectKeyID`, `AppStoreConnectIssuerID`, `AppStoreConnectKeyPath` — the same values Xcode stores when you configure ASC in Xcode → project → Signing & Capabilities.
+- `iOS-ExportOptions.plist.example`: annotated template for iOS distribution plists.
+
+### Changed
+- Mac xcconfig stamping (`update_xcconfig_versions`) is skipped when `--ios-only` is active — only the iOS xcconfig is stamped.
+
+---
+
 ## [2026-04-14] — Restructure docs: slim README + supplemental docs/ (PR #20)
 
 ### Added
