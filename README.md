@@ -48,11 +48,12 @@ When you run `./ship.sh`, this is the execution order:
 7. **Icon seeding** *(if enabled)* — copies your source-controlled `.xcassets` into the workspace so Xcode uses your app icon instead of the engine default.
 8. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`. UE's `UpdateVersionAfterBuild.sh` increments the `PackageVersionCounter` here, propagating to `CFBundleVersion`.
 9. **Xcode export** — runs `xcodebuild -exportArchive` with your `ExportOptions.plist` → signed `.app`.
-10. **Component signing** — signs all nested `.dylib`, `.so`, and `.framework` files individually, then signs the outer `.app`. Never uses `--deep`.
-11. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.
-12. **ZIP / DMG** — packages the signed app for distribution.
-13. **Notarization** — submits ZIP and DMG to Apple in parallel, then waits for both.
-14. **Stapling** — attaches the notarization ticket to the app, ZIP, and DMG.
+10. **CFBundleVersion override** *(if `CFBUNDLE_VERSION` is set)* — `PlistBuddy`-rewrites `CFBundleVersion` in the exported `.app/Contents/Info.plist`. AAA-studio-style escape hatch for explicit single-integer build numbers (`7`, `$GITHUB_RUN_NUMBER`, etc.). When unset, UE's `PackageVersionCounter` flow from step 8 supplies the value. See [versioning.md](docs/versioning.md#cfbundleversion-two-paths-pick-one).
+11. **Component signing** — signs all nested `.dylib`, `.so`, and `.framework` files individually, then signs the outer `.app`. Never uses `--deep`.
+12. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.
+13. **ZIP / DMG** — packages the signed app for distribution.
+14. **Notarization** — submits ZIP and DMG to Apple in parallel, then waits for both.
+15. **Stapling** — attaches the notarization ticket to the app, ZIP, and DMG.
 
 Full build log: `Saved/Logs/build_YYYY-MM-DD_HH-MM-SS.log`. Artifacts land in `Saved/Packages/Mac/` (override with `--build-dir`). `Build/{Platform}/` is reserved for committed source-controlled inputs (icons, launch storyboard, entitlements) — see [output.md](docs/output.md#build-vs-saved--what-goes-where).
 

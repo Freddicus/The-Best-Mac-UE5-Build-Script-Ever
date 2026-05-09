@@ -859,6 +859,7 @@ print_config() {
   echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, leaves DefaultEngine.ini VersionInfo untouched>}" >&3
   echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, leaves Info.Template.plist GameMode keys untouched>}" >&3
   echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, leaves DefaultEngine.ini AppCategory untouched>}" >&3
+  echo "CFBUNDLE_VERSION:  ${CFBUNDLE_VERSION:-<unset, falls back to PackageVersionCounter via UpdateVersionAfterBuild.sh>}" >&3
   echo "MAC_INFO_TEMPLATE_PLIST: $REPO_ROOT/Build/Mac/Resources/Info.Template.plist" >&3
   if [[ -n "${UPROJECT_NAME:-}" ]]; then
     echo "MAC_PACKAGE_VERSION_COUNTER: $REPO_ROOT/Build/Mac/${UPROJECT_NAME%.uproject}.PackageVersionCounter" >&3
@@ -1180,6 +1181,44 @@ _set_plist_bool() {
     /usr/libexec/PlistBuddy -c "Add :$key bool $value" "$plist"
   fi
   good "Updated $plist → $key=$value"
+}
+
+override_cfbundle_version_in_app_plist() {
+  # AAA-studio escape hatch from UE's <CL>.<X>.<Y> CFBundleVersion format:
+  # when CFBUNDLE_VERSION is set (e.g. via --cfbundle-version 7), rewrite the
+  # exported .app's Info.plist CFBundleVersion to that exact string. Runs
+  # *after* xcodebuild -exportArchive, but *before* the codesign step — the
+  # signature is computed over the modified Info.plist, so the bundle stays
+  # internally consistent.
+  #
+  # Useful when CI maintains a single-integer monotonic counter (Jenkins build
+  # number, $GITHUB_RUN_NUMBER, an internal release counter) and you want
+  # CFBundleVersion to match exactly. Bypasses UE's PackageVersionCounter
+  # auto-increment entirely.
+  #
+  # When unset, this function is a no-op and the canonical UE flow
+  # (PackageVersionCounter + project-level UpdateVersionAfterBuild.sh override)
+  # determines CFBundleVersion. The two paths are complementary, not competing:
+  # set CFBUNDLE_VERSION when you want exact control, leave it unset when you
+  # want UE's auto-increment.
+  [[ -n "${CFBUNDLE_VERSION:-}" ]] || return 0
+  [[ -n "${APP_PATH:-}" ]] || die "override_cfbundle_version_in_app_plist called before APP_PATH was resolved"
+
+  local plist="$APP_PATH/Contents/Info.plist"
+  [[ -f "$plist" ]] || die "Cannot override CFBundleVersion: Info.plist missing at $plist"
+
+  local current
+  current="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$plist" 2>/dev/null || true)"
+  if [[ "$current" == "$CFBUNDLE_VERSION" ]]; then
+    info "CFBundleVersion already $CFBUNDLE_VERSION in $plist — no override needed"
+    return 0
+  fi
+  if [[ -n "$current" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $CFBUNDLE_VERSION" "$plist"
+  else
+    /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $CFBUNDLE_VERSION" "$plist"
+  fi
+  good "Overrode CFBundleVersion in $plist → $CFBUNDLE_VERSION (was: ${current:-<unset>})"
 }
 
 seed_mac_update_version_after_build_script() {
@@ -1934,6 +1973,7 @@ VERSION_CONTENT_DIR="${VERSION_CONTENT_DIR:-BuildInfo}"
 MARKETING_VERSION="${MARKETING_VERSION:-}"
 ENABLE_GAME_MODE="${ENABLE_GAME_MODE:-}"
 APP_CATEGORY="${APP_CATEGORY:-}"
+CFBUNDLE_VERSION="${CFBUNDLE_VERSION:-}"
 
 
 # -----------------------------------------------------------------------------
@@ -2023,6 +2063,14 @@ Options (highest priority):
   --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
   --game-mode / --no-game-mode       (stamp LSSupportsGameMode + GCSupportsGameMode in xcconfig, default: YES)
   --app-category STRING              (INFOPLIST_KEY_LSApplicationCategoryType, e.g. public.app-category.games)
+  --cfbundle-version STRING          direct override of CFBundleVersion in the
+                                     exported .app's Info.plist, applied after
+                                     Xcode export but before codesign. Bypasses
+                                     UE's PackageVersionCounter auto-increment
+                                     entirely. Use when CI manages a single-integer
+                                     build counter (App Store style: "7", "42",
+                                     "$GITHUB_RUN_NUMBER"). Unset = leave the
+                                     UE-canonical CFBundleVersion alone.
   --bump-major / --bump-minor / --bump-patch
                                      bump VERSION_STRING from .env or --version-string;
                                      implies VERSION_MODE=MANUAL if not already set
@@ -2112,6 +2160,7 @@ while [[ $# -gt 0 ]]; do
     --game-mode)                ENABLE_GAME_MODE="1"; shift ;;
     --no-game-mode)             ENABLE_GAME_MODE="0"; shift ;;
     --app-category)             APP_CATEGORY="$2"; shift 2 ;;
+    --cfbundle-version)         CFBUNDLE_VERSION="$2"; shift 2 ;;
     --bump-major|--bump-minor|--bump-patch)
       if is_placeholder "${VERSION_STRING:-}"; then
         die "$1 requires a base version. Set VERSION_STRING in .env or pass --version-string X.Y.Z before $1."
@@ -2658,6 +2707,10 @@ PLIST
 fi
 
 echo "Using signing identity: $SIGN_IDENTITY" >&3
+
+# CFBundleVersion override (only when CFBUNDLE_VERSION is set). Must run
+# before any codesign step, since signing hashes Info.plist content.
+override_cfbundle_version_in_app_plist
 
 # Apple deprecated --deep for distribution signing. The correct approach is to
 # sign all nested dylibs and frameworks individually first, then sign the outer

@@ -62,6 +62,7 @@ The script locates your project automatically when run from the project root. Se
 | `MARKETING_VERSION` | If set, the script writes `VersionInfo=` to `Config/DefaultEngine.ini` under `[/Script/MacRuntimeSettings.MacRuntimeSettings]` (UE's canonical `CFBundleShortVersionString` source). Unset = leave `DefaultEngine.ini` alone. See [versioning.md](versioning.md#marketing_version). |
 | `APP_CATEGORY` | If set, the script writes `AppCategory=` to `Config/DefaultEngine.ini` under `[/Script/MacTargetPlatform.XcodeProjectSettings]`. UE's `BaseEngine.ini` already defaults to `public.app-category.games` — only override when you need a different value. |
 | `ENABLE_GAME_MODE` | `1` = set `LSSupportsGameMode` + `GCSupportsGameMode` to `true` in your `Build/Mac/Resources/Info.Template.plist`. `0` = set to `false`. Unset = leave the plist's GameMode keys alone (your plist is sovereign). |
+| `CFBUNDLE_VERSION` | Direct override of `CFBundleVersion` in the exported `.app`'s `Info.plist`, applied after Xcode export but before codesign. Use for App-Store-style explicit control (e.g. `"7"`, `"$GITHUB_RUN_NUMBER"`). When set, bypasses UE's `PackageVersionCounter` auto-increment for the shipped bundle. Unset = use the UE-canonical path. See [versioning.md](versioning.md#cfbundleversion-two-paths-pick-one) for the two-paths breakdown. |
 | `CLEAN_BUILD_DIR` | `1` = wipe `BUILD_DIR_REL` before building. Default: `0`. |
 | `DRY_RUN` | `1` = print the plan and exit without building. |
 | `PRINT_CONFIG` | `1` = print resolved configuration and exit without building. |
@@ -84,6 +85,7 @@ Run `./ship.sh --help` for the full list. Common flags:
 ./ship.sh --no-seed-mac-info-template-plist          # opt out of plist seed
 ./ship.sh --no-seed-mac-package-version-counter      # opt out of CFBundleVersion seed
 ./ship.sh --no-seed-mac-update-version-after-build   # accept engine's CL prefix in CFBundleVersion
+./ship.sh --cfbundle-version 7                       # App-Store-style explicit CFBundleVersion
 ```
 
 CLI flags override `.env`. Both forms are equivalent — you can mix and match.
