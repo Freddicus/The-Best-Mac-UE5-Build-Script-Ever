@@ -41,12 +41,12 @@ When you run `./ship.sh`, this is the execution order:
 
 1. **Pre-flight** — validates signing identity, notary profile, UAT paths, and required tools before touching anything.
 2. **Version stamp** *(if `VERSION_MODE` is set)* — writes `version.txt` into `Content/BuildInfo/` so UAT bundles it automatically.
-3. **Apple LaunchScreen.storyboardc seed** — defensively copies the engine's pre-compiled `LaunchScreen.storyboardc` into `Build/Apple/Resources/Interface/` if absent, so a consumer-supplied iOS `.storyboard` source doesn't trip Xcode into trying to compile an iOS storyboard for Mac. See [gotchas](docs/gotchas.md#adding-a-custom-ios-launchscreenstoryboard-breaks-the-mac-build).
-4. **GenerateProjectFiles** *(if `USE_XCODE_EXPORT=1`)* — runs `GenerateProjectFiles.sh` so any new files under `Build/{Platform}/Resources/` (custom launch storyboard, app icon catalog) get baked into the freshly-generated `.xcodeproj`. Disable with `--no-regen-project-files`.
-5. **xcconfig stamp** — writes `MARKETING_VERSION`, Game Mode flags, and app category into the Xcode-generated xcconfig before archiving.
+3. **Canonical UE seeds** — defensively places three stock engine files at their canonical UE locations if missing: `Build/Apple/Resources/Interface/LaunchScreen.storyboardc` (prevents Mac from compiling iOS storyboard sources), `Build/Mac/Resources/Info.Template.plist` (canonical home for `LSSupportsGameMode`/`GCSupportsGameMode`), and `Build/Mac/<Project>.PackageVersionCounter` (canonical `CFBundleVersion` source). Commit these after first run.
+4. **Canonical ini ensures** — writes `MARKETING_VERSION` and `APP_CATEGORY` (when set) to their canonical `Config/DefaultEngine.ini` sections. `ENABLE_GAME_MODE` (when set) updates the seeded `Info.Template.plist` via `PlistBuddy`. See [versioning.md](docs/versioning.md#infoplist-values-via-canonical-ue-overrides).
+5. **GenerateProjectFiles** *(if `USE_XCODE_EXPORT=1`)* — runs `GenerateProjectFiles.sh` so the canonical config above is read by UE and baked into the freshly-generated `.xcodeproj` and xcconfig. Disable with `--no-regen-project-files`.
 6. **UAT BuildCookRun** — cooks and packages the project via `RunUAT.sh BuildCookRun`. UAT's `-archive` output lands in `Saved/Packages/Mac/`.
 7. **Icon seeding** *(if enabled)* — copies your source-controlled `.xcassets` into the workspace so Xcode uses your app icon instead of the engine default.
-8. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`.
+8. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`. UE's `UpdateVersionAfterBuild.sh` increments the `PackageVersionCounter` here, propagating to `CFBundleVersion`.
 9. **Xcode export** — runs `xcodebuild -exportArchive` with your `ExportOptions.plist` → signed `.app`.
 10. **Component signing** — signs all nested `.dylib`, `.so`, and `.framework` files individually, then signs the outer `.app`. Never uses `--deep`.
 11. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.

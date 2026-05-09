@@ -7,7 +7,15 @@ This is the most common source of confusion when wiring up an Unreal project for
 - **`Build/{Platform}/` is for committed source-controlled *inputs*.** App icons, custom launch storyboards, `Info.plist` fragments, entitlements, signing config, `PakBlacklist*.txt`. The folder name is a UE3-era misnomer; treat it as "platform-source-inputs/". UBT does write a small set of intermediates here (`UBTGenerated/`, `FileOpenOrder/`, `*.PackageVersionCounter`); those are managed by the engine and stay gitignored.
 - **`Saved/` is for derived artifacts** — UE's documented dumping ground. It is gitignored by default and is where this script writes everything: cooked content, staged builds, packaged `.app`/`.zip`/`.dmg`, and logs.
 
-`ship.sh` will not touch `Build/{Platform}/`. If you want a custom launch screen or app icon override, put it in `Build/Mac/Resources/` (or `Build/IOS/Resources/`) and commit it — it stays under your control.
+`ship.sh` does write three specific files under `Build/` — all of them stock engine assets at their *canonical* UE locations, so UE's regular machinery picks them up at `GenerateProjectFiles` / `xcodebuild` time:
+
+| Path | Why the script seeds it | Disable with |
+|---|---|---|
+| `Build/Apple/Resources/Interface/LaunchScreen.storyboardc` | Stops Mac from trying to compile a consumer-supplied iOS `.storyboard` source. See [gotchas](gotchas.md#adding-a-custom-ios-launchscreenstoryboard-breaks-the-mac-build). | `--no-seed-apple-launchscreen-compat` |
+| `Build/Mac/Resources/Info.Template.plist` | Canonical home for static `Info.plist` keys like `LSSupportsGameMode`. UE's `BaseEngine.ini` already configures `TemplateMacPlist=` to point here. | `--no-seed-mac-info-template-plist` |
+| `Build/Mac/<Project>.PackageVersionCounter` | UE's canonical `CFBundleVersion` auto-increment source. UE rewrites this every build via `UpdateVersionAfterBuild.sh`. | `--no-seed-mac-package-version-counter` |
+
+All three are seeded only when missing — once present, the script never overwrites them. Commit them to your repo so the project is self-contained. See [versioning.md](versioning.md#infoplist-values-via-canonical-ue-overrides) for the canonical `Info.plist` story.
 
 ## Artifact paths
 

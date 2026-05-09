@@ -6,6 +6,42 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-09] — Replace xcconfig hijack with canonical UE override paths
+
+### Removed (BREAKING)
+- **`update_xcconfig_versions()` removed.** The script no longer post-processes `Intermediate/ProjectFiles/XcconfigsMac/<Project>.xcconfig`. That approach fought with `GenerateProjectFiles` every regen and put canonical project state in an `Intermediate/` file. All five Info.plist values it used to stamp now route through their sanctioned UE override locations.
+
+### Changed (BREAKING)
+- **`MARKETING_VERSION`** (`CFBundleShortVersionString`): now writes to `Config/DefaultEngine.ini` `[/Script/MacRuntimeSettings.MacRuntimeSettings] VersionInfo=`. Read by UE at `XcodeProject.cs:1997` and stamped into the generated xcconfig automatically. Unset = leave `DefaultEngine.ini` alone (UE falls back to engine display version — set this once for any production build).
+- **`APP_CATEGORY`** (`LSApplicationCategoryType`): now writes to `Config/DefaultEngine.ini` `[/Script/MacTargetPlatform.XcodeProjectSettings] AppCategory=`. Read at `XcodeProject.cs:1982`. UE's `BaseEngine.ini:3462` already defaults this to `public.app-category.games` — only override for a different category.
+- **`ENABLE_GAME_MODE`** (`LSSupportsGameMode` + `GCSupportsGameMode`): now sets keys directly in `Build/Mac/Resources/Info.Template.plist` via `PlistBuddy`. UE's `BaseEngine.ini:3463` configures `TemplateMacPlist=` to point here, so any plist landing at this path is auto-discovered and its contents merged into the final `Info.plist` by Xcode at build time.
+- **`CFBundleVersion`** (`CURRENT_PROJECT_VERSION`): now driven by UE's canonical `Build/Mac/<Project>.PackageVersionCounter` mechanism. UE's `Engine/Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` reads this counter, increments the minor (`0.0` → `0.1` → …), and writes the value to `Intermediate/Build/Versions.xcconfig` as `UE_MAC_BUILD_VERSION` — referenced by the generated xcconfig as `CURRENT_PROJECT_VERSION = $(UE_MAC_BUILD_VERSION)`. **CFBundleVersion is no longer derived from `VERSION_STRING` / `VERSION_MODE`** — those still control the runtime `version.txt` stamp, but Xcode's bundle version is now an independent monotonic counter (per UE convention).
+- **Default behavior change** when `MARKETING_VERSION` is unset: previously the script defaulted to `1.0.0` with a warning; now the script does nothing and UE falls back to its engine display version. Action: set `MARKETING_VERSION` in `.env` once and let the script write it to `DefaultEngine.ini`.
+- **Default behavior change** when `ENABLE_GAME_MODE` is unset: previously defaulted to `YES` with a warning; now the script does not touch the plist's GameMode keys at all (your plist is sovereign).
+
+### Added
+- **`set_engine_ini_value()`**: idempotent setter for a key=value pair under a section in `Config/DefaultEngine.ini`. No-op when the value already matches; replaces in place when different; inserts after the section header when the section exists but the key doesn't; appends section + key when neither exists.
+- **`ensure_marketing_version_in_engine_ini()`** and **`ensure_app_category_in_engine_ini()`**: thin wrappers that route `MARKETING_VERSION` and `APP_CATEGORY` to their canonical ini sections when set.
+- **`seed_mac_info_template_plist()`**: defensively copies the engine's stock `Info.Template.plist` from `$UE_ROOT/Engine/Build/Mac/Resources/` to `$REPO_ROOT/Build/Mac/Resources/` if missing, then sets `LSSupportsGameMode` and `GCSupportsGameMode` via `PlistBuddy` when `ENABLE_GAME_MODE` is set. Idempotent. Controlled by `SEED_MAC_INFO_TEMPLATE_PLIST` (default `1`) and `--seed-mac-info-template-plist` / `--no-seed-mac-info-template-plist`.
+- **`seed_mac_package_version_counter()`**: defensively seeds `Build/Mac/<Project>.PackageVersionCounter` to `0.0` when missing. Idempotent. Controlled by `SEED_MAC_PACKAGE_VERSION_COUNTER` (default `1`) and `--seed-mac-package-version-counter` / `--no-seed-mac-package-version-counter`. To start at a specific value, edit the counter file directly — the script never overwrites an existing one.
+- **`_set_plist_bool()`**: helper for idempotent boolean writes via `PlistBuddy` (no-op when value matches; uses `Set` if key exists, `Add` otherwise).
+- **Pipeline order** (between `write_version_to_content` and `regenerate_project_files`): `seed_apple_launchscreen_compat` → `seed_mac_info_template_plist` → `seed_mac_package_version_counter` → `ensure_app_category_in_engine_ini` → `ensure_marketing_version_in_engine_ini`. All seeds and ini writes happen before `GenerateProjectFiles` so UE picks up the canonical config in a single pass.
+- **Dry-run preview** updated to show the seed step.
+- **Docs:**
+  - [docs/versioning.md](docs/versioning.md): the entire "xcconfig stamping" section replaced by "Info.plist values via canonical UE overrides", with the canonical-mapping table, per-key migration notes, the auto-incrementing CFBundleVersion explanation, and seed opt-out flags.
+  - [docs/configuration.md](docs/configuration.md): new env-var rows for `SEED_MAC_INFO_TEMPLATE_PLIST`, `SEED_MAC_PACKAGE_VERSION_COUNTER`, `MARKETING_VERSION`, `APP_CATEGORY`, `ENABLE_GAME_MODE` (semantics updated). New CLI examples.
+  - [docs/output.md](docs/output.md): "ship.sh does write three specific files under Build/" exception called out with a table mapping each canonical seed to its purpose and disable flag.
+  - [README.md](README.md): pipeline list reorganized — old "xcconfig stamp" step removed, replaced by "Canonical UE seeds" + "Canonical ini ensures" steps.
+  - [.env.example](.env.example): version/Info.plist section rewritten to describe canonical UE override paths.
+
+### Migration
+- **Set `MARKETING_VERSION` in your `.env`** (or `Config/DefaultEngine.ini` directly under the canonical section). Without it, `CFBundleShortVersionString` falls back to UE's engine display version (e.g. `5.7.0`).
+- **Run the script once** to seed `Build/Mac/Resources/Info.Template.plist` and `Build/Mac/<Project>.PackageVersionCounter` from the engine stock, then **commit them**. They become permanent project source.
+- **CFBundleVersion is now monotonically auto-incrementing** (`0.0.1` → `0.0.2` → ...). If you previously expected CFBundleVersion to track `VERSION_STRING`, edit `Build/Mac/<Project>.PackageVersionCounter` to your desired baseline and let UE auto-increment from there.
+- **Game Mode**: if you want it on, set `ENABLE_GAME_MODE=1` once and run the script — it'll stamp `LSSupportsGameMode=true` and `GCSupportsGameMode=true` into your seeded `Info.Template.plist`. Subsequent builds with the env var unset preserve those values (the plist is yours to own).
+
+---
+
 ## [2026-05-08] — Move outputs from `Build/` to `Saved/`; always regenerate project files
 
 ### Changed
