@@ -175,6 +175,8 @@ For App Store submissions, monotonically increasing is required across builds of
 
 The script `PlistBuddy`-rewrites `<App>.app/Contents/Info.plist`'s `CFBundleVersion` *after* `xcodebuild -exportArchive` produces the bundle but *before* the codesign step. The signature is computed over the modified `Info.plist`, so the bundle stays internally consistent. UE's `PackageVersionCounter` and `UpdateVersionAfterBuild.sh` still run as part of the build, but their value is irrelevant because the post-export rewrite always wins.
 
+The script also stamps the resolved `CFBundleVersion` into `<ARCHIVE_PATH>/Info.plist`'s `:ApplicationProperties:CFBundleVersion` (the `.xcarchive` metadata that Xcode Organizer's Archives view reads) immediately after `xcodebuild archive` finishes. Without this, the Organizer would show UE's pre-export internal value (e.g. `1.0.2 (0.1)`) while your shipped `.app` had the auto-bumped value — confusing if you're cross-checking. The archive's embedded `.app` (the one inside the `.xcarchive` bundle, not what gets exported) is intentionally left unsigned-after-edit-free; we only touch the top-level metadata to avoid invalidating its signature.
+
 #### Path A — UE-canonical (opt-in, advanced)
 
 To opt out of the auto-bump and route `CFBundleVersion` through UE's `PackageVersionCounter` mechanism instead, set `USE_UE_PACKAGE_VERSION_COUNTER=1` (env or `--use-ue-package-version-counter`). The script then:

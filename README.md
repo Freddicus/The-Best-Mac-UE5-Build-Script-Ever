@@ -46,7 +46,7 @@ When you run `./ship.sh`, this is the execution order:
 5. **GenerateProjectFiles** *(if `USE_XCODE_EXPORT=1`)* — runs `GenerateProjectFiles.sh` so the canonical config above is read by UE and baked into the freshly-generated `.xcodeproj` and xcconfig. Disable with `--no-regen-project-files`.
 6. **UAT BuildCookRun** — cooks and packages the project via `RunUAT.sh BuildCookRun`. UAT's `-archive` output lands in `Saved/Packages/Mac/`.
 7. **Icon seeding** *(if enabled)* — copies your source-controlled `.xcassets` into the workspace so Xcode uses your app icon instead of the engine default.
-8. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`.
+8. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`. Immediately after, `PlistBuddy`-stamps the auto-bumped `CFBundleVersion` into `<ARCHIVE_PATH>/Info.plist` so Xcode Organizer's Archives view shows the same value that ships.
 9. **Xcode export** — runs `xcodebuild -exportArchive` with your `ExportOptions.plist` → signed `.app`.
 10. **CFBundleVersion auto-bump** — `PlistBuddy`-rewrites `CFBundleVersion` in the exported `.app/Contents/Info.plist`. Default behavior: read `CFBUNDLE_VERSION` from `.env` (or `0` if missing), pre-increment, ship that value. On successful build, persist back to `.env`. Override with `--set-cfbundle-version N` to set a baseline. Disabled when `USE_UE_PACKAGE_VERSION_COUNTER=1` (Path A delegates to UE's `PackageVersionCounter` flow). See [versioning.md](docs/versioning.md#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical).
 11. **Component signing** — signs all nested `.dylib`, `.so`, and `.framework` files individually, then signs the outer `.app`. Never uses `--deep`.

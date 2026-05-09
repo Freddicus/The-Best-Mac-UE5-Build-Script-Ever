@@ -1197,6 +1197,45 @@ override_cfbundle_version_in_app_plist() {
   good "Overrode CFBundleVersion in $plist → $CFBUNDLE_VERSION (was: ${current:-<unset>})"
 }
 
+override_cfbundle_version_in_xcarchive_metadata() {
+  # Stamp the resolved CFBundleVersion into <ARCHIVE_PATH>/Info.plist's
+  # :ApplicationProperties:CFBundleVersion so Xcode Organizer's Archives view
+  # shows the auto-bumped value (e.g. "1.0.2 (1)") instead of UE's pre-export
+  # internal value (e.g. "1.0.2 (0.1)").
+  #
+  # This is cosmetic — the .xcarchive's embedded .app is not what ships;
+  # xcodebuild -exportArchive copies it to EXPORT_DIR where our existing
+  # post-export Info.plist override + per-component codesign produces the
+  # final signed .app. We deliberately do NOT modify the embedded .app's
+  # Info.plist here, which would invalidate its signature inside the
+  # archive. The archive's top-level metadata is sovereign for the
+  # Organizer display.
+  #
+  # Runs between `xcodebuild ... archive` and `xcodebuild -exportArchive`.
+  # No-op on Path A (CFBUNDLE_VERSION cleared by the resolver).
+  [[ -n "${CFBUNDLE_VERSION:-}" ]] || return 0
+  [[ -n "${ARCHIVE_PATH:-}" ]] || die "override_cfbundle_version_in_xcarchive_metadata called before ARCHIVE_PATH was resolved"
+
+  local archive_plist="$ARCHIVE_PATH/Info.plist"
+  if [[ ! -f "$archive_plist" ]]; then
+    warn "Archive metadata Info.plist missing: $archive_plist — skipping Organizer-display stamp"
+    return 0
+  fi
+
+  local current
+  current="$(/usr/libexec/PlistBuddy -c "Print :ApplicationProperties:CFBundleVersion" "$archive_plist" 2>/dev/null || true)"
+  if [[ "$current" == "$CFBUNDLE_VERSION" ]]; then
+    info "Archive metadata CFBundleVersion already $CFBUNDLE_VERSION — no override needed"
+    return 0
+  fi
+  if [[ -n "$current" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :ApplicationProperties:CFBundleVersion $CFBUNDLE_VERSION" "$archive_plist"
+  else
+    /usr/libexec/PlistBuddy -c "Add :ApplicationProperties:CFBundleVersion string $CFBUNDLE_VERSION" "$archive_plist"
+  fi
+  good "Stamped $archive_plist → ApplicationProperties:CFBundleVersion=$CFBUNDLE_VERSION (was: ${current:-<unset>}); Xcode Organizer will now show this version"
+}
+
 _resolve_cfbundle_version_for_build() {
   # Decide what value CFBundleVersion should be for this build, based on:
   #   - USE_UE_PACKAGE_VERSION_COUNTER=1 → Path A; clear CFBUNDLE_VERSION,
@@ -2651,6 +2690,10 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
     ENABLE_HARDENED_RUNTIME=YES \
     OTHER_CODE_SIGN_FLAGS="--timestamp"
+
+  # Stamp our resolved CFBundleVersion into the archive metadata so Xcode
+  # Organizer shows the auto-bumped value, not UE's internal pre-export value.
+  override_cfbundle_version_in_xcarchive_metadata
 
   echo "== Export signed app for Developer ID ==" >&3
   # ExportOptions.plist controls how Xcode exports the archive.

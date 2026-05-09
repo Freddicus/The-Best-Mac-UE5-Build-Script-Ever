@@ -6,6 +6,13 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-09] — Stamp `.xcarchive` metadata so Xcode Organizer shows auto-bumped `CFBundleVersion`
+
+### Added
+- **`override_cfbundle_version_in_xcarchive_metadata()`**: between `xcodebuild archive` and `xcodebuild -exportArchive`, `PlistBuddy`-stamps the resolved `CFBundleVersion` into `<ARCHIVE_PATH>/Info.plist`'s `:ApplicationProperties:CFBundleVersion`. Without this, Xcode Organizer's Archives view showed UE's pre-export internal value (e.g. `1.0.2 (0.1)`) while the shipped `.app` had the auto-bumped value — confusing if you're cross-checking. Now the Organizer shows the same `CFBundleVersion` that ships. Cosmetic; the archive's embedded `.app` is intentionally left untouched (modifying it would invalidate its signature inside the archive without buying anything — the script's exported `.app` is what actually ships and gets signed independently). No-op on Path A (`USE_UE_PACKAGE_VERSION_COUNTER=1`) since `CFBUNDLE_VERSION` is cleared by the resolver and UE's flow supplies the value end-to-end. Idempotent.
+
+---
+
 ## [2026-05-09] — Default `CFBUNDLE_VERSION` to auto-bump; gate UE-canonical path behind opt-in flag
 
 ### Changed (BREAKING)
