@@ -367,6 +367,53 @@ maybe_generate_workspace_interactively() {
   return 0
 }
 
+seed_apple_launchscreen_compat() {
+  # Defensively place a pre-compiled LaunchScreen.storyboardc at
+  # $(Project)/Build/Apple/Resources/Interface/LaunchScreen.storyboardc by
+  # copying the engine's stock one from
+  # $(UE)/Engine/Build/IOS/Resources/Interface/LaunchScreen.storyboardc.
+  #
+  # Why: XcodeProject.cs::ProcessAssets walks a path priority list for the
+  # launch storyboard at GenerateProjectFiles time. Pre-our-fix, Mac was
+  # hitting the engine's pre-compiled iOS .storyboardc fallback — Xcode
+  # treats .storyboardc as a wrapper bundle and ships it as-is, so the build
+  # worked. The moment a consumer drops a custom
+  #   $(Project)/Build/IOS/Resources/Interface/LaunchScreen.storyboard
+  # source file (a normal way to override the iOS launch screen), Mac now
+  # hits the .storyboard source first and tries to compile an iOS storyboard
+  # for macOS — which fails. The engine's AddResource call is unconditional;
+  # there's no engine-level switch. The fix lives at the project layer:
+  # provide a Mac-platform-shared override (.storyboardc, already compiled)
+  # that wins earlier in the priority list, so Mac never reaches the
+  # hardcoded iOS .storyboard line.
+  #
+  # Idempotent: skips if the destination already exists (consumer-owned) or
+  # the engine source is missing (older UE versions / partial installs).
+  # This is the one exception to "ship.sh does not write under Build/" —
+  # the file we drop here is a stock engine asset, not a customization, and
+  # it's fine to commit it to the project repo afterwards.
+  [[ "${SEED_APPLE_LAUNCHSCREEN_COMPAT:-1}" == "1" ]] || { info "Skipping Apple LaunchScreen.storyboardc seed (SEED_APPLE_LAUNCHSCREEN_COMPAT=0)"; return 0; }
+
+  local src dst_dir dst
+  src="$UE_ROOT/Engine/Build/IOS/Resources/Interface/LaunchScreen.storyboardc"
+  dst_dir="$REPO_ROOT/Build/Apple/Resources/Interface"
+  dst="$dst_dir/LaunchScreen.storyboardc"
+
+  if [[ -e "$dst" ]]; then
+    info "Apple LaunchScreen.storyboardc already present — skipping seed: $dst"
+    return 0
+  fi
+
+  if [[ ! -d "$src" ]]; then
+    warn "Engine LaunchScreen.storyboardc not found at $src — skipping Apple compat seed"
+    return 0
+  fi
+
+  /bin/mkdir -p "$dst_dir"
+  /bin/cp -R "$src" "$dst"
+  good "Seeded $dst from engine fallback (commit it; prevents Mac from compiling an iOS .storyboard source)"
+}
+
 regenerate_project_files() {
   # Regenerate the consumer's Xcode workspace via UE's GenerateProjectFiles.sh.
   # UBT bakes resolved absolute paths from Build/{Platform}/Resources/ into
@@ -785,6 +832,7 @@ print_config() {
   echo "LONG_NAME:         $LONG_NAME" >&3
   echo "USE_XCODE_EXPORT:  $USE_XCODE_EXPORT" >&3
   echo "REGEN_PROJECT_FILES: $REGEN_PROJECT_FILES" >&3
+  echo "SEED_APPLE_LAUNCHSCREEN_COMPAT: $SEED_APPLE_LAUNCHSCREEN_COMPAT" >&3
   echo "CLEAN_BUILD_DIR:   $CLEAN_BUILD_DIR" >&3
   echo "DRY_RUN:           $DRY_RUN" >&3
   echo "PRINT_CONFIG:      $PRINT_CONFIG" >&3
@@ -1633,6 +1681,7 @@ LONG_NAME="${LONG_NAME:-}"
 
 USE_XCODE_EXPORT="${USE_XCODE_EXPORT:-1}"
 REGEN_PROJECT_FILES="${REGEN_PROJECT_FILES:-1}"
+SEED_APPLE_LAUNCHSCREEN_COMPAT="${SEED_APPLE_LAUNCHSCREEN_COMPAT:-1}"
 CLEAN_BUILD_DIR="${CLEAN_BUILD_DIR:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 PRINT_CONFIG="${PRINT_CONFIG:-0}"
@@ -1703,6 +1752,13 @@ Options (highest priority):
   --regen-project-files / --no-regen-project-files
                                      run GenerateProjectFiles.sh before xcodebuild
                                      (default: enabled when --xcode-export)
+  --seed-apple-launchscreen-compat / --no-seed-apple-launchscreen-compat
+                                     copy engine's LaunchScreen.storyboardc into
+                                     Build/Apple/Resources/Interface/ if absent,
+                                     so Mac's launch-screen path priority list
+                                     short-circuits before Xcode tries to compile
+                                     a consumer-supplied iOS .storyboard source
+                                     (default: enabled)
   --clean-build-dir / --no-clean-build-dir
   --dry-run / --no-dry-run
   --print-config / --no-print-config
@@ -1773,6 +1829,8 @@ while [[ $# -gt 0 ]]; do
     --no-xcode-export)      USE_XCODE_EXPORT="0"; shift ;;
     --regen-project-files)    REGEN_PROJECT_FILES="1"; shift ;;
     --no-regen-project-files) REGEN_PROJECT_FILES="0"; shift ;;
+    --seed-apple-launchscreen-compat)    SEED_APPLE_LAUNCHSCREEN_COMPAT="1"; shift ;;
+    --no-seed-apple-launchscreen-compat) SEED_APPLE_LAUNCHSCREEN_COMPAT="0"; shift ;;
     --clean-build-dir)      CLEAN_BUILD_DIR="1"; shift ;;
     --no-clean-build-dir)   CLEAN_BUILD_DIR="0"; shift ;;
     --dry-run)              DRY_RUN="1"; shift ;;
@@ -2207,6 +2265,7 @@ mkdir -p "$BUILD_DIR"
 
 ensure_game_ini_staging_entry
 write_version_to_content
+seed_apple_launchscreen_compat
 regenerate_project_files
 update_xcconfig_versions
 
