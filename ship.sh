@@ -1167,90 +1167,26 @@ _set_plist_bool() {
   good "Updated $plist → $key=$value"
 }
 
-override_cfbundle_version_in_app_plist() {
-  # Apply the resolved CFBundleVersion to the exported .app's Info.plist.
-  # Runs *after* xcodebuild -exportArchive but *before* the codesign step —
-  # the signature is computed over the modified Info.plist, so the bundle
-  # stays internally consistent.
-  #
-  # The value comes from _resolve_cfbundle_version_for_build() (Path B). When
-  # USE_UE_PACKAGE_VERSION_COUNTER=1 (Path A, opt-in), the resolver leaves
-  # CFBUNDLE_VERSION empty and this function is a no-op — UE's
-  # PackageVersionCounter mechanism supplies CFBundleVersion via the xcconfig.
-  [[ -n "${CFBUNDLE_VERSION:-}" ]] || return 0
-  [[ -n "${APP_PATH:-}" ]] || die "override_cfbundle_version_in_app_plist called before APP_PATH was resolved"
-
-  local plist="$APP_PATH/Contents/Info.plist"
-  [[ -f "$plist" ]] || die "Cannot override CFBundleVersion: Info.plist missing at $plist"
-
-  local current
-  current="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$plist" 2>/dev/null || true)"
-  if [[ "$current" == "$CFBUNDLE_VERSION" ]]; then
-    info "CFBundleVersion already $CFBUNDLE_VERSION in $plist — no override needed"
-    return 0
-  fi
-  if [[ -n "$current" ]]; then
-    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $CFBUNDLE_VERSION" "$plist"
-  else
-    /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $CFBUNDLE_VERSION" "$plist"
-  fi
-  good "Overrode CFBundleVersion in $plist → $CFBUNDLE_VERSION (was: ${current:-<unset>})"
-}
-
-override_cfbundle_version_in_xcarchive_metadata() {
-  # Stamp the resolved CFBundleVersion into <ARCHIVE_PATH>/Info.plist's
-  # :ApplicationProperties:CFBundleVersion so Xcode Organizer's Archives view
-  # shows the auto-bumped value (e.g. "1.0.2 (1)") instead of UE's pre-export
-  # internal value (e.g. "1.0.2 (0.1)").
-  #
-  # This is cosmetic — the .xcarchive's embedded .app is not what ships;
-  # xcodebuild -exportArchive copies it to EXPORT_DIR where our existing
-  # post-export Info.plist override + per-component codesign produces the
-  # final signed .app. We deliberately do NOT modify the embedded .app's
-  # Info.plist here, which would invalidate its signature inside the
-  # archive. The archive's top-level metadata is sovereign for the
-  # Organizer display.
-  #
-  # Runs between `xcodebuild ... archive` and `xcodebuild -exportArchive`.
-  # No-op on Path A (CFBUNDLE_VERSION cleared by the resolver).
-  [[ -n "${CFBUNDLE_VERSION:-}" ]] || return 0
-  [[ -n "${ARCHIVE_PATH:-}" ]] || die "override_cfbundle_version_in_xcarchive_metadata called before ARCHIVE_PATH was resolved"
-
-  local archive_plist="$ARCHIVE_PATH/Info.plist"
-  if [[ ! -f "$archive_plist" ]]; then
-    warn "Archive metadata Info.plist missing: $archive_plist — skipping Organizer-display stamp"
-    return 0
-  fi
-
-  local current
-  current="$(/usr/libexec/PlistBuddy -c "Print :ApplicationProperties:CFBundleVersion" "$archive_plist" 2>/dev/null || true)"
-  if [[ "$current" == "$CFBUNDLE_VERSION" ]]; then
-    info "Archive metadata CFBundleVersion already $CFBUNDLE_VERSION — no override needed"
-    return 0
-  fi
-  if [[ -n "$current" ]]; then
-    /usr/libexec/PlistBuddy -c "Set :ApplicationProperties:CFBundleVersion $CFBUNDLE_VERSION" "$archive_plist"
-  else
-    /usr/libexec/PlistBuddy -c "Add :ApplicationProperties:CFBundleVersion string $CFBUNDLE_VERSION" "$archive_plist"
-  fi
-  good "Stamped $archive_plist → ApplicationProperties:CFBundleVersion=$CFBUNDLE_VERSION (was: ${current:-<unset>}); Xcode Organizer will now show this version"
-}
-
 _resolve_cfbundle_version_for_build() {
   # Decide what value CFBundleVersion should be for this build, based on:
-  #   - USE_UE_PACKAGE_VERSION_COUNTER=1 → Path A; clear CFBUNDLE_VERSION,
-  #     no Info.plist override, no .env persist.
+  #   - USE_UE_PACKAGE_VERSION_COUNTER=1 → Path A; clear CFBUNDLE_VERSION so
+  #     xcodebuild's build-setting override is empty and UE's xcconfig
+  #     "CURRENT_PROJECT_VERSION = $(UE_MAC_BUILD_VERSION)" wins. No persist.
   #   - --set-cfbundle-version N (CLI_SET_CFBUNDLE_VERSION=1) → use N as-is,
   #     persist to .env on success ("new baseline" semantics).
   #   - Default Path B → auto pre-increment the integer in CFBUNDLE_VERSION
   #     (treating empty/missing as 0), persist on success. With .env at 0,
   #     the first build ships CFBundleVersion=1.
+  # The resolved value is passed to xcodebuild as a CURRENT_PROJECT_VERSION=...
+  # build-setting override, which Apple-documented behavior says takes
+  # precedence over xcconfig. Xcode bakes the value into both the .app's
+  # Info.plist and the .xcarchive's metadata at archive time.
   # Sets CFBUNDLE_VERSION (the ship value) and _CFBV_PERSIST (1 if we should
   # write the value back to .env on successful build).
   _CFBV_PERSIST=0
 
   if [[ "${USE_UE_PACKAGE_VERSION_COUNTER:-0}" == "1" ]]; then
-    info "Path A enabled (USE_UE_PACKAGE_VERSION_COUNTER=1) — CFBundleVersion comes from UE's PackageVersionCounter; skipping Info.plist override"
+    info "Path A enabled (USE_UE_PACKAGE_VERSION_COUNTER=1) — CFBundleVersion comes from UE's PackageVersionCounter; skipping build-setting override"
     CFBUNDLE_VERSION=""
     return 0
   fi
@@ -1675,46 +1611,50 @@ first_appiconset_name_in_catalog() {
   echo "${d%.appiconset}"
 }
 
-seed_macos_icon_assets_for_workspace() {
-  # Make workspace projects consume a repo-local, source-controlled macOS asset catalog.
-  # This avoids depending on UE engine-global Assets.xcassets for app icons.
-  [[ "$USE_XCODE_EXPORT" == "1" ]] || return 0
-  [[ "${MACOS_ICON_SYNC:-0}" == "1" ]] || return 0
+_stage_platform_icon_assets() {
+  # Stage a source-controlled .xcassets catalog into UE's canonical
+  # Build/<Platform>/Resources/Assets.xcassets path, where UE auto-discovers
+  # it at GenerateProjectFiles time (XcodeProject.cs:1731). No pbxproj
+  # patching, no Intermediate/ shenanigans — this is the platform-shared
+  # canonical location.
+  #
+  # Args:
+  #   $1 = label for log lines (e.g. "macOS", "iOS")
+  #   $2 = source catalog absolute path
+  #   $3 = platform subdir under Build/ ("Mac", "IOS", etc.)
+  #   $4 = explicit appiconset name override, or empty for auto-detect
+  local label="$1" src="$2" platform="$3" appicon_name_override="$4"
+  local dst="$REPO_ROOT/Build/$platform/Resources/Assets.xcassets"
 
-  [[ -f "$WORKSPACE/contents.xcworkspacedata" ]] || die "Workspace metadata missing: $WORKSPACE/contents.xcworkspacedata"
-  [[ -d "$MACOS_ICON_XCASSETS" ]] || die "Configured macOS icon catalog not found: $MACOS_ICON_XCASSETS"
+  /bin/mkdir -p "$(/usr/bin/dirname "$dst")"
+  /bin/rm -rf "$dst"
+  /bin/mkdir -p "$dst"
+  /usr/bin/rsync -a --delete "$src"/ "$dst"/
 
-  local stage_root stage_catalog
-  stage_root="$REPO_ROOT/Intermediate/SourceControlled"
-  stage_catalog="$stage_root/Assets.xcassets"
-
-  /bin/rm -rf "$stage_catalog"
-  /bin/mkdir -p "$stage_catalog"
-  /usr/bin/rsync -a --delete "$MACOS_ICON_XCASSETS"/ "$stage_catalog"/
-
-  # Xcode expects "AppIcon" by default. If the source-controlled catalog uses a custom
-  # appiconset name, mirror it to AppIcon so we do not require build setting edits.
-  local source_appicon_name
-  source_appicon_name="${MACOS_APPICON_SET_NAME:-}"
+  # Xcode expects "AppIcon" by default (set via ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon
+  # in UE's xcconfig at XcodeProject.cs:2157). If the source catalog uses a
+  # different appiconset name, mirror it to AppIcon so we don't have to edit
+  # the build setting.
+  local source_appicon_name="$appicon_name_override"
   if is_placeholder "$source_appicon_name"; then
-    if [[ -d "$stage_catalog/AppIcon.appiconset" ]]; then
+    if [[ -d "$dst/AppIcon.appiconset" ]]; then
       source_appicon_name="AppIcon"
     else
-      source_appicon_name="$(first_appiconset_name_in_catalog "$stage_catalog")"
+      source_appicon_name="$(first_appiconset_name_in_catalog "$dst")"
     fi
   fi
 
-  if is_placeholder "$source_appicon_name" || [[ ! -d "$stage_catalog/$source_appicon_name.appiconset" ]]; then
-    die "No usable *.appiconset found in $MACOS_ICON_XCASSETS (set MACOS_APPICON_SET_NAME if needed)."
+  if is_placeholder "$source_appicon_name" || [[ ! -d "$dst/$source_appicon_name.appiconset" ]]; then
+    die "No usable *.appiconset found in $src ($label) — set the appiconset-name override if needed."
   fi
 
   if [[ "$source_appicon_name" != "AppIcon" ]]; then
-    /bin/rm -rf "$stage_catalog/AppIcon.appiconset"
-    /bin/cp -R "$stage_catalog/$source_appicon_name.appiconset" "$stage_catalog/AppIcon.appiconset"
+    /bin/rm -rf "$dst/AppIcon.appiconset"
+    /bin/cp -R "$dst/$source_appicon_name.appiconset" "$dst/AppIcon.appiconset"
   fi
 
-  if [[ ! -f "$stage_catalog/Contents.json" ]]; then
-    /bin/cat > "$stage_catalog/Contents.json" <<'JSON'
+  if [[ ! -f "$dst/Contents.json" ]]; then
+    /bin/cat > "$dst/Contents.json" <<'JSON'
 {
   "info" : {
     "author" : "xcode",
@@ -1724,39 +1664,27 @@ seed_macos_icon_assets_for_workspace() {
 JSON
   fi
 
-  local stage_catalog_abs escaped_path workspace_xml rel_proj pbxproj changed_count
-  stage_catalog_abs="$(abspath_existing "$stage_catalog")"
-  [[ -n "$stage_catalog_abs" ]] || die "Unable to resolve staged asset catalog path: $stage_catalog"
-  escaped_path="$(printf '%s\n' "$stage_catalog_abs" | /usr/bin/sed 's/[&#\\]/\\&/g')"
-  workspace_xml="$WORKSPACE/contents.xcworkspacedata"
-  changed_count=0
+  good "Seeded $label icon catalog: $src → $dst (UE auto-discovers via Build/$platform/Resources/Assets.xcassets)"
+}
 
-  while IFS= read -r rel_proj; do
-    [[ -n "$rel_proj" ]] || continue
-    pbxproj="$REPO_ROOT/$rel_proj/project.pbxproj"
-    if [[ ! -f "$pbxproj" ]]; then
-      warn "Workspace project missing (skipping icon path patch): $pbxproj"
-      continue
-    fi
-    if ! /usr/bin/grep -q 'folder.assetcatalog; name = "Assets.xcassets";' "$pbxproj"; then
-      continue
-    fi
-    /usr/bin/sed -i '' \
-      "/folder\\.assetcatalog; name = \"Assets\\.xcassets\"/ s#path = \"[^\"]*\";#path = \"$escaped_path\";#" \
-      "$pbxproj"
-    changed_count=$((changed_count + 1))
-  done < <(
-    /usr/bin/grep -Eo 'location = "group:[^"]+\.xcodeproj"' "$workspace_xml" \
-      | /usr/bin/sed -E 's/^location = "group:([^"]+)\.xcodeproj"$/\1.xcodeproj/' \
-      | /usr/bin/sort -u
-  )
+seed_macos_icon_assets() {
+  # Stage MACOS_ICON_XCASSETS into Build/Mac/Resources/Assets.xcassets so UE
+  # picks it up at GenerateProjectFiles time. Must run BEFORE regenerate_project_files.
+  [[ "$USE_XCODE_EXPORT" == "1" ]] || return 0
+  [[ "${MACOS_ICON_SYNC:-0}" == "1" ]] || return 0
+  [[ -d "$MACOS_ICON_XCASSETS" ]] || die "Configured macOS icon catalog not found: $MACOS_ICON_XCASSETS"
 
-  if [[ "$changed_count" -eq 0 ]]; then
-    warn "No workspace project references to Assets.xcassets were patched for icon seeding."
-  else
-    info "Seeded macOS icon catalog from: $MACOS_ICON_XCASSETS"
-    info "Workspace projects patched to use: $stage_catalog_abs"
-  fi
+  _stage_platform_icon_assets "macOS" "$MACOS_ICON_XCASSETS" "Mac" "${MACOS_APPICON_SET_NAME:-}"
+}
+
+seed_ios_icon_assets() {
+  # Stage IOS_ICON_XCASSETS into Build/IOS/Resources/Assets.xcassets so UE
+  # picks it up at GenerateProjectFiles time. Must run BEFORE regenerate_project_files.
+  [[ "${ENABLE_IOS:-0}" == "1" ]] || return 0
+  [[ "${IOS_ICON_SYNC:-0}" == "1" ]] || return 0
+  [[ -d "${IOS_ICON_XCASSETS:-}" ]] || die "Configured iOS icon catalog not found: ${IOS_ICON_XCASSETS:-<unset>}"
+
+  _stage_platform_icon_assets "iOS" "$IOS_ICON_XCASSETS" "IOS" "${IOS_APPICON_SET_NAME:-}"
 }
 
 find_first_app_under() {
@@ -2659,6 +2587,8 @@ seed_apple_launchscreen_compat
 seed_mac_info_template_plist
 seed_mac_update_version_after_build_script
 seed_mac_package_version_counter
+seed_macos_icon_assets
+seed_ios_icon_assets
 ensure_app_category_in_engine_ini
 ensure_marketing_version_in_engine_ini
 regenerate_project_files
@@ -2677,7 +2607,15 @@ info "Building game (UAT BuildCookRun)"
 echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3
 
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
-  seed_macos_icon_assets_for_workspace
+  # CFBundleVersion build-setting override. Apple-documented: command-line
+  # build settings take precedence over xcconfig, so passing CURRENT_PROJECT_VERSION
+  # here shadows UE's xcconfig "CURRENT_PROJECT_VERSION = $(UE_MAC_BUILD_VERSION)".
+  # Xcode bakes our value into the .app's Info.plist at archive time AND into
+  # the .xcarchive's top-level Info.plist (what Organizer reads), all in one
+  # pass — no PlistBuddy fixups needed afterwards. No-op on Path A (resolver
+  # leaves CFBUNDLE_VERSION empty when USE_UE_PACKAGE_VERSION_COUNTER=1).
+  _xcb_settings=()
+  [[ -n "${CFBUNDLE_VERSION:-}" ]] && _xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
 
   echo "== Archive (NO CLEAN) with Automatic signing ==" >&3
   xcodebuild \
@@ -2689,11 +2627,8 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     CODE_SIGN_STYLE=Automatic \
     DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
     ENABLE_HARDENED_RUNTIME=YES \
-    OTHER_CODE_SIGN_FLAGS="--timestamp"
-
-  # Stamp our resolved CFBundleVersion into the archive metadata so Xcode
-  # Organizer shows the auto-bumped value, not UE's internal pre-export value.
-  override_cfbundle_version_in_xcarchive_metadata
+    OTHER_CODE_SIGN_FLAGS="--timestamp" \
+    "${_xcb_settings[@]}"
 
   echo "== Export signed app for Developer ID ==" >&3
   # ExportOptions.plist controls how Xcode exports the archive.
@@ -2811,10 +2746,6 @@ PLIST
 fi
 
 echo "Using signing identity: $SIGN_IDENTITY" >&3
-
-# CFBundleVersion override (only when CFBUNDLE_VERSION is set). Must run
-# before any codesign step, since signing hashes Info.plist content.
-override_cfbundle_version_in_app_plist
 
 # Apple deprecated --deep for distribution signing. The correct approach is to
 # sign all nested dylibs and frameworks individually first, then sign the outer
