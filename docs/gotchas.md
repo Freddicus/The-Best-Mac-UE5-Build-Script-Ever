@@ -32,6 +32,35 @@ This trips people up constantly. An Xcode scheme that isn't marked Shared only e
 
 If your archive step fails with a scheme-not-found error but you can see the scheme in Xcode, this is almost certainly the problem.
 
+## `Build/{Platform}/` is for committed inputs, not output
+
+The folder name is misleading — `Build/` looks like a build-output directory, but in modern Unreal it's a **source-controlled inputs** folder. App icons, custom launch storyboards, `Info.plist` fragments, entitlements, and `PakBlacklist*.txt` all live there and are committed to git. UBT writes a few intermediates of its own here too (`UBTGenerated/`, `FileOpenOrder/`, `*.PackageVersionCounter`), and those stay gitignored.
+
+Build *output* belongs under `Saved/` — `Saved/Cooked/{Platform}/`, `Saved/StagedBuilds/{Platform}/`, `Saved/Packages/{Platform}/`, `Saved/Logs/`. `Saved/` is gitignored by default and is the documented dumping ground for derived artifacts.
+
+If you find a packaged `.app` sitting at `Build/Mac/<App>-Mac-Shipping.app/`, something is misconfigured — either a UAT `-archivedirectory` flag pointing the wrong way, or a downstream copy step. This script writes outputs under `Saved/Packages/Mac/` by default; see [output.md](output.md) for the path layout.
+
+## New files under `Build/{Platform}/Resources/` need a project-file regen to be picked up
+
+UBT bakes resolved absolute paths from `Build/{Platform}/Resources/` into `Intermediate/ProjectFilesMac/<Project> (Mac).xcodeproj/project.pbxproj` at *project-file-generation time*. The path priority list in `XcodeProject.cs::ProcessAssets` is walked **once** during `GenerateProjectFiles.sh`; the resolved paths are then frozen into the pbxproj.
+
+So if you drop a custom `LaunchScreen.storyboard` into `Build/IOS/Resources/Interface/`, or a `Build/Mac/Resources/Assets.xcassets/`, you have to regenerate project files before the next build sees it. Editing the *contents* of an already-referenced file works without regen; adding or removing a sibling does not.
+
+This script runs `GenerateProjectFiles.sh` automatically before every Xcode build (controlled by `REGEN_PROJECT_FILES`, default on). The symptom you avoid by leaving it on is a stale absolute path inside `project.pbxproj` — extremely hard to debug after the fact, because the file you added is right there on disk and you can see Xcode loading the project, yet the resource never reaches the bundle.
+
+For the launch storyboard specifically, the engine's path priority list (modern Xcode mode) is:
+
+```text
+1.  $(Project)/Build/IOS/Resources/Interface/LaunchScreen.storyboardc
+2.  $(Project)/Build/IOS/Resources/Interface/LaunchScreen.storyboard       ← what consumer projects own
+3.  $(Project)/Build/Apple/Resources/Interface/LaunchScreen.storyboardc
+4.  $(Project)/Build/Apple/Resources/Interface/LaunchScreen.storyboard
+5.  $(Engine)/Build/IOS/Resources/Interface/LaunchScreen.storyboardc       ← engine fallback
+... (engine fallbacks continue)
+```
+
+`$(Project)` resolves to the `.uproject`'s parent directory; first hit wins. This is why dropping a file into `Build/IOS/Resources/Interface/` is the clean override path — and why the regen step matters for picking it up.
+
 ## The xcconfig gets regenerated
 
 `GenerateProjectFiles.sh` overwrites the xcconfig at `Intermediate/ProjectFiles/XcconfigsMac/<project>.xcconfig`. Any manual edits you make there won't survive a project regeneration.

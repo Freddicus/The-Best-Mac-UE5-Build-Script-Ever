@@ -44,8 +44,8 @@ The script locates your project automatically when run from the project root. Se
 |---|---|
 | `SHORT_NAME` | Short identifier used for archive and export folder names. Defaults to the project name. |
 | `LONG_NAME` | Full name used for ZIP and DMG filenames. Defaults to `SHORT_NAME`. |
-| `BUILD_DIR_REL` | Output directory relative to `REPO_ROOT`. Default: `Build`. |
-| `LOG_DIR_REL` | Log directory relative to `REPO_ROOT`. Default: `Logs`. |
+| `BUILD_DIR_REL` | Output directory relative to `REPO_ROOT`. Default: `Saved/Packages/Mac`. UAT BuildCookRun's `-archivedirectory` is derived as the parent so UAT's `/<Platform>/` suffix lands inside this dir. See [output.md](output.md#build-vs-saved--what-goes-where) for the rationale. |
+| `LOG_DIR_REL` | Log directory relative to `REPO_ROOT`. Default: `Saved/Logs`. |
 
 ### Behavior
 
@@ -54,7 +54,8 @@ The script locates your project automatically when run from the project root. Se
 | `BUILD_TYPE` | `shipping` or `development` (also accepts `s`/`d`). Prompted interactively if not set. |
 | `NOTARIZE` | `yes` or `no`. Prompted interactively if not set. |
 | `USE_XCODE_EXPORT` | `1` = use Xcode archive/export (default). `0` = skip Xcode steps. |
-| `CLEAN_BUILD_DIR` | `1` = wipe `Build/` before building. Default: `0`. |
+| `REGEN_PROJECT_FILES` | `1` = run `GenerateProjectFiles.sh` once per ship invocation before the Xcode build (default). `0` = skip. Only meaningful when `USE_XCODE_EXPORT=1`. See the [workspace section](#xcode-workspace) for why this matters. |
+| `CLEAN_BUILD_DIR` | `1` = wipe `BUILD_DIR_REL` before building. Default: `0`. |
 | `DRY_RUN` | `1` = print the plan and exit without building. |
 | `PRINT_CONFIG` | `1` = print resolved configuration and exit without building. |
 
@@ -71,6 +72,8 @@ Run `./ship.sh --help` for the full list. Common flags:
 ./ship.sh --game-mode          # enable Game Mode in Info.plist
 ./ship.sh --no-game-mode       # disable Game Mode in Info.plist
 ./ship.sh --app-category public.app-category.games
+./ship.sh --build-dir Output/Mac           # override BUILD_DIR_REL
+./ship.sh --no-regen-project-files         # skip the GenerateProjectFiles step
 ```
 
 CLI flags override `.env`. Both forms are equivalent — you can mix and match.
@@ -84,6 +87,19 @@ The script does not require you to set up or maintain the Xcode workspace manual
 - If multiple workspaces are found, you're prompted to choose (interactive runs only).
 - If no workspace is found, the script offers to run `GenerateProjectFiles.sh` to create one.
 - In non-interactive contexts (CI), the script fails with a clear error if it can't resolve the workspace uniquely — set `XCODE_WORKSPACE` explicitly.
+
+### Project files are regenerated every ship
+
+By default the script runs `GenerateProjectFiles.sh` **before every Xcode build**, regardless of whether the workspace already exists. This is not just for first-time setup.
+
+UBT bakes resolved absolute paths from `Build/{Platform}/Resources/` into `Intermediate/ProjectFilesMac/<Project> (Mac).xcodeproj/project.pbxproj` at *project-file-generation time*, not at xcodebuild time. The path priority list in `Engine/Source/Programs/UnrealBuildTool/ProjectFiles/Xcode/XcodeProject.cs::ProcessAssets` (modern Xcode mode) is walked once during regeneration; the resolved absolute paths are then frozen into the pbxproj.
+
+Implications:
+- **Adding a new file** under `Build/{Platform}/Resources/` (e.g. dropping in a `LaunchScreen.storyboard`) does **not** flow into the build until project files are regenerated — even though the file is on disk, the pbxproj's resource list still points where it pointed last time.
+- **Editing the contents** of an already-referenced file *does* flow through (Xcode reads it at build time).
+- Changes to `[/Script/MacTargetPlatform.XcodeProjectSettings] ExtraFolderToCopyToApp` and similar config-driven resource hooks also require a regen.
+
+The regen runs early in the build pipeline, before `update_xcconfig_versions` (which stamps the freshly-generated xcconfig). It's cheap (~few seconds) and idempotent. Disable it with `REGEN_PROJECT_FILES=0` or `--no-regen-project-files` if you have a specific reason — the most common is if you need a `--no-xcode-export` UAT-only build, where the regen is also skipped automatically.
 
 To generate or regenerate a workspace manually:
 

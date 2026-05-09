@@ -6,6 +6,34 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-08] — Move outputs from `Build/` to `Saved/`; always regenerate project files
+
+### Changed
+- **`BUILD_DIR_REL` default: `Build` → `Saved/Packages/Mac`.** Build artifacts (xcarchive, export dir, ZIP, DMG, UAT-archived `.app`) now land under UE's documented `Saved/` tree instead of the `Build/` folder. `Build/{Platform}/` is reserved for committed source-controlled inputs (app icons, custom launch storyboard, `Info.plist` fragments, entitlements, `PakBlacklist*.txt`) — UBT writes a small set of intermediates there but ship.sh no longer does. See [docs/output.md](docs/output.md#build-vs-saved--what-goes-where) for the rationale.
+- **`LOG_DIR_REL` default: `Logs` → `Saved/Logs`.** Matches UE convention.
+- **UAT BuildCookRun's `-archivedirectory` is now derived as `dirname BUILD_DIR`.** UAT appends `/<TargetPlatform>/` to whatever path is given, so pointing it at the parent of `BUILD_DIR` lands UAT's output at `Saved/Packages/Mac/<App>-Mac-Shipping.app/` — the same directory as the script-side artifacts. Previously, with `BUILD_DIR_REL=Build`, UAT was writing into `Build/Mac/` (or `Build/IOS/` for cross-platform consumers), violating the inputs/outputs split.
+- **Build pipeline order:** `GenerateProjectFiles` and `update_xcconfig_versions` now run *before* UAT BuildCookRun, so the regenerated and stamped xcconfig is in place by the time UAT executes. The previous order ran the xcconfig stamp before regen would have happened (regen didn't run unconditionally then).
+
+### Added
+- **`regenerate_project_files()`**: runs `Engine/Build/BatchFiles/Mac/GenerateProjectFiles.sh -project="$UPROJECT_PATH" -game` once per ship invocation, before xcconfig stamping and the Xcode build. Idempotent and cheap (~few seconds). Closes a class of "I added a file under `Build/{Platform}/Resources/` but the build doesn't see it" bugs — UBT bakes resolved absolute paths into `Intermediate/ProjectFilesMac/<Project> (Mac).xcodeproj/project.pbxproj` at *project-file-generation time*, so adding a sibling file (e.g. a custom `LaunchScreen.storyboard`) doesn't flow into the build until project files are regenerated.
+- **`REGEN_PROJECT_FILES`** config variable (default `1` when `USE_XCODE_EXPORT=1`) and **`--regen-project-files` / `--no-regen-project-files`** CLI flags. Escape hatch for the rare case the regen is unwanted.
+- **`--build-dir PATH`** CLI flag for overriding `BUILD_DIR_REL` from the command line.
+- **`UAT_ARCHIVE_DIR`** is shown in `--print-config` output (derived from `BUILD_DIR`).
+- **Dry-run preview** now lists `GenerateProjectFiles` as an explicit step when applicable.
+- **Docs:**
+  - [docs/output.md](docs/output.md): new "Build/ vs Saved/ — what goes where" section; updated artifact paths table; new "How `BUILD_DIR_REL` and `UAT_ARCHIVE_DIR` relate" section explaining the parent-dir derivation and UAT flag map.
+  - [docs/configuration.md](docs/configuration.md): `BUILD_DIR_REL` / `LOG_DIR_REL` default updates; new `REGEN_PROJECT_FILES` row; expanded "Project files are regenerated every ship" explanation under Xcode workspace; CLI examples for `--build-dir` and `--no-regen-project-files`.
+  - [docs/gotchas.md](docs/gotchas.md): two new gotchas — "`Build/{Platform}/` is for committed inputs, not output" and "New files under `Build/{Platform}/Resources/` need a project-file regen to be picked up" (with the `XcodeProject.cs::ProcessAssets` path priority list).
+  - [docs/troubleshooting.md](docs/troubleshooting.md): two new symptom-driven entries — "I added a file to `Build/{Platform}/Resources/` but the build still uses the engine default" and "My packaged `.app` ended up in `Build/{Platform}/` instead of `Saved/Packages/`".
+  - [README.md](README.md): updated pipeline step list (added GenerateProjectFiles, reordered xcconfig stamp before UAT, moved icon seeding) and artifact-path summary.
+
+### Migration
+- If your `.env` sets `BUILD_DIR_REL=Build` (or `LOG_DIR_REL=Logs`), remove those overrides to pick up the new defaults — or set them explicitly to `Saved/Packages/Mac` / `Saved/Logs`.
+- If you intentionally want output to stay in `Build/`, set `BUILD_DIR_REL=Build/Mac` (note the `/Mac` suffix — the script's app-discovery expects `BUILD_DIR` to be the directory UAT writes its `.app` into, which means it must end with `/<Platform>`).
+- If you have CI that uploads artifacts from `Build/`, update the path to `Saved/Packages/Mac/`.
+
+---
+
 ## [2026-04-14] — Restructure docs: slim README + supplemental docs/ (PR #20)
 
 ### Added

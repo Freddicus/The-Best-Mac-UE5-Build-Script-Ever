@@ -367,6 +367,29 @@ maybe_generate_workspace_interactively() {
   return 0
 }
 
+regenerate_project_files() {
+  # Regenerate the consumer's Xcode workspace via UE's GenerateProjectFiles.sh.
+  # UBT bakes resolved absolute paths from Build/{Platform}/Resources/ into
+  # Intermediate/ProjectFilesMac/<Project> (Mac).xcodeproj/project.pbxproj at
+  # project-file-generation time, NOT at xcodebuild time. Adding/removing a
+  # sibling file there (e.g. a custom LaunchScreen.storyboard) does not flow
+  # into the build until project files are regenerated. Cheap and idempotent.
+  [[ "$USE_XCODE_EXPORT" == "1" ]] || return 0
+  [[ "${REGEN_PROJECT_FILES:-1}" == "1" ]] || { info "Skipping GenerateProjectFiles (REGEN_PROJECT_FILES=0)"; return 0; }
+
+  local gen_script
+  gen_script="$UE_ROOT/Engine/Build/BatchFiles/Mac/GenerateProjectFiles.sh"
+
+  if [[ ! -x "$gen_script" ]]; then
+    warn "GenerateProjectFiles.sh not executable, skipping regen: $gen_script"
+    return 0
+  fi
+
+  info "Regenerating Xcode project files (GenerateProjectFiles.sh)"
+  "$gen_script" -project="$UPROJECT_PATH" -game
+  good "Project files regenerated."
+}
+
 choose_from_list_interactively() {
   # Prompt user to choose a numbered item from an array.
   # Args: prompt, default_index (1-based), array...
@@ -756,10 +779,12 @@ print_config() {
   echo "UAT (RunUAT.sh):   $SCRIPTS/RunUAT.sh" >&3
   echo "UE_EDITOR:         $UE_EDITOR" >&3
   echo "BUILD_DIR:         $BUILD_DIR" >&3
+  echo "UAT_ARCHIVE_DIR:   ${UAT_ARCHIVE_DIR:-<derived from BUILD_DIR>}" >&3
   echo "LOG_DIR:           $LOG_DIR" >&3
   echo "SHORT_NAME:        $SHORT_NAME" >&3
   echo "LONG_NAME:         $LONG_NAME" >&3
   echo "USE_XCODE_EXPORT:  $USE_XCODE_EXPORT" >&3
+  echo "REGEN_PROJECT_FILES: $REGEN_PROJECT_FILES" >&3
   echo "CLEAN_BUILD_DIR:   $CLEAN_BUILD_DIR" >&3
   echo "DRY_RUN:           $DRY_RUN" >&3
   echo "PRINT_CONFIG:      $PRINT_CONFIG" >&3
@@ -1595,13 +1620,19 @@ REPO_ROOT="${REPO_ROOT:-}"
 UPROJECT_NAME="${UPROJECT_NAME:-}"
 XCODE_WORKSPACE="${XCODE_WORKSPACE:-}"
 XCODE_SCHEME="${XCODE_SCHEME:-}"
-BUILD_DIR_REL="${BUILD_DIR_REL:-Build}"
-LOG_DIR_REL="${LOG_DIR_REL:-Logs}"
+# BUILD_DIR holds script-side outputs: .xcarchive, export dir, ZIP, DMG.
+# Default sits under Saved/ (UE's documented dumping ground for derived artifacts);
+# Build/{Platform}/ is reserved for committed source-controlled inputs.
+# UAT BuildCookRun's -archivedirectory is derived as the parent so that UAT's
+# automatic /<Platform>/ suffix lands inside BUILD_DIR.
+BUILD_DIR_REL="${BUILD_DIR_REL:-Saved/Packages/Mac}"
+LOG_DIR_REL="${LOG_DIR_REL:-Saved/Logs}"
 
 SHORT_NAME="${SHORT_NAME:-}"
 LONG_NAME="${LONG_NAME:-}"
 
 USE_XCODE_EXPORT="${USE_XCODE_EXPORT:-1}"
+REGEN_PROJECT_FILES="${REGEN_PROJECT_FILES:-1}"
 CLEAN_BUILD_DIR="${CLEAN_BUILD_DIR:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 PRINT_CONFIG="${PRINT_CONFIG:-0}"
@@ -1656,6 +1687,10 @@ Options (highest priority):
   --ue-root PATH
   --xcode-workspace FILE_OR_PATH     (e.g. "MyGame (Mac).xcworkspace")
   --xcode-scheme NAME
+  --build-dir PATH                   (script-side outputs; default: Saved/Packages/Mac.
+                                      UAT BuildCookRun's -archivedirectory is
+                                      derived as the parent so its /<Platform>/
+                                      output lands inside this dir.)
   --development-team TEAMID
   --sign-identity "Developer ID Application: ... (TEAMID)"
   --export-plist PATH
@@ -1665,6 +1700,9 @@ Options (highest priority):
   --long-name NAME
 
   --xcode-export / --no-xcode-export
+  --regen-project-files / --no-regen-project-files
+                                     run GenerateProjectFiles.sh before xcodebuild
+                                     (default: enabled when --xcode-export)
   --clean-build-dir / --no-clean-build-dir
   --dry-run / --no-dry-run
   --print-config / --no-print-config
@@ -1721,6 +1759,7 @@ while [[ $# -gt 0 ]]; do
     --ue-root)              UE_ROOT="$2"; shift 2 ;;
     --xcode-workspace)      XCODE_WORKSPACE="$2"; shift 2 ;;
     --xcode-scheme)         XCODE_SCHEME="$2"; shift 2 ;;
+    --build-dir)            BUILD_DIR_REL="$2"; shift 2 ;;
 
     --development-team)     DEVELOPMENT_TEAM="$2"; shift 2 ;;
     --sign-identity)        SIGN_IDENTITY="$2"; shift 2 ;;
@@ -1732,6 +1771,8 @@ while [[ $# -gt 0 ]]; do
 
     --xcode-export)         USE_XCODE_EXPORT="1"; shift ;;
     --no-xcode-export)      USE_XCODE_EXPORT="0"; shift ;;
+    --regen-project-files)    REGEN_PROJECT_FILES="1"; shift ;;
+    --no-regen-project-files) REGEN_PROJECT_FILES="0"; shift ;;
     --clean-build-dir)      CLEAN_BUILD_DIR="1"; shift ;;
     --no-clean-build-dir)   CLEAN_BUILD_DIR="0"; shift ;;
     --dry-run)              DRY_RUN="1"; shift ;;
@@ -1874,6 +1915,12 @@ UE_EDITOR="$UE_ROOT/$UE_EDITOR_SUBPATH"
 # Artifact roots
 BUILD_DIR="$REPO_ROOT/$BUILD_DIR_REL"
 LOG_DIR="$REPO_ROOT/$LOG_DIR_REL"
+
+# UAT BuildCookRun's -archivedirectory has /<TargetPlatform>/ appended by UAT,
+# so we point it at the parent of BUILD_DIR. With the default
+# (Saved/Packages/Mac), UAT writes to Saved/Packages/Mac/<App>-Mac-Shipping.app/
+# — the same directory that holds the rest of the script's artifacts.
+UAT_ARCHIVE_DIR="$(/usr/bin/dirname "$BUILD_DIR")"
 
 # Normalize a few important paths to absolute paths when possible.
 # (This helps when the user passes relative paths via env/CLI.)
@@ -2024,7 +2071,7 @@ if [[ "$PRINT_CONFIG" == "1" ]]; then
   exit 0
 fi
 
-# Logging (keep logs OUTSIDE Build/, since Build/ is often wiped each run)
+# Logging — defaults to Saved/Logs (UE's conventional location for derived artifacts).
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/build_$(date +%Y-%m-%d_%H-%M-%S).log"
 exec >>"$LOG_FILE" 2>&1
@@ -2117,10 +2164,14 @@ if [[ "$DRY_RUN" == "1" ]]; then
   print_config
   echo "== DRY RUN ==" >&3
   if [[ "$VERSION_MODE" != "NONE" ]]; then
-    steps="stamp Content/$VERSION_CONTENT_DIR/version.txt → UAT BuildCookRun"
+    steps="stamp Content/$VERSION_CONTENT_DIR/version.txt"
   else
-    steps="UAT BuildCookRun"
+    steps=""
   fi
+  if [[ "$USE_XCODE_EXPORT" == "1" && "$REGEN_PROJECT_FILES" == "1" ]]; then
+    if [[ -n "$steps" ]]; then steps="$steps → GenerateProjectFiles"; else steps="GenerateProjectFiles"; fi
+  fi
+  if [[ -n "$steps" ]]; then steps="$steps → UAT BuildCookRun"; else steps="UAT BuildCookRun"; fi
   if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     steps="$steps → Xcode archive/export"
   else
@@ -2156,6 +2207,7 @@ mkdir -p "$BUILD_DIR"
 
 ensure_game_ini_staging_entry
 write_version_to_content
+regenerate_project_files
 update_xcconfig_versions
 
 info "Building game (UAT BuildCookRun)"
@@ -2166,7 +2218,7 @@ info "Building game (UAT BuildCookRun)"
   -noP4 -build -cook -pak -iostore \
   -targetplatform=Mac -clientconfig="$UE_CLIENT_CONFIG" \
   -stage -package \
-  -archive -archivedirectory="$BUILD_DIR" \
+  -archive -archivedirectory="$UAT_ARCHIVE_DIR" \
   -utf8output -verbose -specifiedarchitecture=arm64+x86_64
 
 echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3

@@ -41,18 +41,19 @@ When you run `./ship.sh`, this is the execution order:
 
 1. **Pre-flight** — validates signing identity, notary profile, UAT paths, and required tools before touching anything.
 2. **Version stamp** *(if `VERSION_MODE` is set)* — writes `version.txt` into `Content/BuildInfo/` so UAT bundles it automatically.
-3. **Icon seeding** *(if enabled)* — copies your source-controlled `.xcassets` into the workspace so Xcode uses your app icon instead of the engine default.
-4. **UAT BuildCookRun** — cooks and packages the project via `RunUAT.sh BuildCookRun`.
-5. **xcconfig stamp** — writes `MARKETING_VERSION`, Game Mode flags, and app category into the Xcode-generated xcconfig before archiving.
-6. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`.
-7. **Xcode export** — runs `xcodebuild -exportArchive` with your `ExportOptions.plist` → signed `.app`.
-8. **Component signing** — signs all nested `.dylib`, `.so`, and `.framework` files individually, then signs the outer `.app`. Never uses `--deep`.
-9. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.
-10. **ZIP / DMG** — packages the signed app for distribution.
-11. **Notarization** — submits ZIP and DMG to Apple in parallel, then waits for both.
-12. **Stapling** — attaches the notarization ticket to the app, ZIP, and DMG.
+3. **GenerateProjectFiles** *(if `USE_XCODE_EXPORT=1`)* — runs `GenerateProjectFiles.sh` so any new files under `Build/{Platform}/Resources/` (custom launch storyboard, app icon catalog) get baked into the freshly-generated `.xcodeproj`. Disable with `--no-regen-project-files`.
+4. **xcconfig stamp** — writes `MARKETING_VERSION`, Game Mode flags, and app category into the Xcode-generated xcconfig before archiving.
+5. **UAT BuildCookRun** — cooks and packages the project via `RunUAT.sh BuildCookRun`. UAT's `-archive` output lands in `Saved/Packages/Mac/`.
+6. **Icon seeding** *(if enabled)* — copies your source-controlled `.xcassets` into the workspace so Xcode uses your app icon instead of the engine default.
+7. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`.
+8. **Xcode export** — runs `xcodebuild -exportArchive` with your `ExportOptions.plist` → signed `.app`.
+9. **Component signing** — signs all nested `.dylib`, `.so`, and `.framework` files individually, then signs the outer `.app`. Never uses `--deep`.
+10. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.
+11. **ZIP / DMG** — packages the signed app for distribution.
+12. **Notarization** — submits ZIP and DMG to Apple in parallel, then waits for both.
+13. **Stapling** — attaches the notarization ticket to the app, ZIP, and DMG.
 
-Full build log: `Logs/build_YYYY-MM-DD_HH-MM-SS.log`. Artifacts land in `Build/`.
+Full build log: `Saved/Logs/build_YYYY-MM-DD_HH-MM-SS.log`. Artifacts land in `Saved/Packages/Mac/` (override with `--build-dir`). `Build/{Platform}/` is reserved for committed source-controlled inputs (icons, launch storyboard, entitlements) — see [output.md](docs/output.md#build-vs-saved--what-goes-where).
 
 ## Docs
 
