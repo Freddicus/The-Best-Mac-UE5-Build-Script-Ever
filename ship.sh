@@ -1819,6 +1819,10 @@ _stage_platform_icon_assets() {
   # patching, no Intermediate/ shenanigans — this is the platform-shared
   # canonical location.
   #
+  # Validates source FIRST (presence + at least one appiconset). Only touches
+  # destination on success — refuses to leave a half-staged catalog behind
+  # that would confuse UE's auto-discovery and break actool.
+  #
   # Args:
   #   $1 = label for log lines (e.g. "macOS", "iOS")
   #   $2 = source catalog absolute path
@@ -1827,6 +1831,28 @@ _stage_platform_icon_assets() {
   local label="$1" src="$2" platform="$3" appicon_name_override="$4"
   local dst="$REPO_ROOT/Build/$platform/Resources/Assets.xcassets"
 
+  if [[ ! -d "$src" ]]; then
+    warn "$label icon source not found: $src — skipping seed (UE will use whatever's at Build/$platform/Resources/Assets.xcassets, or fall back to the engine default)"
+    return 0
+  fi
+
+  # Determine the appiconset name from SOURCE (not dst — dst doesn't exist yet
+  # in the validated path).
+  local source_appicon_name="$appicon_name_override"
+  if is_placeholder "$source_appicon_name"; then
+    if [[ -d "$src/AppIcon.appiconset" ]]; then
+      source_appicon_name="AppIcon"
+    else
+      source_appicon_name="$(first_appiconset_name_in_catalog "$src")"
+    fi
+  fi
+
+  if is_placeholder "$source_appicon_name" || [[ ! -d "$src/$source_appicon_name.appiconset" ]]; then
+    warn "$label icon source has no usable *.appiconset: $src — skipping seed. Add an AppIcon.appiconset (or set the appiconset-name override) and re-run."
+    return 0
+  fi
+
+  # Source validated. Now stage to canonical destination.
   /bin/mkdir -p "$(/usr/bin/dirname "$dst")"
   /bin/rm -rf "$dst"
   /bin/mkdir -p "$dst"
@@ -1835,20 +1861,10 @@ _stage_platform_icon_assets() {
   # Xcode expects "AppIcon" by default (set via ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon
   # in UE's xcconfig at XcodeProject.cs:2157). If the source catalog uses a
   # different appiconset name, mirror it to AppIcon so we don't have to edit
-  # the build setting.
-  local source_appicon_name="$appicon_name_override"
-  if is_placeholder "$source_appicon_name"; then
-    if [[ -d "$dst/AppIcon.appiconset" ]]; then
-      source_appicon_name="AppIcon"
-    else
-      source_appicon_name="$(first_appiconset_name_in_catalog "$dst")"
-    fi
-  fi
-
-  if is_placeholder "$source_appicon_name" || [[ ! -d "$dst/$source_appicon_name.appiconset" ]]; then
-    die "No usable *.appiconset found in $src ($label) — set the appiconset-name override if needed."
-  fi
-
+  # the build setting. (Alternatively, the user can pass the appiconset name
+  # via --macos-appicon-set-name / --ios-appicon-set-name and the script will
+  # also pass ASSETCATALOG_COMPILER_APPICON_NAME=<name> to xcodebuild as a
+  # build-setting override.)
   if [[ "$source_appicon_name" != "AppIcon" ]]; then
     /bin/rm -rf "$dst/AppIcon.appiconset"
     /bin/cp -R "$dst/$source_appicon_name.appiconset" "$dst/AppIcon.appiconset"
@@ -2973,6 +2989,11 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   # leaves CFBUNDLE_VERSION empty when USE_UE_PACKAGE_VERSION_COUNTER=1).
   _xcb_settings=()
   [[ -n "${CFBUNDLE_VERSION:-}" ]] && _xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
+  # ASSETCATALOG_COMPILER_APPICON_NAME override: Xcode/UE default is "AppIcon",
+  # but if the user keeps their appiconset under a different name in
+  # Build/Mac/Resources/Assets.xcassets, pass the name through here so actool
+  # finds it without renaming the appiconset on disk.
+  [[ -n "${MACOS_APPICON_SET_NAME:-}" ]] && _xcb_settings+=("ASSETCATALOG_COMPILER_APPICON_NAME=$MACOS_APPICON_SET_NAME")
 
   echo "== Archive (NO CLEAN) with Automatic signing ==" >&3
   xcodebuild \
@@ -3393,6 +3414,10 @@ if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
   # the same number.
   _ios_xcb_settings=()
   [[ -n "${CFBUNDLE_VERSION:-}" ]] && _ios_xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
+  # Same ASSETCATALOG_COMPILER_APPICON_NAME override as Mac, for projects whose
+  # iOS appiconset isn't named "AppIcon" (e.g. you keep it as "OmgIcon" in
+  # Build/IOS/Resources/Assets.xcassets and don't want to rename on disk).
+  [[ -n "${IOS_APPICON_SET_NAME:-}" ]] && _ios_xcb_settings+=("ASSETCATALOG_COMPILER_APPICON_NAME=$IOS_APPICON_SET_NAME")
 
   echo "== iOS Archive ==" >&3
   xcodebuild \

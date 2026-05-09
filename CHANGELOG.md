@@ -8,6 +8,10 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ## [unreleased] — Add iOS pipeline; migrate Mac to xcodebuild build-setting overrides; canonical icon sync
 
+### Fixed (within this PR, before merge)
+- **`actool` failure when the appiconset isn't named "AppIcon"**: UE's xcconfig hardcodes `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` (`XcodeProject.cs:2157`), so projects that keep their appiconset under a different name (e.g. `OmgIcon.appiconset`) at the canonical `Build/{Platform}/Resources/Assets.xcassets/` path failed at `actool` with "None of the input catalogs contained a matching ... icon set ... named 'AppIcon'". The script now passes `ASSETCATALOG_COMPILER_APPICON_NAME=$MACOS_APPICON_SET_NAME` (Mac) and `ASSETCATALOG_COMPILER_APPICON_NAME=$IOS_APPICON_SET_NAME` (iOS) as `xcodebuild` build-setting overrides when the env vars are set — Apple-documented mechanism, takes precedence over xcconfig. No need to rename the appiconset on disk.
+- **`_stage_platform_icon_assets` could leave a half-staged catalog at `Build/{Platform}/Resources/Assets.xcassets/`** if the source-controlled `.xcassets` existed but had no usable appiconset: the function rsync'd to the destination first, then died on validation, leaving an incomplete catalog that UE auto-discovered on the next regen and `actool` then choked on. Reordered to validate the source first (presence + at least one appiconset) and only touch the destination on success. On invalid source: warn-and-skip, leaving any existing canonical catalog untouched (so user-managed catalogs are safe).
+
 This branch ships three tightly-related changes. All three rest on the canonical-overrides foundation laid in PR #22 (`Move outputs to Saved/, route Info.plist through canonical UE overrides, auto-bump CFBundleVersion`).
 
 ### Added
