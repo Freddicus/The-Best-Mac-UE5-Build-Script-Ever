@@ -41,18 +41,21 @@ When you run `./ship.sh`, this is the execution order:
 
 1. **Pre-flight** — validates signing identity, notary profile, UAT paths, and required tools before touching anything.
 2. **Version stamp** *(if `VERSION_MODE` is set)* — writes `version.txt` into `Content/BuildInfo/` so UAT bundles it automatically.
-3. **Icon seeding** *(if enabled)* — copies your source-controlled `.xcassets` into the workspace so Xcode uses your app icon instead of the engine default.
-4. **UAT BuildCookRun** — cooks and packages the project via `RunUAT.sh BuildCookRun`.
-5. **xcconfig stamp** — writes `MARKETING_VERSION`, Game Mode flags, and app category into the Xcode-generated xcconfig before archiving.
-6. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`.
-7. **Xcode export** — runs `xcodebuild -exportArchive` with your `ExportOptions.plist` → signed `.app`.
-8. **Component signing** — signs all nested `.dylib`, `.so`, and `.framework` files individually, then signs the outer `.app`. Never uses `--deep`.
-9. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.
-10. **ZIP / DMG** — packages the signed app for distribution.
-11. **Notarization** — submits ZIP and DMG to Apple in parallel, then waits for both.
-12. **Stapling** — attaches the notarization ticket to the app, ZIP, and DMG.
+3. **Canonical UE seeds** — defensively places stock engine files at their canonical UE locations if missing: `Build/Apple/Resources/Interface/LaunchScreen.storyboardc` (prevents Mac from compiling iOS storyboard sources) and `Build/Mac/Resources/Info.Template.plist` (canonical home for `LSSupportsGameMode`/`GCSupportsGameMode`). When `USE_UE_PACKAGE_VERSION_COUNTER=1` (Path A, opt-in), also seeds `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` (strips Epic's `Build.version` Changelist) and `Build/Mac/<Project>.PackageVersionCounter`. Commit everything except the counter (gitignored per UE convention).
+4. **Canonical ini ensures** — writes `MARKETING_VERSION` and `APP_CATEGORY` (when set) to their canonical `Config/DefaultEngine.ini` sections. `ENABLE_GAME_MODE` (when set) updates the seeded `Info.Template.plist` via `PlistBuddy`. See [versioning.md](docs/versioning.md#infoplist-values-via-canonical-ue-overrides).
+5. **GenerateProjectFiles** *(if `USE_XCODE_EXPORT=1`)* — runs `GenerateProjectFiles.sh` so the canonical config above is read by UE and baked into the freshly-generated `.xcodeproj` and xcconfig. Disable with `--no-regen-project-files`.
+6. **UAT BuildCookRun** — cooks and packages the project via `RunUAT.sh BuildCookRun`. UAT's `-archive` output lands in `Saved/Packages/Mac/`.
+7. **Icon seeding** *(if enabled)* — copies your source-controlled `.xcassets` into the workspace so Xcode uses your app icon instead of the engine default.
+8. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`. Immediately after, `PlistBuddy`-stamps the auto-bumped `CFBundleVersion` into `<ARCHIVE_PATH>/Info.plist` so Xcode Organizer's Archives view shows the same value that ships.
+9. **Xcode export** — runs `xcodebuild -exportArchive` with your `ExportOptions.plist` → signed `.app`.
+10. **CFBundleVersion auto-bump** — `PlistBuddy`-rewrites `CFBundleVersion` in the exported `.app/Contents/Info.plist`. Default behavior: read `CFBUNDLE_VERSION` from `.env` (or `0` if missing), pre-increment, ship that value. On successful build, persist back to `.env`. Override with `--set-cfbundle-version N` to set a baseline. Disabled when `USE_UE_PACKAGE_VERSION_COUNTER=1` (Path A delegates to UE's `PackageVersionCounter` flow). See [versioning.md](docs/versioning.md#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical).
+11. **Component signing** — signs all nested `.dylib`, `.so`, and `.framework` files individually, then signs the outer `.app`. Never uses `--deep`.
+12. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.
+13. **ZIP / DMG** — packages the signed app for distribution.
+14. **Notarization** — submits ZIP and DMG to Apple in parallel, then waits for both.
+15. **Stapling** — attaches the notarization ticket to the app, ZIP, and DMG.
 
-Full build log: `Logs/build_YYYY-MM-DD_HH-MM-SS.log`. Artifacts land in `Build/`.
+Full build log: `Saved/Logs/build_YYYY-MM-DD_HH-MM-SS.log`. Artifacts land in `Saved/Packages/Mac/` (override with `--build-dir`). `Build/{Platform}/` is reserved for committed source-controlled inputs (icons, launch storyboard, entitlements) — see [output.md](docs/output.md#build-vs-saved--what-goes-where).
 
 ## Docs
 

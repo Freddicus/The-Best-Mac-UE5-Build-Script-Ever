@@ -6,6 +6,102 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-09] — Stamp `.xcarchive` metadata so Xcode Organizer shows auto-bumped `CFBundleVersion`
+
+### Added
+- **`override_cfbundle_version_in_xcarchive_metadata()`**: between `xcodebuild archive` and `xcodebuild -exportArchive`, `PlistBuddy`-stamps the resolved `CFBundleVersion` into `<ARCHIVE_PATH>/Info.plist`'s `:ApplicationProperties:CFBundleVersion`. Without this, Xcode Organizer's Archives view showed UE's pre-export internal value (e.g. `1.0.2 (0.1)`) while the shipped `.app` had the auto-bumped value — confusing if you're cross-checking. Now the Organizer shows the same `CFBundleVersion` that ships. Cosmetic; the archive's embedded `.app` is intentionally left untouched (modifying it would invalidate its signature inside the archive without buying anything — the script's exported `.app` is what actually ships and gets signed independently). No-op on Path A (`USE_UE_PACKAGE_VERSION_COUNTER=1`) since `CFBUNDLE_VERSION` is cleared by the resolver and UE's flow supplies the value end-to-end. Idempotent.
+
+---
+
+## [2026-05-09] — Default `CFBUNDLE_VERSION` to auto-bump; gate UE-canonical path behind opt-in flag
+
+### Changed (BREAKING)
+- **`CFBUNDLE_VERSION` is now auto-bumped on every build by default.** The script reads `CFBUNDLE_VERSION` from `.env` (treating empty/missing as `0`), pre-increments by 1, ships that value as `CFBundleVersion`, and persists the new value back to `.env` on a successful build. With `.env.example`'s `CFBUNDLE_VERSION="0"`, the first build ships `CFBundleVersion=1`. Failed/interrupted builds don't persist — the next build retries the same number, so no build numbers are wasted.
+- **`--cfbundle-version N` renamed to `--set-cfbundle-version N`** to convey the new "set baseline" semantics: the value is shipped *and* persisted, so subsequent auto-bump builds resume from `N`. Use to reset the counter (`--set-cfbundle-version 100`) or pin to a CI value (`--set-cfbundle-version "$GITHUB_RUN_NUMBER"`).
+- **UE-canonical `CFBundleVersion` path is now opt-in.** The previous default (Path A: seed `Build/Mac/<Project>.PackageVersionCounter` + project-level `UpdateVersionAfterBuild.sh` override) is gated behind a single new flag `USE_UE_PACKAGE_VERSION_COUNTER` (default `0`) / CLI `--use-ue-package-version-counter`. When enabled, the script seeds both files and skips the Info.plist override; UE's flow supplies `CFBundleVersion` end-to-end. Mutually exclusive with the auto-bump.
+- **Removed env vars `SEED_MAC_PACKAGE_VERSION_COUNTER` and `SEED_MAC_UPDATE_VERSION_AFTER_BUILD`** (and their CLI flags). Both seed functions are now gated on `USE_UE_PACKAGE_VERSION_COUNTER` together — one knob covers the whole Path A bundle.
+
+### Added
+- **`_resolve_cfbundle_version_for_build()`**: at build start (after dry-run / print-config exits), decides what `CFBundleVersion` will ship. Three branches: Path A (clear `CFBUNDLE_VERSION`, no override, no persist); explicit set via `--set-cfbundle-version` (use as-is, persist); default auto-bump (pre-increment integer, persist). Sets `_CFBV_PERSIST=1` to mark for end-of-script persistence on success.
+- **`_write_env_var(name, value)`**: shared idempotent in-place writer for `NAME="value"` pairs in `.env`. Updates the line if it exists, appends if it doesn't, creates `.env` if missing. Now used by both `write_bumped_version_to_env` (for `VERSION_STRING`) and the new `write_cfbundle_version_to_env` (for `CFBUNDLE_VERSION`).
+- **`write_cfbundle_version_to_env()`**: persists the bumped/set `CFBUNDLE_VERSION` to `.env` on the success path. Called alongside `write_bumped_version_to_env` at end-of-script. No-op when `_CFBV_PERSIST=0` (Path A or non-integer auto-bump skip).
+- **`.env.example`**: now ships with `CFBUNDLE_VERSION="0"` uncommented, since the script auto-bumps from this baseline. Documentation explains both `--set-cfbundle-version` (new baseline) and `USE_UE_PACKAGE_VERSION_COUNTER=1` (Path A opt-in).
+
+### Migration
+- **No action required for most users.** The auto-bump default produces the same integer-style `CFBundleVersion` you'd want for App Store / Gatekeeper. First build after this change ships `1` (or `<previous CFBUNDLE_VERSION> + 1` if you already had a value in `.env`).
+- **If you previously relied on Path A** (seeded `PackageVersionCounter` + `UpdateVersionAfterBuild.sh` override): set `USE_UE_PACKAGE_VERSION_COUNTER=1` in your `.env` to restore that behavior. The `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` you previously committed is still valid.
+- **If you previously used `--cfbundle-version N`** (one-off override that didn't persist): rename to `--set-cfbundle-version N` and note that the value now persists to `.env`. To explicitly reset to a one-off behavior, follow up by editing `.env` manually — but most callers actually want the new "set baseline" semantics.
+- **`--bump-major/--bump-minor/--bump-patch` are unchanged** — they still bump only `VERSION_STRING` (semver, runtime `Content/<dir>/version.txt`), not `CFBundleVersion`. The two version concepts are intentionally independent.
+
+---
+
+## [2026-05-09] — Replace xcconfig hijack with canonical UE override paths
+
+### Removed (BREAKING)
+- **`update_xcconfig_versions()` removed.** The script no longer post-processes `Intermediate/ProjectFiles/XcconfigsMac/<Project>.xcconfig`. That approach fought with `GenerateProjectFiles` every regen and put canonical project state in an `Intermediate/` file. All five Info.plist values it used to stamp now route through their sanctioned UE override locations.
+
+### Changed (BREAKING)
+- **`MARKETING_VERSION`** (`CFBundleShortVersionString`): now writes to `Config/DefaultEngine.ini` `[/Script/MacRuntimeSettings.MacRuntimeSettings] VersionInfo=`. Read by UE at `XcodeProject.cs:1997` and stamped into the generated xcconfig automatically. Unset = leave `DefaultEngine.ini` alone (UE falls back to engine display version — set this once for any production build).
+- **`APP_CATEGORY`** (`LSApplicationCategoryType`): now writes to `Config/DefaultEngine.ini` `[/Script/MacTargetPlatform.XcodeProjectSettings] AppCategory=`. Read at `XcodeProject.cs:1982`. UE's `BaseEngine.ini:3462` already defaults this to `public.app-category.games` — only override for a different category.
+- **`ENABLE_GAME_MODE`** (`LSSupportsGameMode` + `GCSupportsGameMode`): now sets keys directly in `Build/Mac/Resources/Info.Template.plist` via `PlistBuddy`. UE's `BaseEngine.ini:3463` configures `TemplateMacPlist=` to point here, so any plist landing at this path is auto-discovered and its contents merged into the final `Info.plist` by Xcode at build time.
+- **`CFBundleVersion`** (`CURRENT_PROJECT_VERSION`): now driven by UE's canonical `Build/Mac/<Project>.PackageVersionCounter` mechanism. UE's `Engine/Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` reads this counter, increments the minor (`0.0` → `0.1` → …), and writes the value to `Intermediate/Build/Versions.xcconfig` as `UE_MAC_BUILD_VERSION` — referenced by the generated xcconfig as `CURRENT_PROJECT_VERSION = $(UE_MAC_BUILD_VERSION)`. **CFBundleVersion is no longer derived from `VERSION_STRING` / `VERSION_MODE`** — those still control the runtime `version.txt` stamp, but Xcode's bundle version is now an independent monotonic counter (per UE convention).
+- **Default behavior change** when `MARKETING_VERSION` is unset: previously the script defaulted to `1.0.0` with a warning; now the script does nothing and UE falls back to its engine display version. Action: set `MARKETING_VERSION` in `.env` once and let the script write it to `DefaultEngine.ini`.
+- **Default behavior change** when `ENABLE_GAME_MODE` is unset: previously defaulted to `YES` with a warning; now the script does not touch the plist's GameMode keys at all (your plist is sovereign).
+
+### Added
+- **`set_engine_ini_value()`**: idempotent setter for a key=value pair under a section in `Config/DefaultEngine.ini`. No-op when the value already matches; replaces in place when different; inserts after the section header when the section exists but the key doesn't; appends section + key when neither exists.
+- **`ensure_marketing_version_in_engine_ini()`** and **`ensure_app_category_in_engine_ini()`**: thin wrappers that route `MARKETING_VERSION` and `APP_CATEGORY` to their canonical ini sections when set.
+- **`seed_mac_info_template_plist()`**: defensively copies the engine's stock `Info.Template.plist` from `$UE_ROOT/Engine/Build/Mac/Resources/` to `$REPO_ROOT/Build/Mac/Resources/` if missing, then sets `LSSupportsGameMode` and `GCSupportsGameMode` via `PlistBuddy` when `ENABLE_GAME_MODE` is set. Idempotent. Controlled by `SEED_MAC_INFO_TEMPLATE_PLIST` (default `1`) and `--seed-mac-info-template-plist` / `--no-seed-mac-info-template-plist`.
+- **`seed_mac_package_version_counter()`**: defensively seeds `Build/Mac/<Project>.PackageVersionCounter` to `0.0` when missing. Idempotent. Controlled by `SEED_MAC_PACKAGE_VERSION_COUNTER` (default `1`) and `--seed-mac-package-version-counter` / `--no-seed-mac-package-version-counter`. To start at a specific value, edit the counter file directly — the script never overwrites an existing one. Per UE convention, this file is gitignored (`Build/{Platform}/*.PackageVersionCounter` is in the "UBT writes here itself" category).
+- **`override_cfbundle_version_in_app_plist()`**: escape hatch from UE's `<CL>.<X>.<Y>` `CFBundleVersion` format, matching the pattern AA/AAA studios typically use when CI manages an explicit monotonic build counter. When `CFBUNDLE_VERSION` is set (env var or `--cfbundle-version N` CLI flag), the script `PlistBuddy`-rewrites `CFBundleVersion` in the exported `.app/Contents/Info.plist` *after* `xcodebuild -exportArchive` but *before* the codesign step — the signature is computed over the modified plist, so the bundle stays internally consistent. Bypasses UE's `PackageVersionCounter` auto-increment for the shipped bundle. Use for App-Store-style monotonic integers (`7`, `42`, `$GITHUB_RUN_NUMBER`, `$BUILD_NUMBER`). Idempotent (skips when current value matches). Unset = UE-canonical `PackageVersionCounter` flow takes over. The two paths are complementary and documented as "Path A vs Path B" in [docs/versioning.md](docs/versioning.md#cfbundleversion-two-paths-pick-one).
+- **`seed_mac_update_version_after_build_script()`**: defensively drops a project-level `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` that strips the engine's `Build.version` Changelist from `CFBundleVersion`. UE's engine script writes `UE_MAC_BUILD_VERSION = <CL>.<MAC_VERSION>` where `<CL>` is the Perforce changelist baked into `Engine/Build/Build.version` — for an Epic Games Launcher install of 5.7.4 that's `51494982`, so projects ship `CFBundleVersion=51494982.0.2`. Our override is byte-identical to the engine script except it omits the `<CL>.` prefix, so projects ship `CFBundleVersion=0.2` as expected. Sanctioned override path at `AppleToolChain.cs:394-397` (UE checks the project for this script first and only falls back to the engine's copy if absent). Idempotent. Controlled by `SEED_MAC_UPDATE_VERSION_AFTER_BUILD` (default `1`) and `--seed-mac-update-version-after-build` / `--no-seed-mac-update-version-after-build`. **Commit this file** so CI and other machines get the same behavior.
+- **`_set_plist_bool()`**: helper for idempotent boolean writes via `PlistBuddy` (no-op when value matches; uses `Set` if key exists, `Add` otherwise).
+- **Pipeline order** (between `write_version_to_content` and `regenerate_project_files`): `seed_apple_launchscreen_compat` → `seed_mac_info_template_plist` → `seed_mac_package_version_counter` → `ensure_app_category_in_engine_ini` → `ensure_marketing_version_in_engine_ini`. All seeds and ini writes happen before `GenerateProjectFiles` so UE picks up the canonical config in a single pass.
+- **Dry-run preview** updated to show the seed step.
+- **Docs:**
+  - [docs/versioning.md](docs/versioning.md): the entire "xcconfig stamping" section replaced by "Info.plist values via canonical UE overrides", with the canonical-mapping table, per-key migration notes, the auto-incrementing CFBundleVersion explanation, and seed opt-out flags.
+  - [docs/configuration.md](docs/configuration.md): new env-var rows for `SEED_MAC_INFO_TEMPLATE_PLIST`, `SEED_MAC_PACKAGE_VERSION_COUNTER`, `MARKETING_VERSION`, `APP_CATEGORY`, `ENABLE_GAME_MODE` (semantics updated). New CLI examples.
+  - [docs/output.md](docs/output.md): "ship.sh does write three specific files under Build/" exception called out with a table mapping each canonical seed to its purpose and disable flag.
+  - [README.md](README.md): pipeline list reorganized — old "xcconfig stamp" step removed, replaced by "Canonical UE seeds" + "Canonical ini ensures" steps.
+  - [.env.example](.env.example): version/Info.plist section rewritten to describe canonical UE override paths.
+
+### Migration
+- **Set `MARKETING_VERSION` in your `.env`** (or `Config/DefaultEngine.ini` directly under the canonical section). Without it, `CFBundleShortVersionString` falls back to UE's engine display version (e.g. `5.7.0`).
+- **Run the script once** to seed `Build/Mac/Resources/Info.Template.plist` and `Build/Mac/<Project>.PackageVersionCounter` from the engine stock, then **commit them**. They become permanent project source.
+- **CFBundleVersion is now monotonically auto-incrementing** (`0.1` → `0.2` → ...). If you previously expected CFBundleVersion to track `VERSION_STRING`, edit `Build/Mac/<Project>.PackageVersionCounter` to your desired baseline and let UE auto-increment from there. The seeded `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` override ensures Epic's engine Changelist (e.g. `51494982` for EGL 5.7.4) is *not* prepended.
+- **Game Mode**: if you want it on, set `ENABLE_GAME_MODE=1` once and run the script — it'll stamp `LSSupportsGameMode=true` and `GCSupportsGameMode=true` into your seeded `Info.Template.plist`. Subsequent builds with the env var unset preserve those values (the plist is yours to own).
+
+---
+
+## [2026-05-08] — Move outputs from `Build/` to `Saved/`; always regenerate project files
+
+### Changed
+- **`BUILD_DIR_REL` default: `Build` → `Saved/Packages/Mac`.** Build artifacts (xcarchive, export dir, ZIP, DMG, UAT-archived `.app`) now land under UE's documented `Saved/` tree instead of the `Build/` folder. `Build/{Platform}/` is reserved for committed source-controlled inputs (app icons, custom launch storyboard, `Info.plist` fragments, entitlements, `PakBlacklist*.txt`) — UBT writes a small set of intermediates there but ship.sh no longer does. See [docs/output.md](docs/output.md#build-vs-saved--what-goes-where) for the rationale.
+- **`LOG_DIR_REL` default: `Logs` → `Saved/Logs`.** Matches UE convention.
+- **UAT BuildCookRun's `-archivedirectory` is now derived as `dirname BUILD_DIR`.** UAT appends `/<TargetPlatform>/` to whatever path is given, so pointing it at the parent of `BUILD_DIR` lands UAT's output at `Saved/Packages/Mac/<App>-Mac-Shipping.app/` — the same directory as the script-side artifacts. Previously, with `BUILD_DIR_REL=Build`, UAT was writing into `Build/Mac/` (or `Build/IOS/` for cross-platform consumers), violating the inputs/outputs split.
+- **Build pipeline order:** `GenerateProjectFiles` and `update_xcconfig_versions` now run *before* UAT BuildCookRun, so the regenerated and stamped xcconfig is in place by the time UAT executes. The previous order ran the xcconfig stamp before regen would have happened (regen didn't run unconditionally then).
+
+### Added
+- **`regenerate_project_files()`**: runs `Engine/Build/BatchFiles/Mac/GenerateProjectFiles.sh -project="$UPROJECT_PATH" -game` once per ship invocation, before xcconfig stamping and the Xcode build. Idempotent and cheap (~few seconds). Closes a class of "I added a file under `Build/{Platform}/Resources/` but the build doesn't see it" bugs — UBT bakes resolved absolute paths into `Intermediate/ProjectFilesMac/<Project> (Mac).xcodeproj/project.pbxproj` at *project-file-generation time*, so adding a sibling file (e.g. a custom `LaunchScreen.storyboard`) doesn't flow into the build until project files are regenerated.
+- **`seed_apple_launchscreen_compat()`**: defensively copies `$(UE)/Engine/Build/IOS/Resources/Interface/LaunchScreen.storyboardc` to `$(Project)/Build/Apple/Resources/Interface/LaunchScreen.storyboardc` if the destination is missing, so Mac's launch-screen path priority list short-circuits at a pre-compiled wrapper before reaching a consumer-supplied iOS `.storyboard` source. Without this, adding a custom iOS launch storyboard breaks Mac builds: `XcodeProject.cs::ProcessAssets`'s `AddResource` call is unconditional, and Xcode can't compile an iOS `.storyboard` source for macOS. Idempotent (skips if dest exists or engine source is missing). The one exception to "ship.sh does not write under `Build/`" — the seeded file is a stock engine asset, not a customization, and is intended to be committed afterwards. Controlled by `SEED_APPLE_LAUNCHSCREEN_COMPAT` (default `1`) and `--seed-apple-launchscreen-compat` / `--no-seed-apple-launchscreen-compat`. See the new ["Adding a custom iOS LaunchScreen.storyboard breaks the Mac build" gotcha](docs/gotchas.md#adding-a-custom-ios-launchscreenstoryboard-breaks-the-mac-build).
+- **`REGEN_PROJECT_FILES`** config variable (default `1` when `USE_XCODE_EXPORT=1`) and **`--regen-project-files` / `--no-regen-project-files`** CLI flags. Escape hatch for the rare case the regen is unwanted.
+- **`--build-dir PATH`** CLI flag for overriding `BUILD_DIR_REL` from the command line.
+- **`UAT_ARCHIVE_DIR`** is shown in `--print-config` output (derived from `BUILD_DIR`).
+- **Dry-run preview** now lists `GenerateProjectFiles` as an explicit step when applicable.
+- **Docs:**
+  - [docs/output.md](docs/output.md): new "Build/ vs Saved/ — what goes where" section; updated artifact paths table; new "How `BUILD_DIR_REL` and `UAT_ARCHIVE_DIR` relate" section explaining the parent-dir derivation and UAT flag map.
+  - [docs/configuration.md](docs/configuration.md): `BUILD_DIR_REL` / `LOG_DIR_REL` default updates; new `REGEN_PROJECT_FILES` row; expanded "Project files are regenerated every ship" explanation under Xcode workspace; CLI examples for `--build-dir` and `--no-regen-project-files`.
+  - [docs/gotchas.md](docs/gotchas.md): two new gotchas — "`Build/{Platform}/` is for committed inputs, not output" and "New files under `Build/{Platform}/Resources/` need a project-file regen to be picked up" (with the `XcodeProject.cs::ProcessAssets` path priority list).
+  - [docs/troubleshooting.md](docs/troubleshooting.md): two new symptom-driven entries — "I added a file to `Build/{Platform}/Resources/` but the build still uses the engine default" and "My packaged `.app` ended up in `Build/{Platform}/` instead of `Saved/Packages/`".
+  - [README.md](README.md): updated pipeline step list (added GenerateProjectFiles, reordered xcconfig stamp before UAT, moved icon seeding) and artifact-path summary.
+
+### Migration
+- If your `.env` sets `BUILD_DIR_REL=Build` (or `LOG_DIR_REL=Logs`), remove those overrides to pick up the new defaults — or set them explicitly to `Saved/Packages/Mac` / `Saved/Logs`.
+- If you intentionally want output to stay in `Build/`, set `BUILD_DIR_REL=Build/Mac` (note the `/Mac` suffix — the script's app-discovery expects `BUILD_DIR` to be the directory UAT writes its `.app` into, which means it must end with `/<Platform>`).
+- If you have CI that uploads artifacts from `Build/`, update the path to `Saved/Packages/Mac/`.
+
+---
+
 ## [2026-04-14] — Restructure docs: slim README + supplemental docs/ (PR #20)
 
 ### Added

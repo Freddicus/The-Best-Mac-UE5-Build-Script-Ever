@@ -367,6 +367,76 @@ maybe_generate_workspace_interactively() {
   return 0
 }
 
+seed_apple_launchscreen_compat() {
+  # Defensively place a pre-compiled LaunchScreen.storyboardc at
+  # $(Project)/Build/Apple/Resources/Interface/LaunchScreen.storyboardc by
+  # copying the engine's stock one from
+  # $(UE)/Engine/Build/IOS/Resources/Interface/LaunchScreen.storyboardc.
+  #
+  # Why: XcodeProject.cs::ProcessAssets walks a path priority list for the
+  # launch storyboard at GenerateProjectFiles time. Pre-our-fix, Mac was
+  # hitting the engine's pre-compiled iOS .storyboardc fallback — Xcode
+  # treats .storyboardc as a wrapper bundle and ships it as-is, so the build
+  # worked. The moment a consumer drops a custom
+  #   $(Project)/Build/IOS/Resources/Interface/LaunchScreen.storyboard
+  # source file (a normal way to override the iOS launch screen), Mac now
+  # hits the .storyboard source first and tries to compile an iOS storyboard
+  # for macOS — which fails. The engine's AddResource call is unconditional;
+  # there's no engine-level switch. The fix lives at the project layer:
+  # provide a Mac-platform-shared override (.storyboardc, already compiled)
+  # that wins earlier in the priority list, so Mac never reaches the
+  # hardcoded iOS .storyboard line.
+  #
+  # Idempotent: skips if the destination already exists (consumer-owned) or
+  # the engine source is missing (older UE versions / partial installs).
+  # This is the one exception to "ship.sh does not write under Build/" —
+  # the file we drop here is a stock engine asset, not a customization, and
+  # it's fine to commit it to the project repo afterwards.
+  [[ "${SEED_APPLE_LAUNCHSCREEN_COMPAT:-1}" == "1" ]] || { info "Skipping Apple LaunchScreen.storyboardc seed (SEED_APPLE_LAUNCHSCREEN_COMPAT=0)"; return 0; }
+
+  local src dst_dir dst
+  src="$UE_ROOT/Engine/Build/IOS/Resources/Interface/LaunchScreen.storyboardc"
+  dst_dir="$REPO_ROOT/Build/Apple/Resources/Interface"
+  dst="$dst_dir/LaunchScreen.storyboardc"
+
+  if [[ -e "$dst" ]]; then
+    info "Apple LaunchScreen.storyboardc already present — skipping seed: $dst"
+    return 0
+  fi
+
+  if [[ ! -d "$src" ]]; then
+    warn "Engine LaunchScreen.storyboardc not found at $src — skipping Apple compat seed"
+    return 0
+  fi
+
+  /bin/mkdir -p "$dst_dir"
+  /bin/cp -R "$src" "$dst"
+  good "Seeded $dst from engine fallback (commit it; prevents Mac from compiling an iOS .storyboard source)"
+}
+
+regenerate_project_files() {
+  # Regenerate the consumer's Xcode workspace via UE's GenerateProjectFiles.sh.
+  # UBT bakes resolved absolute paths from Build/{Platform}/Resources/ into
+  # Intermediate/ProjectFilesMac/<Project> (Mac).xcodeproj/project.pbxproj at
+  # project-file-generation time, NOT at xcodebuild time. Adding/removing a
+  # sibling file there (e.g. a custom LaunchScreen.storyboard) does not flow
+  # into the build until project files are regenerated. Cheap and idempotent.
+  [[ "$USE_XCODE_EXPORT" == "1" ]] || return 0
+  [[ "${REGEN_PROJECT_FILES:-1}" == "1" ]] || { info "Skipping GenerateProjectFiles (REGEN_PROJECT_FILES=0)"; return 0; }
+
+  local gen_script
+  gen_script="$UE_ROOT/Engine/Build/BatchFiles/Mac/GenerateProjectFiles.sh"
+
+  if [[ ! -x "$gen_script" ]]; then
+    warn "GenerateProjectFiles.sh not executable, skipping regen: $gen_script"
+    return 0
+  fi
+
+  info "Regenerating Xcode project files (GenerateProjectFiles.sh)"
+  "$gen_script" -project="$UPROJECT_PATH" -game
+  good "Project files regenerated."
+}
+
 choose_from_list_interactively() {
   # Prompt user to choose a numbered item from an array.
   # Args: prompt, default_index (1-based), array...
@@ -756,10 +826,15 @@ print_config() {
   echo "UAT (RunUAT.sh):   $SCRIPTS/RunUAT.sh" >&3
   echo "UE_EDITOR:         $UE_EDITOR" >&3
   echo "BUILD_DIR:         $BUILD_DIR" >&3
+  echo "UAT_ARCHIVE_DIR:   ${UAT_ARCHIVE_DIR:-<derived from BUILD_DIR>}" >&3
   echo "LOG_DIR:           $LOG_DIR" >&3
   echo "SHORT_NAME:        $SHORT_NAME" >&3
   echo "LONG_NAME:         $LONG_NAME" >&3
   echo "USE_XCODE_EXPORT:  $USE_XCODE_EXPORT" >&3
+  echo "REGEN_PROJECT_FILES: $REGEN_PROJECT_FILES" >&3
+  echo "SEED_APPLE_LAUNCHSCREEN_COMPAT: $SEED_APPLE_LAUNCHSCREEN_COMPAT" >&3
+  echo "SEED_MAC_INFO_TEMPLATE_PLIST:   $SEED_MAC_INFO_TEMPLATE_PLIST" >&3
+  echo "USE_UE_PACKAGE_VERSION_COUNTER: $USE_UE_PACKAGE_VERSION_COUNTER (0=Path B auto-bump default, 1=Path A UE-canonical)" >&3
   echo "CLEAN_BUILD_DIR:   $CLEAN_BUILD_DIR" >&3
   echo "DRY_RUN:           $DRY_RUN" >&3
   echo "PRINT_CONFIG:      $PRINT_CONFIG" >&3
@@ -779,10 +854,21 @@ print_config() {
   if [[ "$VERSION_MODE" != "NONE" ]]; then
     echo "VERSION_CONTENT_DIR: $VERSION_CONTENT_DIR" >&3
     echo "VERSION_FILE:      $REPO_ROOT/Content/$VERSION_CONTENT_DIR/version.txt" >&3
-    echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, will default to 1.0.0>}" >&3
-    echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, will default to YES>}" >&3
-    echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, existing xcconfig value preserved>}" >&3
-    echo "XCCONFIG:          $REPO_ROOT/Intermediate/ProjectFiles/XcconfigsMac/${LONG_NAME}.xcconfig" >&3
+  fi
+  echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, leaves DefaultEngine.ini VersionInfo untouched>}" >&3
+  echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, leaves Info.Template.plist GameMode keys untouched>}" >&3
+  echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, leaves DefaultEngine.ini AppCategory untouched>}" >&3
+  local _cfbv_now _cfbv_next
+  _cfbv_now="${CFBUNDLE_VERSION:-0}"
+  if [[ "$_cfbv_now" =~ ^[0-9]+$ ]]; then
+    _cfbv_next=$((_cfbv_now + 1))
+  else
+    _cfbv_next="<auto-bump skipped: not an integer>"
+  fi
+  echo "CFBUNDLE_VERSION:  $_cfbv_now (in .env; next auto-bump ships $_cfbv_next; --set-cfbundle-version overrides; USE_UE_PACKAGE_VERSION_COUNTER=1 disables Path B)" >&3
+  echo "MAC_INFO_TEMPLATE_PLIST: $REPO_ROOT/Build/Mac/Resources/Info.Template.plist" >&3
+  if [[ -n "${UPROJECT_NAME:-}" ]]; then
+    echo "MAC_PACKAGE_VERSION_COUNTER: $REPO_ROOT/Build/Mac/${UPROJECT_NAME%.uproject}.PackageVersionCounter" >&3
   fi
   if [[ "$VERSION_MODE" == "MANUAL" || "$VERSION_MODE" == "HYBRID" ]]; then
     echo "VERSION_STRING:    $VERSION_STRING" >&3
@@ -906,7 +992,294 @@ ensure_game_ini_staging_entry() {
 # Only runs when --bump-* was used this invocation.
 write_bumped_version_to_env() {
   [[ -z "${_VERSION_BUMPED:-}" ]] && return 0
-  local new_line="VERSION_STRING=\"$VERSION_STRING\""
+  _write_env_var "VERSION_STRING" "$VERSION_STRING"
+}
+
+# --- Canonical UE override helpers --------------------------------------------
+#
+# Earlier versions of this script post-processed the UE-generated xcconfig at
+# Intermediate/ProjectFiles/XcconfigsMac/<LONG_NAME>.xcconfig to inject Info.plist
+# values. That fought with GenerateProjectFiles every regen and put canonical
+# project state in an Intermediate/ file. The helpers below route each value
+# through its sanctioned UE override location instead, so values are visible to
+# the user in committed config and survive every regen:
+#
+#   MARKETING_VERSION (CFBundleShortVersionString)
+#     → Config/DefaultEngine.ini
+#       [/Script/MacRuntimeSettings.MacRuntimeSettings]
+#       VersionInfo=
+#     Read by XcodeProject.cs::WriteXcconfigFile (line 1997 in UE 5.7).
+#
+#   LSApplicationCategoryType
+#     → Config/DefaultEngine.ini
+#       [/Script/MacTargetPlatform.XcodeProjectSettings]
+#       AppCategory=
+#     Read at XcodeProject.cs:1982. BaseEngine.ini already defaults this to
+#     "public.app-category.games" — only override if you want a different value.
+#
+#   LSSupportsGameMode + GCSupportsGameMode
+#     → Build/Mac/Resources/Info.Template.plist
+#     UE's BaseEngine.ini sets TemplateMacPlist to this path; UE merges its
+#     contents into the final Info.plist. The engine's stock template is
+#     minimal and contains no GameMode keys — we add them here.
+#
+#   CFBundleVersion (CURRENT_PROJECT_VERSION)
+#     → Build/Mac/<Project>.PackageVersionCounter
+#     UE's UpdateVersionAfterBuild.sh reads this counter, increments the minor,
+#     and writes Intermediate/Build/Versions.xcconfig with UE_MAC_BUILD_VERSION,
+#     which the generated xcconfig references via $(UE_MAC_BUILD_VERSION). We
+#     defensively seed the counter file at "0.0" so the first build produces
+#     CFBundleVersion=0.0.1.
+
+set_engine_ini_value() {
+  # Idempotent setter for a key=value pair under a section in DefaultEngine.ini.
+  # No-op when the value is already correct. Inserts after the section header
+  # if the section exists but the key doesn't. Appends section + key if absent.
+  local section="$1" key="$2" value="$3"
+  local ini_file="$REPO_ROOT/Config/DefaultEngine.ini"
+  local desired="${key}=${value}"
+  local current_value
+  local _line tmp_ini
+
+  /bin/mkdir -p "$(/usr/bin/dirname "$ini_file")"
+  [[ -f "$ini_file" ]] || : > "$ini_file"
+
+  current_value="$(/usr/bin/awk -v section="$section" -v key="$key" '
+    $0 == section { in_sect = 1; next }
+    /^\[/ { in_sect = 0; next }
+    in_sect && $0 ~ "^[[:space:]]*"key"[[:space:]]*=" {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      print
+      exit
+    }
+  ' "$ini_file")"
+
+  if [[ "$current_value" == "$value" ]]; then
+    info "DefaultEngine.ini already canonical: [$section] $desired"
+    return 0
+  fi
+
+  if /usr/bin/grep -qF "$section" "$ini_file"; then
+    if [[ -n "$current_value" ]]; then
+      tmp_ini="$(/usr/bin/mktemp "${TMPDIR:-/tmp}DefaultEngine_ini_XXXXXX")"
+      /usr/bin/awk -v section="$section" -v key="$key" -v new="$desired" '
+        BEGIN { in_sect = 0 }
+        $0 == section { in_sect = 1; print; next }
+        /^\[/ { in_sect = 0; print; next }
+        in_sect && $0 ~ "^[[:space:]]*"key"[[:space:]]*=" { print new; next }
+        { print }
+      ' "$ini_file" > "$tmp_ini"
+      /bin/mv "$tmp_ini" "$ini_file"
+      good "Updated $ini_file → [$section] $desired"
+    else
+      tmp_ini="$(/usr/bin/mktemp "${TMPDIR:-/tmp}DefaultEngine_ini_XXXXXX")"
+      while IFS= read -r _line || [[ -n "$_line" ]]; do
+        printf '%s\n' "$_line"
+        if [[ "$_line" == "$section" ]]; then
+          printf '%s\n' "$desired"
+        fi
+      done < "$ini_file" > "$tmp_ini"
+      /bin/mv "$tmp_ini" "$ini_file"
+      good "Inserted into $ini_file under $section: $desired"
+    fi
+  else
+    printf '\n%s\n%s\n' "$section" "$desired" >> "$ini_file"
+    good "Appended to $ini_file: $section $desired"
+  fi
+}
+
+ensure_marketing_version_in_engine_ini() {
+  # Write MARKETING_VERSION (CFBundleShortVersionString) to its canonical
+  # location when the user has supplied one via .env / env var / CLI flag.
+  # UE picks up VersionInfo at GenerateProjectFiles time and stamps it into
+  # MARKETING_VERSION in the generated xcconfig.
+  [[ -n "${MARKETING_VERSION:-}" ]] || return 0
+  set_engine_ini_value \
+    "[/Script/MacRuntimeSettings.MacRuntimeSettings]" \
+    "VersionInfo" \
+    "$MARKETING_VERSION"
+}
+
+ensure_app_category_in_engine_ini() {
+  # Write LSApplicationCategoryType to its canonical location when the user
+  # has supplied one. UE's BaseEngine.ini default is "public.app-category.games";
+  # only override when needed.
+  [[ -n "${APP_CATEGORY:-}" ]] || return 0
+  set_engine_ini_value \
+    "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
+    "AppCategory" \
+    "$APP_CATEGORY"
+}
+
+seed_mac_info_template_plist() {
+  # Defensively place a Mac Info.Template.plist at the canonical project path.
+  # When the file is missing, copy the engine's stock template; when GameMode
+  # keys are requested via --game-mode / --no-game-mode, set them via PlistBuddy
+  # (idempotent: skips when value already matches).
+  #
+  # BaseEngine.ini ships TemplateMacPlist=(FilePath="/Game/Build/Mac/Resources/Info.Template.plist"),
+  # so any plist landing here is auto-discovered by UE — no ini override required.
+  [[ "${SEED_MAC_INFO_TEMPLATE_PLIST:-1}" == "1" ]] || { info "Skipping Info.Template.plist seed (SEED_MAC_INFO_TEMPLATE_PLIST=0)"; return 0; }
+
+  local src dst_dir dst
+  src="$UE_ROOT/Engine/Build/Mac/Resources/Info.Template.plist"
+  dst_dir="$REPO_ROOT/Build/Mac/Resources"
+  dst="$dst_dir/Info.Template.plist"
+
+  if [[ ! -f "$dst" ]]; then
+    if [[ ! -f "$src" ]]; then
+      warn "Engine Info.Template.plist not found at $src — skipping plist seed"
+      return 0
+    fi
+    /bin/mkdir -p "$dst_dir"
+    /bin/cp "$src" "$dst"
+    /bin/chmod 644 "$dst"
+    good "Seeded $dst from engine stock (commit it; UE merges this into the final Info.plist)"
+  else
+    info "Mac Info.Template.plist already present: $dst"
+  fi
+
+  # GameMode keys — only touch the plist when the user supplied an explicit
+  # preference. Otherwise the user's plist is sovereign.
+  if [[ -n "${ENABLE_GAME_MODE:-}" ]]; then
+    local _game_mode_val="false"
+    [[ "$ENABLE_GAME_MODE" == "1" ]] && _game_mode_val="true"
+    _set_plist_bool "$dst" "LSSupportsGameMode" "$_game_mode_val"
+    _set_plist_bool "$dst" "GCSupportsGameMode" "$_game_mode_val"
+  fi
+}
+
+_set_plist_bool() {
+  # Idempotent bool setter for a top-level plist key. Skips writing when the
+  # current value already matches.
+  local plist="$1" key="$2" value="$3"
+  local current
+  current="$(/usr/libexec/PlistBuddy -c "Print :$key" "$plist" 2>/dev/null || true)"
+  if [[ "$current" == "$value" ]]; then
+    info "Plist $plist already has $key=$value"
+    return 0
+  fi
+  if [[ -n "$current" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :$key $value" "$plist"
+  else
+    /usr/libexec/PlistBuddy -c "Add :$key bool $value" "$plist"
+  fi
+  good "Updated $plist → $key=$value"
+}
+
+override_cfbundle_version_in_app_plist() {
+  # Apply the resolved CFBundleVersion to the exported .app's Info.plist.
+  # Runs *after* xcodebuild -exportArchive but *before* the codesign step —
+  # the signature is computed over the modified Info.plist, so the bundle
+  # stays internally consistent.
+  #
+  # The value comes from _resolve_cfbundle_version_for_build() (Path B). When
+  # USE_UE_PACKAGE_VERSION_COUNTER=1 (Path A, opt-in), the resolver leaves
+  # CFBUNDLE_VERSION empty and this function is a no-op — UE's
+  # PackageVersionCounter mechanism supplies CFBundleVersion via the xcconfig.
+  [[ -n "${CFBUNDLE_VERSION:-}" ]] || return 0
+  [[ -n "${APP_PATH:-}" ]] || die "override_cfbundle_version_in_app_plist called before APP_PATH was resolved"
+
+  local plist="$APP_PATH/Contents/Info.plist"
+  [[ -f "$plist" ]] || die "Cannot override CFBundleVersion: Info.plist missing at $plist"
+
+  local current
+  current="$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$plist" 2>/dev/null || true)"
+  if [[ "$current" == "$CFBUNDLE_VERSION" ]]; then
+    info "CFBundleVersion already $CFBUNDLE_VERSION in $plist — no override needed"
+    return 0
+  fi
+  if [[ -n "$current" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $CFBUNDLE_VERSION" "$plist"
+  else
+    /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $CFBUNDLE_VERSION" "$plist"
+  fi
+  good "Overrode CFBundleVersion in $plist → $CFBUNDLE_VERSION (was: ${current:-<unset>})"
+}
+
+override_cfbundle_version_in_xcarchive_metadata() {
+  # Stamp the resolved CFBundleVersion into <ARCHIVE_PATH>/Info.plist's
+  # :ApplicationProperties:CFBundleVersion so Xcode Organizer's Archives view
+  # shows the auto-bumped value (e.g. "1.0.2 (1)") instead of UE's pre-export
+  # internal value (e.g. "1.0.2 (0.1)").
+  #
+  # This is cosmetic — the .xcarchive's embedded .app is not what ships;
+  # xcodebuild -exportArchive copies it to EXPORT_DIR where our existing
+  # post-export Info.plist override + per-component codesign produces the
+  # final signed .app. We deliberately do NOT modify the embedded .app's
+  # Info.plist here, which would invalidate its signature inside the
+  # archive. The archive's top-level metadata is sovereign for the
+  # Organizer display.
+  #
+  # Runs between `xcodebuild ... archive` and `xcodebuild -exportArchive`.
+  # No-op on Path A (CFBUNDLE_VERSION cleared by the resolver).
+  [[ -n "${CFBUNDLE_VERSION:-}" ]] || return 0
+  [[ -n "${ARCHIVE_PATH:-}" ]] || die "override_cfbundle_version_in_xcarchive_metadata called before ARCHIVE_PATH was resolved"
+
+  local archive_plist="$ARCHIVE_PATH/Info.plist"
+  if [[ ! -f "$archive_plist" ]]; then
+    warn "Archive metadata Info.plist missing: $archive_plist — skipping Organizer-display stamp"
+    return 0
+  fi
+
+  local current
+  current="$(/usr/libexec/PlistBuddy -c "Print :ApplicationProperties:CFBundleVersion" "$archive_plist" 2>/dev/null || true)"
+  if [[ "$current" == "$CFBUNDLE_VERSION" ]]; then
+    info "Archive metadata CFBundleVersion already $CFBUNDLE_VERSION — no override needed"
+    return 0
+  fi
+  if [[ -n "$current" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :ApplicationProperties:CFBundleVersion $CFBUNDLE_VERSION" "$archive_plist"
+  else
+    /usr/libexec/PlistBuddy -c "Add :ApplicationProperties:CFBundleVersion string $CFBUNDLE_VERSION" "$archive_plist"
+  fi
+  good "Stamped $archive_plist → ApplicationProperties:CFBundleVersion=$CFBUNDLE_VERSION (was: ${current:-<unset>}); Xcode Organizer will now show this version"
+}
+
+_resolve_cfbundle_version_for_build() {
+  # Decide what value CFBundleVersion should be for this build, based on:
+  #   - USE_UE_PACKAGE_VERSION_COUNTER=1 → Path A; clear CFBUNDLE_VERSION,
+  #     no Info.plist override, no .env persist.
+  #   - --set-cfbundle-version N (CLI_SET_CFBUNDLE_VERSION=1) → use N as-is,
+  #     persist to .env on success ("new baseline" semantics).
+  #   - Default Path B → auto pre-increment the integer in CFBUNDLE_VERSION
+  #     (treating empty/missing as 0), persist on success. With .env at 0,
+  #     the first build ships CFBundleVersion=1.
+  # Sets CFBUNDLE_VERSION (the ship value) and _CFBV_PERSIST (1 if we should
+  # write the value back to .env on successful build).
+  _CFBV_PERSIST=0
+
+  if [[ "${USE_UE_PACKAGE_VERSION_COUNTER:-0}" == "1" ]]; then
+    info "Path A enabled (USE_UE_PACKAGE_VERSION_COUNTER=1) — CFBundleVersion comes from UE's PackageVersionCounter; skipping Info.plist override"
+    CFBUNDLE_VERSION=""
+    return 0
+  fi
+
+  if [[ "${CLI_SET_CFBUNDLE_VERSION:-0}" == "1" ]]; then
+    [[ -n "$CFBUNDLE_VERSION" ]] || die "--set-cfbundle-version requires a value"
+    _CFBV_PERSIST=1
+    info "CFBundleVersion baseline set explicitly via --set-cfbundle-version: $CFBUNDLE_VERSION (will persist to .env on success)"
+    return 0
+  fi
+
+  # Default Path B: auto pre-increment the integer in CFBUNDLE_VERSION.
+  local _current="${CFBUNDLE_VERSION:-0}"
+  [[ -z "$_current" ]] && _current=0
+  if [[ "$_current" =~ ^[0-9]+$ ]]; then
+    CFBUNDLE_VERSION=$((_current + 1))
+    _CFBV_PERSIST=1
+    info "CFBundleVersion auto-bumped: $_current → $CFBUNDLE_VERSION (will persist to .env on success)"
+  else
+    warn "CFBUNDLE_VERSION='$_current' is not a pure integer; auto-bump skipped. Pass --set-cfbundle-version N to reset to a clean integer baseline."
+    _CFBV_PERSIST=0
+  fi
+}
+
+_write_env_var() {
+  # Idempotent in-place writer for a NAME="value" pair in .env. Updates the
+  # line if NAME= exists, otherwise appends. Creates .env if missing.
+  local name="$1" value="$2"
+  local new_line="${name}=\"${value}\""
   local tmp _line
 
   if [[ ! -f "$ENV_FILE" ]]; then
@@ -915,10 +1288,10 @@ write_bumped_version_to_env() {
     return 0
   fi
 
-  if /usr/bin/grep -q "^VERSION_STRING=" "$ENV_FILE"; then
+  if /usr/bin/grep -q "^${name}=" "$ENV_FILE"; then
     tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}env_update_XXXXXX")"
     while IFS= read -r _line || [[ -n "$_line" ]]; do
-      if [[ "$_line" == VERSION_STRING=* ]]; then
+      if [[ "$_line" == "${name}="* ]]; then
         printf '%s\n' "$new_line"
       else
         printf '%s\n' "$_line"
@@ -931,103 +1304,149 @@ write_bumped_version_to_env() {
   good "Persisted to $ENV_FILE: $new_line"
 }
 
-# Stamp Info.plist-related keys in the UE-generated xcconfig before Xcode archive.
-# The xcconfig lives at: Intermediate/ProjectFiles/XcconfigsMac/<LONG_NAME>.xcconfig
-# It is generated by UE's GenerateProjectFiles — this function only rewrites the keys
-# listed below; everything else is left untouched.
-#
-# Keys written:
-#   CURRENT_PROJECT_VERSION              (CFBundleVersion)             — only when VERSION_MODE != NONE
-#   MARKETING_VERSION                    (CFBundleShortVersionString)  — always; defaults to 1.0.0
-#   INFOPLIST_KEY_LSApplicationCategoryType                            — only when APP_CATEGORY is set
-#   INFOPLIST_KEY_LSSupportsGameMode  \  placed immediately after      — always; controlled by ENABLE_GAME_MODE
-#   INFOPLIST_KEY_GCSupportsGameMode  /  LSApplicationCategoryType     — (defaults YES)
-update_xcconfig_versions() {
-  local _xcconfig_path="$REPO_ROOT/Intermediate/ProjectFiles/XcconfigsMac/${LONG_NAME}.xcconfig"
+write_cfbundle_version_to_env() {
+  # Persist the CFBundleVersion that just shipped back to .env so the next
+  # auto-bump build picks up where this one left off. Only runs on a
+  # successful build path (called from end-of-script alongside
+  # write_bumped_version_to_env). No-op when:
+  #   - Path A is in use (CFBUNDLE_VERSION was cleared by the resolver)
+  #   - CFBUNDLE_VERSION is non-integer-valued and auto-bump was skipped
+  [[ "${_CFBV_PERSIST:-0}" == "1" ]] || return 0
+  [[ -n "${CFBUNDLE_VERSION:-}" ]] || return 0
+  _write_env_var "CFBUNDLE_VERSION" "$CFBUNDLE_VERSION"
+}
 
-  if [[ ! -f "$_xcconfig_path" ]]; then
-    info "xcconfig not found at $_xcconfig_path — skipping Info.plist stamp (run GenerateProjectFiles first)"
+seed_mac_update_version_after_build_script() {
+  # Drop a project-level UpdateVersionAfterBuild.sh that strips the engine's
+  # Perforce changelist prefix from CFBundleVersion. UE's AppleToolChain.cs at
+  # lines 394-397 explicitly checks the project for this script and falls back
+  # to the engine's copy only if absent — this is the sanctioned override path.
+  #
+  # Why we do it: the engine script writes
+  #     UE_MAC_BUILD_VERSION = <CL>.<MAC_VERSION>
+  # where <CL> is the Changelist field from Engine/Build/Build.version. For an
+  # Epic Games Launcher install of 5.7.4 that is 51494982, so projects ship
+  # CFBundleVersion=51494982.0.2 — almost never what you want. Our override
+  # writes:
+  #     UE_MAC_BUILD_VERSION = <MAC_VERSION>
+  # so CFBundleVersion ships as the PackageVersionCounter contents (e.g. 0.2).
+  #
+  # The override is otherwise byte-identical to the engine's script: same
+  # PackageVersionCounter read/increment logic, same Versions.xcconfig output
+  # path, same handling of the Mac/IOS/TVOS/VisionOS counters.
+  #
+  # Idempotent: skips if the destination already exists. Gated on
+  # USE_UE_PACKAGE_VERSION_COUNTER (default 0, opt-in for advanced users).
+  [[ "${USE_UE_PACKAGE_VERSION_COUNTER:-0}" == "1" ]] || return 0
+
+  local dst_dir dst
+  dst_dir="$REPO_ROOT/Build/BatchFiles/Mac"
+  dst="$dst_dir/UpdateVersionAfterBuild.sh"
+
+  if [[ -f "$dst" ]]; then
+    info "Project UpdateVersionAfterBuild.sh already present: $dst"
     return 0
   fi
 
-  # CURRENT_PROJECT_VERSION — only meaningful when we have a version string.
-  local _bundle_version=""
-  if [[ "$VERSION_MODE" != "NONE" ]]; then
-    _bundle_version="$(_resolve_version_string)"
-  fi
+  /bin/mkdir -p "$dst_dir"
+  /bin/cat > "$dst" <<'OVERRIDE'
+#!/bin/bash
+# Project-level override of UE's UpdateVersionAfterBuild.sh.
+#
+# UE's AppleToolChain.cs::UpdateVersionFile checks for this file at
+#   <project>/Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh
+# and falls back to the engine's copy only if absent.
+# Reference: AppleToolChain.cs:394-397.
+#
+# Differs from the engine version only in that CFBundleVersion is NOT prefixed
+# with the engine's Build.version Changelist (e.g. 51494982 in 5.7.4). That CL
+# leaks into shipping builds as a giant build number, which most projects
+# don't want. The PackageVersionCounter contents (e.g. "0.2") become
+# UE_MAC_BUILD_VERSION verbatim, so CFBundleVersion=0.2 in the shipped app.
+#
+# Args (UE-provided):
+#   $1 = product directory (project root for projects, engine for engine builds)
+#   $2 = platform we are incrementing
+#   $3 = engine changelist (intentionally ignored by this override)
+#
+# Maintained by ship.sh; regenerate by deleting this file and re-running ship.sh.
 
-  # MARKETING_VERSION — user-visible display version (CFBundleShortVersionString).
-  local _marketing_ver="${MARKETING_VERSION:-}"
-  if [[ -z "$_marketing_ver" ]]; then
-    warn "MARKETING_VERSION not set — defaulting to 1.0.0 (set MARKETING_VERSION in .env or pass --marketing-version)"
-    _marketing_ver="1.0.0"
-  fi
+PRODUCT_NAME=$(basename "$1")
+VERSION_FILE_DIR="$1/Build/$2"
+VERSION_FILE="$VERSION_FILE_DIR/$PRODUCT_NAME.PackageVersionCounter"
 
-  # ENABLE_GAME_MODE — stamps LSSupportsGameMode + GCSupportsGameMode immediately
-  # after INFOPLIST_KEY_LSApplicationCategoryType.
-  local _game_mode_raw="${ENABLE_GAME_MODE:-}"
-  if [[ -z "$_game_mode_raw" ]]; then
-    warn "ENABLE_GAME_MODE not set — defaulting to YES (set ENABLE_GAME_MODE=0 in .env or pass --no-game-mode to disable)"
-    _game_mode_raw="1"
-  fi
-  local _game_mode_val="NO"
-  [[ "$_game_mode_raw" == "1" ]] && _game_mode_val="YES"
+VERSION="0.1"
+if [ -f "$VERSION_FILE" ]; then
+	VERSION=$(cat "$VERSION_FILE")
+fi
 
-  # APP_CATEGORY — optional override for INFOPLIST_KEY_LSApplicationCategoryType.
-  local _app_category="${APP_CATEGORY:-}"
+IFS="." read -ra VERSION_ARRAY <<< "$VERSION"
 
-  local _tmp _line
-  local _found_cpv=0 _found_mv=0 _found_cat=0
-  _tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}xcconfig_update_XXXXXX")"
+mkdir -p "${VERSION_FILE_DIR}"
+echo "${VERSION_ARRAY[0]}.$((VERSION_ARRAY[1]+1))" > "$VERSION_FILE"
 
-  while IFS= read -r _line || [[ -n "$_line" ]]; do
-    if [[ "$_line" == CURRENT_PROJECT_VERSION* && -n "$_bundle_version" ]]; then
-      printf '%s\n' "CURRENT_PROJECT_VERSION = $_bundle_version"
-      _found_cpv=1
-    elif [[ "$_line" == MARKETING_VERSION* ]]; then
-      printf '%s\n' "MARKETING_VERSION = $_marketing_ver"
-      _found_mv=1
-    elif [[ "$_line" == INFOPLIST_KEY_LSApplicationCategoryType* ]]; then
-      # Write the category line (override value if APP_CATEGORY is set, else preserve).
-      if [[ -n "$_app_category" ]]; then
-        printf '%s\n' "INFOPLIST_KEY_LSApplicationCategoryType = $_app_category"
-      else
-        printf '%s\n' "$_line"
-      fi
-      # Always place game mode keys immediately after the category line.
-      printf '%s\n' "INFOPLIST_KEY_LSSupportsGameMode = $_game_mode_val"
-      printf '%s\n' "INFOPLIST_KEY_GCSupportsGameMode = $_game_mode_val"
-      _found_cat=1
-    elif [[ "$_line" == INFOPLIST_KEY_LSSupportsGameMode* || "$_line" == INFOPLIST_KEY_GCSupportsGameMode* ]]; then
-      # Suppress old positions — these are now anchored after LSApplicationCategoryType.
-      :
-    else
-      printf '%s\n' "$_line"
-    fi
-  done < "$_xcconfig_path" > "$_tmp"
 
-  if [[ "$_found_cpv" -eq 0 && -n "$_bundle_version" ]]; then
-    printf '%s\n' "CURRENT_PROJECT_VERSION = $_bundle_version" >> "$_tmp"
-  fi
-  if [[ "$_found_mv" -eq 0 ]]; then
-    printf '%s\n' "MARKETING_VERSION = $_marketing_ver" >> "$_tmp"
-  fi
-  # If LSApplicationCategoryType was never found, append the category (if overriding)
-  # and the game mode keys at the end as a fallback.
-  if [[ "$_found_cat" -eq 0 ]]; then
-    if [[ -n "$_app_category" ]]; then
-      printf '%s\n' "INFOPLIST_KEY_LSApplicationCategoryType = $_app_category" >> "$_tmp"
-    fi
-    printf '%s\n' "INFOPLIST_KEY_LSSupportsGameMode = $_game_mode_val" >> "$_tmp"
-    printf '%s\n' "INFOPLIST_KEY_GCSupportsGameMode = $_game_mode_val" >> "$_tmp"
-  fi
+MAC_VERSION="0.1"
+VERSION_FILE="$1/Build/Mac/$PRODUCT_NAME.PackageVersionCounter"
+if [ -f "$VERSION_FILE" ]; then
+	MAC_VERSION=$(cat "$VERSION_FILE")
+fi
 
-  /bin/mv "$_tmp" "$_xcconfig_path"
-  if [[ -n "$_bundle_version" ]]; then
-    good "Stamped $_xcconfig_path → CURRENT_PROJECT_VERSION=$_bundle_version, MARKETING_VERSION=$_marketing_ver, game mode=$_game_mode_val"
-  else
-    good "Stamped $_xcconfig_path → MARKETING_VERSION=$_marketing_ver, game mode=$_game_mode_val"
+IOS_VERSION="0.1"
+VERSION_FILE="$1/Build/IOS/$PRODUCT_NAME.PackageVersionCounter"
+if [ -f "$VERSION_FILE" ]; then
+	IOS_VERSION=$(cat "$VERSION_FILE")
+fi
+
+TVOS_VERSION="0.1"
+VERSION_FILE="$1/Build/TVOS/$PRODUCT_NAME.PackageVersionCounter"
+if [ -f "$VERSION_FILE" ]; then
+	TVOS_VERSION=$(cat "$VERSION_FILE")
+fi
+
+VISIONOS_VERSION="0.1"
+VERSION_FILE="$1/Build/VisionOS/$PRODUCT_NAME.PackageVersionCounter"
+if [ -f "$VERSION_FILE" ]; then
+	VISIONOS_VERSION=$(cat "$VERSION_FILE")
+fi
+
+XCCONFIG_FILE="$1/Intermediate/Build/Versions.xcconfig"
+
+mkdir -p "$1/Intermediate/Build"
+echo "UE_MAC_BUILD_VERSION = $MAC_VERSION" > "$XCCONFIG_FILE"
+echo "UE_IOS_BUILD_VERSION = $IOS_VERSION" >> "$XCCONFIG_FILE"
+echo "UE_TVOS_BUILD_VERSION = $TVOS_VERSION" >> "$XCCONFIG_FILE"
+echo "UE_VISIONOS_BUILD_VERSION = $VISIONOS_VERSION" >> "$XCCONFIG_FILE"
+OVERRIDE
+  /bin/chmod 755 "$dst"
+  good "Seeded $dst (drops CL prefix from CFBundleVersion; commit it)"
+}
+
+seed_mac_package_version_counter() {
+  # Defensively seed Build/Mac/<Project>.PackageVersionCounter with "0.0" when
+  # missing. UE's UpdateVersionAfterBuild.sh reads this file at xcodebuild time,
+  # increments the minor (0.0 → 0.1 → 0.2 → ...), and writes the value into
+  # Intermediate/Build/Versions.xcconfig as UE_MAC_BUILD_VERSION. The generated
+  # xcconfig references it via CURRENT_PROJECT_VERSION = $(UE_MAC_BUILD_VERSION),
+  # so CFBundleVersion auto-increments per build with no further work.
+  #
+  # If you want a specific starting value, edit the counter file directly; the
+  # script never overwrites an existing one.
+  [[ "${USE_UE_PACKAGE_VERSION_COUNTER:-0}" == "1" ]] || return 0
+
+  local base counter_dir counter_file
+  base="${UPROJECT_NAME%.uproject}"
+  counter_dir="$REPO_ROOT/Build/Mac"
+  counter_file="$counter_dir/${base}.PackageVersionCounter"
+
+  if [[ -f "$counter_file" ]]; then
+    info "PackageVersionCounter already present: $counter_file"
+    return 0
   fi
+  /bin/mkdir -p "$counter_dir"
+  printf '%s' "0.0" > "$counter_file"
+  /bin/chmod 644 "$counter_file"
+  good "Seeded $counter_file → 0.0 (UE auto-increments to 0.1 on first build)"
 }
 
 autodetect_workspace_if_needed() {
@@ -1595,13 +2014,27 @@ REPO_ROOT="${REPO_ROOT:-}"
 UPROJECT_NAME="${UPROJECT_NAME:-}"
 XCODE_WORKSPACE="${XCODE_WORKSPACE:-}"
 XCODE_SCHEME="${XCODE_SCHEME:-}"
-BUILD_DIR_REL="${BUILD_DIR_REL:-Build}"
-LOG_DIR_REL="${LOG_DIR_REL:-Logs}"
+# BUILD_DIR holds script-side outputs: .xcarchive, export dir, ZIP, DMG.
+# Default sits under Saved/ (UE's documented dumping ground for derived artifacts);
+# Build/{Platform}/ is reserved for committed source-controlled inputs.
+# UAT BuildCookRun's -archivedirectory is derived as the parent so that UAT's
+# automatic /<Platform>/ suffix lands inside BUILD_DIR.
+BUILD_DIR_REL="${BUILD_DIR_REL:-Saved/Packages/Mac}"
+LOG_DIR_REL="${LOG_DIR_REL:-Saved/Logs}"
 
 SHORT_NAME="${SHORT_NAME:-}"
 LONG_NAME="${LONG_NAME:-}"
 
 USE_XCODE_EXPORT="${USE_XCODE_EXPORT:-1}"
+REGEN_PROJECT_FILES="${REGEN_PROJECT_FILES:-1}"
+SEED_APPLE_LAUNCHSCREEN_COMPAT="${SEED_APPLE_LAUNCHSCREEN_COMPAT:-1}"
+SEED_MAC_INFO_TEMPLATE_PLIST="${SEED_MAC_INFO_TEMPLATE_PLIST:-1}"
+# CFBundleVersion strategy. Default OFF (Path B): the script auto-bumps an
+# integer CFBUNDLE_VERSION every build and persists it to .env on success.
+# When ON (Path A): the script seeds Build/Mac/<Project>.PackageVersionCounter
+# and a project-level UpdateVersionAfterBuild.sh override, then leaves
+# CFBundleVersion to UE. Mutually exclusive with the auto-bump.
+USE_UE_PACKAGE_VERSION_COUNTER="${USE_UE_PACKAGE_VERSION_COUNTER:-0}"
 CLEAN_BUILD_DIR="${CLEAN_BUILD_DIR:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 PRINT_CONFIG="${PRINT_CONFIG:-0}"
@@ -1639,6 +2072,7 @@ VERSION_CONTENT_DIR="${VERSION_CONTENT_DIR:-BuildInfo}"
 MARKETING_VERSION="${MARKETING_VERSION:-}"
 ENABLE_GAME_MODE="${ENABLE_GAME_MODE:-}"
 APP_CATEGORY="${APP_CATEGORY:-}"
+CFBUNDLE_VERSION="${CFBUNDLE_VERSION:-}"
 
 
 # -----------------------------------------------------------------------------
@@ -1656,6 +2090,10 @@ Options (highest priority):
   --ue-root PATH
   --xcode-workspace FILE_OR_PATH     (e.g. "MyGame (Mac).xcworkspace")
   --xcode-scheme NAME
+  --build-dir PATH                   (script-side outputs; default: Saved/Packages/Mac.
+                                      UAT BuildCookRun's -archivedirectory is
+                                      derived as the parent so its /<Platform>/
+                                      output lands inside this dir.)
   --development-team TEAMID
   --sign-identity "Developer ID Application: ... (TEAMID)"
   --export-plist PATH
@@ -1665,6 +2103,34 @@ Options (highest priority):
   --long-name NAME
 
   --xcode-export / --no-xcode-export
+  --regen-project-files / --no-regen-project-files
+                                     run GenerateProjectFiles.sh before xcodebuild
+                                     (default: enabled when --xcode-export)
+  --seed-apple-launchscreen-compat / --no-seed-apple-launchscreen-compat
+                                     copy engine's LaunchScreen.storyboardc into
+                                     Build/Apple/Resources/Interface/ if absent,
+                                     so Mac's launch-screen path priority list
+                                     short-circuits before Xcode tries to compile
+                                     a consumer-supplied iOS .storyboard source
+                                     (default: enabled)
+  --seed-mac-info-template-plist / --no-seed-mac-info-template-plist
+                                     copy engine's Info.Template.plist into
+                                     Build/Mac/Resources/ if absent. UE merges
+                                     this template into the final Info.plist;
+                                     this is the canonical home for
+                                     LSSupportsGameMode / GCSupportsGameMode and
+                                     any other static plist keys (default: enabled)
+  --use-ue-package-version-counter / --no-use-ue-package-version-counter
+                                     opt into UE's canonical CFBundleVersion path
+                                     (Path A): seeds Build/Mac/<Project>.PackageVersionCounter
+                                     and a project-level
+                                     Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh
+                                     override (sanctioned at AppleToolChain.cs:394-397)
+                                     that strips the engine's Build.version
+                                     Changelist (e.g. 51494982) from CFBundleVersion.
+                                     Mutually exclusive with the default auto-bump.
+                                     (default: disabled — the script's auto-bump
+                                     of CFBUNDLE_VERSION wins instead)
   --clean-build-dir / --no-clean-build-dir
   --dry-run / --no-dry-run
   --print-config / --no-print-config
@@ -1694,6 +2160,14 @@ Options (highest priority):
   --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
   --game-mode / --no-game-mode       (stamp LSSupportsGameMode + GCSupportsGameMode in xcconfig, default: YES)
   --app-category STRING              (INFOPLIST_KEY_LSApplicationCategoryType, e.g. public.app-category.games)
+  --set-cfbundle-version STRING      set CFBundleVersion to STRING for this build
+                                     AND persist it to .env as the new baseline.
+                                     Future auto-bump builds will resume from
+                                     STRING. Use to reset the counter or pin to
+                                     a CI-supplied value (e.g. $GITHUB_RUN_NUMBER).
+                                     Without this flag, the script auto-bumps
+                                     CFBUNDLE_VERSION as an integer every build
+                                     (default behavior; first build ships 1).
   --bump-major / --bump-minor / --bump-patch
                                      bump VERSION_STRING from .env or --version-string;
                                      implies VERSION_MODE=MANUAL if not already set
@@ -1721,6 +2195,7 @@ while [[ $# -gt 0 ]]; do
     --ue-root)              UE_ROOT="$2"; shift 2 ;;
     --xcode-workspace)      XCODE_WORKSPACE="$2"; shift 2 ;;
     --xcode-scheme)         XCODE_SCHEME="$2"; shift 2 ;;
+    --build-dir)            BUILD_DIR_REL="$2"; shift 2 ;;
 
     --development-team)     DEVELOPMENT_TEAM="$2"; shift 2 ;;
     --sign-identity)        SIGN_IDENTITY="$2"; shift 2 ;;
@@ -1732,6 +2207,14 @@ while [[ $# -gt 0 ]]; do
 
     --xcode-export)         USE_XCODE_EXPORT="1"; shift ;;
     --no-xcode-export)      USE_XCODE_EXPORT="0"; shift ;;
+    --regen-project-files)    REGEN_PROJECT_FILES="1"; shift ;;
+    --no-regen-project-files) REGEN_PROJECT_FILES="0"; shift ;;
+    --seed-apple-launchscreen-compat)    SEED_APPLE_LAUNCHSCREEN_COMPAT="1"; shift ;;
+    --no-seed-apple-launchscreen-compat) SEED_APPLE_LAUNCHSCREEN_COMPAT="0"; shift ;;
+    --seed-mac-info-template-plist)      SEED_MAC_INFO_TEMPLATE_PLIST="1"; shift ;;
+    --no-seed-mac-info-template-plist)   SEED_MAC_INFO_TEMPLATE_PLIST="0"; shift ;;
+    --use-ue-package-version-counter)    USE_UE_PACKAGE_VERSION_COUNTER="1"; shift ;;
+    --no-use-ue-package-version-counter) USE_UE_PACKAGE_VERSION_COUNTER="0"; shift ;;
     --clean-build-dir)      CLEAN_BUILD_DIR="1"; shift ;;
     --no-clean-build-dir)   CLEAN_BUILD_DIR="0"; shift ;;
     --dry-run)              DRY_RUN="1"; shift ;;
@@ -1772,6 +2255,7 @@ while [[ $# -gt 0 ]]; do
     --game-mode)                ENABLE_GAME_MODE="1"; shift ;;
     --no-game-mode)             ENABLE_GAME_MODE="0"; shift ;;
     --app-category)             APP_CATEGORY="$2"; shift 2 ;;
+    --set-cfbundle-version)     CFBUNDLE_VERSION="$2"; CLI_SET_CFBUNDLE_VERSION=1; shift 2 ;;
     --bump-major|--bump-minor|--bump-patch)
       if is_placeholder "${VERSION_STRING:-}"; then
         die "$1 requires a base version. Set VERSION_STRING in .env or pass --version-string X.Y.Z before $1."
@@ -1874,6 +2358,12 @@ UE_EDITOR="$UE_ROOT/$UE_EDITOR_SUBPATH"
 # Artifact roots
 BUILD_DIR="$REPO_ROOT/$BUILD_DIR_REL"
 LOG_DIR="$REPO_ROOT/$LOG_DIR_REL"
+
+# UAT BuildCookRun's -archivedirectory has /<TargetPlatform>/ appended by UAT,
+# so we point it at the parent of BUILD_DIR. With the default
+# (Saved/Packages/Mac), UAT writes to Saved/Packages/Mac/<App>-Mac-Shipping.app/
+# — the same directory that holds the rest of the script's artifacts.
+UAT_ARCHIVE_DIR="$(/usr/bin/dirname "$BUILD_DIR")"
 
 # Normalize a few important paths to absolute paths when possible.
 # (This helps when the user passes relative paths via env/CLI.)
@@ -2024,7 +2514,7 @@ if [[ "$PRINT_CONFIG" == "1" ]]; then
   exit 0
 fi
 
-# Logging (keep logs OUTSIDE Build/, since Build/ is often wiped each run)
+# Logging — defaults to Saved/Logs (UE's conventional location for derived artifacts).
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/build_$(date +%Y-%m-%d_%H-%M-%S).log"
 exec >>"$LOG_FILE" 2>&1
@@ -2116,11 +2606,15 @@ fi
 if [[ "$DRY_RUN" == "1" ]]; then
   print_config
   echo "== DRY RUN ==" >&3
+  steps=""
   if [[ "$VERSION_MODE" != "NONE" ]]; then
-    steps="stamp Content/$VERSION_CONTENT_DIR/version.txt → UAT BuildCookRun"
-  else
-    steps="UAT BuildCookRun"
+    steps="stamp Content/$VERSION_CONTENT_DIR/version.txt"
   fi
+  if [[ -n "$steps" ]]; then steps="$steps → seed canonical UE files"; else steps="seed canonical UE files"; fi
+  if [[ "$USE_XCODE_EXPORT" == "1" && "$REGEN_PROJECT_FILES" == "1" ]]; then
+    steps="$steps → GenerateProjectFiles"
+  fi
+  steps="$steps → UAT BuildCookRun"
   if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     steps="$steps → Xcode archive/export"
   else
@@ -2146,6 +2640,11 @@ if [[ "$DRY_RUN" == "1" ]]; then
   exit 0
 fi
 
+# Resolve the CFBundleVersion that this build will ship. Mutates CFBUNDLE_VERSION
+# (auto-bump or explicit-set) and sets _CFBV_PERSIST. Done after the dry-run /
+# print-config exits so those modes don't accidentally consume a build number.
+_resolve_cfbundle_version_for_build
+
 echo "== Prep output locations ==" >&3
 rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR" "$ZIP_PATH"
 if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
@@ -2156,7 +2655,13 @@ mkdir -p "$BUILD_DIR"
 
 ensure_game_ini_staging_entry
 write_version_to_content
-update_xcconfig_versions
+seed_apple_launchscreen_compat
+seed_mac_info_template_plist
+seed_mac_update_version_after_build_script
+seed_mac_package_version_counter
+ensure_app_category_in_engine_ini
+ensure_marketing_version_in_engine_ini
+regenerate_project_files
 
 info "Building game (UAT BuildCookRun)"
 
@@ -2166,7 +2671,7 @@ info "Building game (UAT BuildCookRun)"
   -noP4 -build -cook -pak -iostore \
   -targetplatform=Mac -clientconfig="$UE_CLIENT_CONFIG" \
   -stage -package \
-  -archive -archivedirectory="$BUILD_DIR" \
+  -archive -archivedirectory="$UAT_ARCHIVE_DIR" \
   -utf8output -verbose -specifiedarchitecture=arm64+x86_64
 
 echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3
@@ -2185,6 +2690,10 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
     ENABLE_HARDENED_RUNTIME=YES \
     OTHER_CODE_SIGN_FLAGS="--timestamp"
+
+  # Stamp our resolved CFBundleVersion into the archive metadata so Xcode
+  # Organizer shows the auto-bumped value, not UE's internal pre-export value.
+  override_cfbundle_version_in_xcarchive_metadata
 
   echo "== Export signed app for Developer ID ==" >&3
   # ExportOptions.plist controls how Xcode exports the archive.
@@ -2302,6 +2811,10 @@ PLIST
 fi
 
 echo "Using signing identity: $SIGN_IDENTITY" >&3
+
+# CFBundleVersion override (only when CFBUNDLE_VERSION is set). Must run
+# before any codesign step, since signing hashes Info.plist content.
+override_cfbundle_version_in_app_plist
 
 # Apple deprecated --deep for distribution signing. The correct approach is to
 # sign all nested dylibs and frameworks individually first, then sign the outer
@@ -2571,6 +3084,7 @@ echo "  - If distributing via a launcher (Steam, Epic, etc.), test launching fro
 echo "  - If distributing direct-download, test on a separate Mac (or a clean user account) with Gatekeeper enabled." >&3
 
 write_bumped_version_to_env
+write_cfbundle_version_to_env
 echo "✅ Done" >&3
 echo "App: $APP_PATH" >&3
 if [[ "$ENABLE_ZIP" == "1" ]]; then
