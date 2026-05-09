@@ -7,15 +7,16 @@ This is the most common source of confusion when wiring up an Unreal project for
 - **`Build/{Platform}/` is for committed source-controlled *inputs*.** App icons, custom launch storyboards, `Info.plist` fragments, entitlements, signing config, `PakBlacklist*.txt`. The folder name is a UE3-era misnomer; treat it as "platform-source-inputs/". UBT does write a small set of intermediates here (`UBTGenerated/`, `FileOpenOrder/`, `*.PackageVersionCounter`); those are managed by the engine and stay gitignored.
 - **`Saved/` is for derived artifacts** — UE's documented dumping ground. It is gitignored by default and is where this script writes everything: cooked content, staged builds, packaged `.app`/`.zip`/`.dmg`, and logs.
 
-`ship.sh` does write three specific files under `Build/` — all of them stock engine assets at their *canonical* UE locations, so UE's regular machinery picks them up at `GenerateProjectFiles` / `xcodebuild` time:
+`ship.sh` does write four specific files under `Build/` — all of them at their *canonical* UE locations, so UE's regular machinery picks them up at `GenerateProjectFiles` / `xcodebuild` time:
 
-| Path | Why the script seeds it | Disable with |
-|---|---|---|
-| `Build/Apple/Resources/Interface/LaunchScreen.storyboardc` | Stops Mac from trying to compile a consumer-supplied iOS `.storyboard` source. See [gotchas](gotchas.md#adding-a-custom-ios-launchscreenstoryboard-breaks-the-mac-build). | `--no-seed-apple-launchscreen-compat` |
-| `Build/Mac/Resources/Info.Template.plist` | Canonical home for static `Info.plist` keys like `LSSupportsGameMode`. UE's `BaseEngine.ini` already configures `TemplateMacPlist=` to point here. | `--no-seed-mac-info-template-plist` |
-| `Build/Mac/<Project>.PackageVersionCounter` | UE's canonical `CFBundleVersion` auto-increment source. UE rewrites this every build via `UpdateVersionAfterBuild.sh`. | `--no-seed-mac-package-version-counter` |
+| Path | Why the script seeds it | Commit it? | Disable with |
+|---|---|---|---|
+| `Build/Apple/Resources/Interface/LaunchScreen.storyboardc` | Stops Mac from trying to compile a consumer-supplied iOS `.storyboard` source. See [gotchas](gotchas.md#adding-a-custom-ios-launchscreenstoryboard-breaks-the-mac-build). | yes | `--no-seed-apple-launchscreen-compat` |
+| `Build/Mac/Resources/Info.Template.plist` | Canonical home for static `Info.plist` keys like `LSSupportsGameMode`. UE's `BaseEngine.ini` already configures `TemplateMacPlist=` to point here. | yes | `--no-seed-mac-info-template-plist` |
+| `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` | Strips the engine's `Build.version` Changelist from `CFBundleVersion`. Sanctioned override at `AppleToolChain.cs:394-397`. See [versioning.md](versioning.md#stripping-the-engine-changelist-prefix). | yes | `--no-seed-mac-update-version-after-build` |
+| `Build/Mac/<Project>.PackageVersionCounter` | UE's canonical `CFBundleVersion` source. UE rewrites this every build. **Gitignored per UE convention** (`Build/{Platform}/*.PackageVersionCounter` is in the "UBT writes here itself" category alongside `UBTGenerated/` and `FileOpenOrder/`). | no | `--no-seed-mac-package-version-counter` |
 
-All three are seeded only when missing — once present, the script never overwrites them. Commit them to your repo so the project is self-contained. See [versioning.md](versioning.md#infoplist-values-via-canonical-ue-overrides) for the canonical `Info.plist` story.
+All four are seeded only when missing — once present, the script never overwrites them. See [versioning.md](versioning.md#infoplist-values-via-canonical-ue-overrides) for the canonical `Info.plist` story.
 
 ## Artifact paths
 

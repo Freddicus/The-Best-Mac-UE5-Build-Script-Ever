@@ -58,6 +58,7 @@ The script locates your project automatically when run from the project root. Se
 | `SEED_APPLE_LAUNCHSCREEN_COMPAT` | `1` = copy the engine's pre-compiled `LaunchScreen.storyboardc` into `Build/Apple/Resources/Interface/` if absent (default). Prevents Mac builds from trying to compile a consumer-supplied iOS `.storyboard`. |
 | `SEED_MAC_INFO_TEMPLATE_PLIST` | `1` = copy the engine's stock `Info.Template.plist` into `Build/Mac/Resources/` if absent (default). Canonical home for `LSSupportsGameMode`, `GCSupportsGameMode`, and any other static plist keys. UE's `BaseEngine.ini` already configures `TemplateMacPlist=` to point here, so any plist landing at this path is auto-discovered. |
 | `SEED_MAC_PACKAGE_VERSION_COUNTER` | `1` = seed `Build/Mac/<Project>.PackageVersionCounter` to `0.0` if absent (default). UE auto-increments this on each xcodebuild and writes the value into `CFBundleVersion` via `Versions.xcconfig`. |
+| `SEED_MAC_UPDATE_VERSION_AFTER_BUILD` | `1` = drop a project-level `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` if absent (default). Strips the engine's `Build.version` Changelist (e.g. `51494982` for Epic Games Launcher 5.7.4) from `CFBundleVersion` so projects ship `CFBundleVersion=0.2` instead of `CFBundleVersion=51494982.0.2`. Sanctioned override path at `AppleToolChain.cs:394-397`. **Commit the override** so CI and other machines get the same behavior. |
 | `MARKETING_VERSION` | If set, the script writes `VersionInfo=` to `Config/DefaultEngine.ini` under `[/Script/MacRuntimeSettings.MacRuntimeSettings]` (UE's canonical `CFBundleShortVersionString` source). Unset = leave `DefaultEngine.ini` alone. See [versioning.md](versioning.md#marketing_version). |
 | `APP_CATEGORY` | If set, the script writes `AppCategory=` to `Config/DefaultEngine.ini` under `[/Script/MacTargetPlatform.XcodeProjectSettings]`. UE's `BaseEngine.ini` already defaults to `public.app-category.games` — only override when you need a different value. |
 | `ENABLE_GAME_MODE` | `1` = set `LSSupportsGameMode` + `GCSupportsGameMode` to `true` in your `Build/Mac/Resources/Info.Template.plist`. `0` = set to `false`. Unset = leave the plist's GameMode keys alone (your plist is sovereign). |
@@ -82,6 +83,7 @@ Run `./ship.sh --help` for the full list. Common flags:
 ./ship.sh --no-regen-project-files         # skip the GenerateProjectFiles step
 ./ship.sh --no-seed-mac-info-template-plist          # opt out of plist seed
 ./ship.sh --no-seed-mac-package-version-counter      # opt out of CFBundleVersion seed
+./ship.sh --no-seed-mac-update-version-after-build   # accept engine's CL prefix in CFBundleVersion
 ```
 
 CLI flags override `.env`. Both forms are equivalent — you can mix and match.

@@ -835,6 +835,7 @@ print_config() {
   echo "SEED_APPLE_LAUNCHSCREEN_COMPAT: $SEED_APPLE_LAUNCHSCREEN_COMPAT" >&3
   echo "SEED_MAC_INFO_TEMPLATE_PLIST:   $SEED_MAC_INFO_TEMPLATE_PLIST" >&3
   echo "SEED_MAC_PACKAGE_VERSION_COUNTER: $SEED_MAC_PACKAGE_VERSION_COUNTER" >&3
+  echo "SEED_MAC_UPDATE_VERSION_AFTER_BUILD: $SEED_MAC_UPDATE_VERSION_AFTER_BUILD" >&3
   echo "CLEAN_BUILD_DIR:   $CLEAN_BUILD_DIR" >&3
   echo "DRY_RUN:           $DRY_RUN" >&3
   echo "PRINT_CONFIG:      $PRINT_CONFIG" >&3
@@ -1179,6 +1180,112 @@ _set_plist_bool() {
     /usr/libexec/PlistBuddy -c "Add :$key bool $value" "$plist"
   fi
   good "Updated $plist → $key=$value"
+}
+
+seed_mac_update_version_after_build_script() {
+  # Drop a project-level UpdateVersionAfterBuild.sh that strips the engine's
+  # Perforce changelist prefix from CFBundleVersion. UE's AppleToolChain.cs at
+  # lines 394-397 explicitly checks the project for this script and falls back
+  # to the engine's copy only if absent — this is the sanctioned override path.
+  #
+  # Why we do it: the engine script writes
+  #     UE_MAC_BUILD_VERSION = <CL>.<MAC_VERSION>
+  # where <CL> is the Changelist field from Engine/Build/Build.version. For an
+  # Epic Games Launcher install of 5.7.4 that is 51494982, so projects ship
+  # CFBundleVersion=51494982.0.2 — almost never what you want. Our override
+  # writes:
+  #     UE_MAC_BUILD_VERSION = <MAC_VERSION>
+  # so CFBundleVersion ships as the PackageVersionCounter contents (e.g. 0.2).
+  #
+  # The override is otherwise byte-identical to the engine's script: same
+  # PackageVersionCounter read/increment logic, same Versions.xcconfig output
+  # path, same handling of the Mac/IOS/TVOS/VisionOS counters.
+  #
+  # Idempotent: skips if the destination already exists. Disable with
+  # SEED_MAC_UPDATE_VERSION_AFTER_BUILD=0.
+  [[ "${SEED_MAC_UPDATE_VERSION_AFTER_BUILD:-1}" == "1" ]] || { info "Skipping UpdateVersionAfterBuild.sh override (SEED_MAC_UPDATE_VERSION_AFTER_BUILD=0)"; return 0; }
+
+  local dst_dir dst
+  dst_dir="$REPO_ROOT/Build/BatchFiles/Mac"
+  dst="$dst_dir/UpdateVersionAfterBuild.sh"
+
+  if [[ -f "$dst" ]]; then
+    info "Project UpdateVersionAfterBuild.sh already present: $dst"
+    return 0
+  fi
+
+  /bin/mkdir -p "$dst_dir"
+  /bin/cat > "$dst" <<'OVERRIDE'
+#!/bin/bash
+# Project-level override of UE's UpdateVersionAfterBuild.sh.
+#
+# UE's AppleToolChain.cs::UpdateVersionFile checks for this file at
+#   <project>/Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh
+# and falls back to the engine's copy only if absent.
+# Reference: AppleToolChain.cs:394-397.
+#
+# Differs from the engine version only in that CFBundleVersion is NOT prefixed
+# with the engine's Build.version Changelist (e.g. 51494982 in 5.7.4). That CL
+# leaks into shipping builds as a giant build number, which most projects
+# don't want. The PackageVersionCounter contents (e.g. "0.2") become
+# UE_MAC_BUILD_VERSION verbatim, so CFBundleVersion=0.2 in the shipped app.
+#
+# Args (UE-provided):
+#   $1 = product directory (project root for projects, engine for engine builds)
+#   $2 = platform we are incrementing
+#   $3 = engine changelist (intentionally ignored by this override)
+#
+# Maintained by ship.sh; regenerate by deleting this file and re-running ship.sh.
+
+PRODUCT_NAME=$(basename "$1")
+VERSION_FILE_DIR="$1/Build/$2"
+VERSION_FILE="$VERSION_FILE_DIR/$PRODUCT_NAME.PackageVersionCounter"
+
+VERSION="0.1"
+if [ -f "$VERSION_FILE" ]; then
+	VERSION=$(cat "$VERSION_FILE")
+fi
+
+IFS="." read -ra VERSION_ARRAY <<< "$VERSION"
+
+mkdir -p "${VERSION_FILE_DIR}"
+echo "${VERSION_ARRAY[0]}.$((VERSION_ARRAY[1]+1))" > "$VERSION_FILE"
+
+
+MAC_VERSION="0.1"
+VERSION_FILE="$1/Build/Mac/$PRODUCT_NAME.PackageVersionCounter"
+if [ -f "$VERSION_FILE" ]; then
+	MAC_VERSION=$(cat "$VERSION_FILE")
+fi
+
+IOS_VERSION="0.1"
+VERSION_FILE="$1/Build/IOS/$PRODUCT_NAME.PackageVersionCounter"
+if [ -f "$VERSION_FILE" ]; then
+	IOS_VERSION=$(cat "$VERSION_FILE")
+fi
+
+TVOS_VERSION="0.1"
+VERSION_FILE="$1/Build/TVOS/$PRODUCT_NAME.PackageVersionCounter"
+if [ -f "$VERSION_FILE" ]; then
+	TVOS_VERSION=$(cat "$VERSION_FILE")
+fi
+
+VISIONOS_VERSION="0.1"
+VERSION_FILE="$1/Build/VisionOS/$PRODUCT_NAME.PackageVersionCounter"
+if [ -f "$VERSION_FILE" ]; then
+	VISIONOS_VERSION=$(cat "$VERSION_FILE")
+fi
+
+XCCONFIG_FILE="$1/Intermediate/Build/Versions.xcconfig"
+
+mkdir -p "$1/Intermediate/Build"
+echo "UE_MAC_BUILD_VERSION = $MAC_VERSION" > "$XCCONFIG_FILE"
+echo "UE_IOS_BUILD_VERSION = $IOS_VERSION" >> "$XCCONFIG_FILE"
+echo "UE_TVOS_BUILD_VERSION = $TVOS_VERSION" >> "$XCCONFIG_FILE"
+echo "UE_VISIONOS_BUILD_VERSION = $VISIONOS_VERSION" >> "$XCCONFIG_FILE"
+OVERRIDE
+  /bin/chmod 755 "$dst"
+  good "Seeded $dst (drops CL prefix from CFBundleVersion; commit it)"
 }
 
 seed_mac_package_version_counter() {
@@ -1789,6 +1896,7 @@ REGEN_PROJECT_FILES="${REGEN_PROJECT_FILES:-1}"
 SEED_APPLE_LAUNCHSCREEN_COMPAT="${SEED_APPLE_LAUNCHSCREEN_COMPAT:-1}"
 SEED_MAC_INFO_TEMPLATE_PLIST="${SEED_MAC_INFO_TEMPLATE_PLIST:-1}"
 SEED_MAC_PACKAGE_VERSION_COUNTER="${SEED_MAC_PACKAGE_VERSION_COUNTER:-1}"
+SEED_MAC_UPDATE_VERSION_AFTER_BUILD="${SEED_MAC_UPDATE_VERSION_AFTER_BUILD:-1}"
 CLEAN_BUILD_DIR="${CLEAN_BUILD_DIR:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 PRINT_CONFIG="${PRINT_CONFIG:-0}"
@@ -1879,6 +1987,13 @@ Options (highest priority):
                                      on every xcodebuild and writes the value to
                                      CFBundleVersion via Versions.xcconfig
                                      (default: enabled)
+  --seed-mac-update-version-after-build / --no-seed-mac-update-version-after-build
+                                     drop a project-level
+                                     Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh
+                                     that strips the engine's Build.version
+                                     Changelist (e.g. 51494982) from CFBundleVersion.
+                                     Sanctioned override at AppleToolChain.cs:394-397
+                                     (default: enabled)
   --clean-build-dir / --no-clean-build-dir
   --dry-run / --no-dry-run
   --print-config / --no-print-config
@@ -1955,6 +2070,8 @@ while [[ $# -gt 0 ]]; do
     --no-seed-mac-info-template-plist)   SEED_MAC_INFO_TEMPLATE_PLIST="0"; shift ;;
     --seed-mac-package-version-counter)    SEED_MAC_PACKAGE_VERSION_COUNTER="1"; shift ;;
     --no-seed-mac-package-version-counter) SEED_MAC_PACKAGE_VERSION_COUNTER="0"; shift ;;
+    --seed-mac-update-version-after-build)    SEED_MAC_UPDATE_VERSION_AFTER_BUILD="1"; shift ;;
+    --no-seed-mac-update-version-after-build) SEED_MAC_UPDATE_VERSION_AFTER_BUILD="0"; shift ;;
     --clean-build-dir)      CLEAN_BUILD_DIR="1"; shift ;;
     --no-clean-build-dir)   CLEAN_BUILD_DIR="0"; shift ;;
     --dry-run)              DRY_RUN="1"; shift ;;
@@ -2391,6 +2508,7 @@ ensure_game_ini_staging_entry
 write_version_to_content
 seed_apple_launchscreen_compat
 seed_mac_info_template_plist
+seed_mac_update_version_after_build_script
 seed_mac_package_version_counter
 ensure_app_category_in_engine_ini
 ensure_marketing_version_in_engine_ini
