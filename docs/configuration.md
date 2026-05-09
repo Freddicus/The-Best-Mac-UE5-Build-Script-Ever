@@ -139,7 +139,46 @@ If `xcodebuild -list -workspace YourProject.xcworkspace` doesn't list your schem
 
 For interactive runs, the script tries to auto-detect an existing plist or offers to generate a minimal one. For CI, set `EXPORT_PLIST` explicitly.
 
+## iOS pipeline (opt-in)
+
+Set `ENABLE_IOS=1` in `.env` (or pass `--ios`) to run the iOS pipeline after the Mac build. To skip Mac entirely and build only iOS, use `IOS_ONLY=1` / `--ios-only`. iOS doesn't need `SIGN_IDENTITY` (xcodebuild + automatic provisioning handles iOS App Store signing via `DEVELOPMENT_TEAM`).
+
+| Variable | Description |
+|---|---|
+| `ENABLE_IOS` | `1` = run iOS after Mac. Default `0` (off). |
+| `IOS_ONLY` | `1` = skip Mac entirely; only iOS. Implies `ENABLE_IOS=1`. Doesn't require `SIGN_IDENTITY`. |
+| `IOS_WORKSPACE` | iOS workspace path (e.g. `MyGame (iOS).xcworkspace`). Auto-detected by convention if absent. |
+| `IOS_SCHEME` | iOS Xcode scheme. Inferred from `XCODE_SCHEME` if set, else auto-detected from `xcodebuild -list`. |
+| `IOS_EXPORT_PLIST` | Path to `iOS-ExportOptions.plist`. Auto-detected by name or by content scan. Copy `iOS-ExportOptions.plist.example` to start. |
+| `IOS_ICON_SYNC` | `1` = stage `IOS_ICON_XCASSETS` into `Build/IOS/Resources/Assets.xcassets` (canonical UE path). Default `1`. |
+| `IOS_ICON_XCASSETS` | Source iOS asset catalog. Default: `$REPO_ROOT/iOS-SourceControlled.xcassets`. |
+| `IOS_APPICON_SET_NAME` | Override appiconset name (auto-detected if unset). |
+| `IOS_MARKETING_VERSION` | iOS-only override for `CFBundleShortVersionString`. When unset, `MARKETING_VERSION` is shared across both platforms. See [versioning.md](versioning.md). |
+
+### iOS App Store Connect upload (xcrun altool — NOT notarytool)
+
+`xcrun altool` and `xcrun notarytool` are different tools for different services. **They are not interchangeable.**
+
+| Tool | What it talks to | Used for | Credentials |
+|---|---|---|---|
+| `xcrun notarytool` | Apple notary service | macOS Developer ID notarization (Gatekeeper ticket) | Keychain profile (`xcrun notarytool store-credentials`) |
+| `xcrun altool` | App Store Connect submission API | iOS IPA validation/upload (TestFlight, App Store) | API key (`.p8` file + key ID + issuer UUID) |
+
+For iOS uploads, you provide an App Store Connect API key:
+
+| Variable | Description |
+|---|---|
+| `IOS_ASC_VALIDATE` | `1` = run `xcrun altool --validate-app` on the IPA after export. |
+| `IOS_ASC_UPLOAD` | `1` = run `xcrun altool --upload-app` (implies `IOS_ASC_VALIDATE=1`). |
+| `IOS_ASC_API_KEY_ID` | 10-character ASC API key ID. Auto-detected from `Config/DefaultEngine.ini`'s `AppStoreConnectKeyID` if Xcode wrote it. |
+| `IOS_ASC_API_ISSUER` | ASC API issuer UUID. Auto-detected from `AppStoreConnectIssuerID`. |
+| `IOS_ASC_API_KEY_PATH` | Path to the `.p8` file you downloaded from ASC. Auto-detected from `AppStoreConnectKeyPath`. |
+
+To create an API key: appstoreconnect.apple.com → **Users and Access → Integrations → App Store Connect API → Generate API Key**. Download the `.p8`, store it somewhere your build machine can read, and set the three values above (or let Xcode store them in `DefaultEngine.ini` and the script will pick them up).
+
 ## Minimal CI config
+
+For Mac-only:
 
 ```bash
 DEVELOPMENT_TEAM="ABCDE12345"
@@ -149,4 +188,19 @@ EXPORT_PLIST="/path/to/ExportOptions.plist"
 XCODE_SCHEME="MyGame"
 BUILD_TYPE="shipping"
 NOTARIZE="yes"
+```
+
+For iOS-only (App Store Connect upload):
+
+```bash
+DEVELOPMENT_TEAM="ABCDE12345"
+ENABLE_IOS="1"
+IOS_ONLY="1"
+IOS_EXPORT_PLIST="/path/to/iOS-ExportOptions.plist"
+IOS_SCHEME="MyGame"
+IOS_ASC_UPLOAD="1"
+IOS_ASC_API_KEY_ID="ABCD123456"
+IOS_ASC_API_ISSUER="00000000-0000-0000-0000-000000000000"
+IOS_ASC_API_KEY_PATH="/path/to/AuthKey_ABCD123456.p8"
+BUILD_TYPE="shipping"
 ```

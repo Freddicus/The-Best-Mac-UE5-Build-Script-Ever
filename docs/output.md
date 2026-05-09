@@ -20,7 +20,9 @@ All are seeded only when missing — once present, the script never overwrites t
 
 ## Artifact paths
 
-All build output goes under `Saved/` (configurable via `BUILD_DIR_REL` / `--build-dir`). Filenames are derived from `SHORT_NAME` and `LONG_NAME` (both default to your project name).
+All build output goes under `Saved/` (Mac path configurable via `BUILD_DIR_REL` / `--build-dir`; iOS path is fixed at `Saved/Packages/IOS/`). Filenames are derived from `SHORT_NAME` and `LONG_NAME` (both default to your project name).
+
+**Mac:**
 
 | Artifact | Path |
 |---|---|
@@ -29,9 +31,18 @@ All build output goes under `Saved/` (configurable via `BUILD_DIR_REL` / `--buil
 | Exported app | `Saved/Packages/Mac/${SHORT_NAME}-export/*.app` |
 | ZIP | `Saved/Packages/Mac/${LONG_NAME}.zip` |
 | DMG | `Saved/Packages/Mac/${LONG_NAME}.dmg` |
-| Build log | `Saved/Logs/build_YYYY-MM-DD_HH-MM-SS.log` |
 
-The build log captures all stdout/stderr from UAT, `xcodebuild`, `codesign`, and `notarytool`. The terminal only shows human-readable status lines.
+**iOS** *(only when `ENABLE_IOS=1` or `--ios-only`)*:
+
+| Artifact | Path |
+|---|---|
+| UAT-packaged app | `Saved/Packages/IOS/${LONG_NAME}-IOS-Shipping.app` |
+| Xcode archive | `Saved/Packages/IOS/${SHORT_NAME}-iOS.xcarchive` |
+| IPA | `Saved/Packages/IOS/${SHORT_NAME}-iOS-export/*.ipa` |
+
+**Logs:** `Saved/Logs/build_YYYY-MM-DD_HH-MM-SS.log`
+
+The build log captures all stdout/stderr from UAT, `xcodebuild`, `codesign`, `notarytool`, and `altool`. The terminal only shows human-readable status lines.
 
 ### How `BUILD_DIR_REL` and `UAT_ARCHIVE_DIR` relate
 

@@ -35,27 +35,50 @@ The script prompts for build type (Shipping / Development) and whether to notari
 
 Run `./ship.sh --help` for all CLI flags, or `./ship.sh --print-config` to validate your configuration without building.
 
+### Targeting iOS too
+
+The iOS pipeline is opt-in. To run it alongside Mac:
+
+```bash
+./ship.sh --ios
+```
+
+Or to skip Mac and build only iOS (no `SIGN_IDENTITY` required):
+
+```bash
+./ship.sh --ios-only
+```
+
+For App Store Connect upload, copy `iOS-ExportOptions.plist.example` to `iOS-ExportOptions.plist`, set `IOS_ASC_API_KEY_ID/ISSUER/KEY_PATH` in `.env`, and pass `--ios-upload-ipa`. See [docs/configuration.md](docs/configuration.md#ios-pipeline-opt-in) for the full iOS section.
+
 ## Pipeline
 
 When you run `./ship.sh`, this is the execution order:
 
-1. **Pre-flight** — validates signing identity, notary profile, UAT paths, and required tools before touching anything.
+1. **Pre-flight** — validates signing identity, notary profile, UAT paths, and required tools before touching anything. iOS-only (`--ios-only`) skips the Mac signing identity check.
 2. **Version stamp** *(if `VERSION_MODE` is set)* — writes `version.txt` into `Content/BuildInfo/` so UAT bundles it automatically.
-3. **Canonical UE seeds** — defensively places stock engine files at their canonical UE locations if missing: `Build/Apple/Resources/Interface/LaunchScreen.storyboardc` (prevents Mac from compiling iOS storyboard sources) and `Build/Mac/Resources/Info.Template.plist` (canonical home for `LSSupportsGameMode`/`GCSupportsGameMode`). When `USE_UE_PACKAGE_VERSION_COUNTER=1` (Path A, opt-in), also seeds `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` (strips Epic's `Build.version` Changelist) and `Build/Mac/<Project>.PackageVersionCounter`. Commit everything except the counter (gitignored per UE convention).
-4. **Canonical ini ensures** — writes `MARKETING_VERSION` and `APP_CATEGORY` (when set) to their canonical `Config/DefaultEngine.ini` sections. `ENABLE_GAME_MODE` (when set) updates the seeded `Info.Template.plist` via `PlistBuddy`. See [versioning.md](docs/versioning.md#infoplist-values-via-canonical-ue-overrides).
-5. **GenerateProjectFiles** *(if `USE_XCODE_EXPORT=1`)* — runs `GenerateProjectFiles.sh` so the canonical config above is read by UE and baked into the freshly-generated `.xcodeproj` and xcconfig. Disable with `--no-regen-project-files`.
-6. **UAT BuildCookRun** — cooks and packages the project via `RunUAT.sh BuildCookRun`. UAT's `-archive` output lands in `Saved/Packages/Mac/`.
-7. **Icon seeding** *(if enabled)* — copies your source-controlled `.xcassets` into the workspace so Xcode uses your app icon instead of the engine default.
-8. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`. Immediately after, `PlistBuddy`-stamps the auto-bumped `CFBundleVersion` into `<ARCHIVE_PATH>/Info.plist` so Xcode Organizer's Archives view shows the same value that ships.
-9. **Xcode export** — runs `xcodebuild -exportArchive` with your `ExportOptions.plist` → signed `.app`.
-10. **CFBundleVersion auto-bump** — `PlistBuddy`-rewrites `CFBundleVersion` in the exported `.app/Contents/Info.plist`. Default behavior: read `CFBUNDLE_VERSION` from `.env` (or `0` if missing), pre-increment, ship that value. On successful build, persist back to `.env`. Override with `--set-cfbundle-version N` to set a baseline. Disabled when `USE_UE_PACKAGE_VERSION_COUNTER=1` (Path A delegates to UE's `PackageVersionCounter` flow). See [versioning.md](docs/versioning.md#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical).
-11. **Component signing** — signs all nested `.dylib`, `.so`, and `.framework` files individually, then signs the outer `.app`. Never uses `--deep`.
-12. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.
-13. **ZIP / DMG** — packages the signed app for distribution.
-14. **Notarization** — submits ZIP and DMG to Apple in parallel, then waits for both.
-15. **Stapling** — attaches the notarization ticket to the app, ZIP, and DMG.
+3. **Canonical UE seeds** — defensively places stock engine files at their canonical UE locations if missing: `Build/Apple/Resources/Interface/LaunchScreen.storyboardc`, `Build/Mac/Resources/Info.Template.plist`, plus the icon catalog stage (`Build/{Platform}/Resources/Assets.xcassets`) when `MACOS_ICON_SYNC=1` / `IOS_ICON_SYNC=1`. When `USE_UE_PACKAGE_VERSION_COUNTER=1` (Path A, opt-in), also seeds `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` and `Build/Mac/<Project>.PackageVersionCounter`.
+4. **Canonical ini ensures** — writes `MARKETING_VERSION` (shared across Mac and iOS) and `APP_CATEGORY` (when set) to their canonical `Config/DefaultEngine.ini` sections. `ENABLE_GAME_MODE` (when set) updates the seeded `Info.Template.plist` via `PlistBuddy`. See [versioning.md](docs/versioning.md#infoplist-values-via-canonical-ue-overrides).
+5. **GenerateProjectFiles** *(if `USE_XCODE_EXPORT=1`)* — single regen produces both `<Project> (Mac).xcworkspace` and `<Project> (iOS).xcworkspace`. Disable with `--no-regen-project-files`.
 
-Full build log: `Saved/Logs/build_YYYY-MM-DD_HH-MM-SS.log`. Artifacts land in `Saved/Packages/Mac/` (override with `--build-dir`). `Build/{Platform}/` is reserved for committed source-controlled inputs (icons, launch storyboard, entitlements) — see [output.md](docs/output.md#build-vs-saved--what-goes-where).
+**Mac pipeline** *(skipped when `IOS_ONLY=1`)*:
+
+6. **Mac UAT BuildCookRun** — `-targetplatform=Mac`, output to `Saved/Packages/Mac/`.
+7. **Mac Xcode archive + export** — `xcodebuild archive` with `CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION` build-setting override (Apple-documented mechanism, takes precedence over xcconfig — no PlistBuddy fixups needed). Then `xcodebuild -exportArchive` produces signed `.app`.
+8. **Mac component signing** — signs nested `.dylib`/`.so`/`.framework` individually, then the outer `.app`. Never uses `--deep`.
+9. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.
+10. **ZIP / DMG** — packages the signed `.app` for distribution.
+11. **Notarization + stapling** — `xcrun notarytool` submits ZIP and DMG, waits, then `xcrun stapler` attaches tickets.
+
+**iOS pipeline** *(only when `ENABLE_IOS=1` or `--ios-only`)*:
+
+12. **iOS UAT BuildCookRun** — `-targetplatform=IOS`, output to `Saved/Packages/IOS/`.
+13. **iOS Xcode archive + export** — `xcodebuild archive -destination 'generic/platform=iOS' -allowProvisioningUpdates` with the same `CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION` (shared bump across platforms). Then `xcodebuild -exportArchive` with the iOS `ExportOptions.plist` → `.ipa`. iOS doesn't need per-component codesign or notarization — `xcodebuild` handles iOS App Store signing in one pass via automatic provisioning.
+14. **App Store Connect** *(optional)* — `xcrun altool --validate-app` and/or `--upload-app` (TestFlight / App Store review). **Note:** `altool` ≠ `notarytool` — different tools, different services. See [configuration.md](docs/configuration.md#ios-app-store-connect-upload-xcrun-altool--not-notarytool).
+
+**CFBundleVersion** is auto-bumped from `CFBUNDLE_VERSION` in `.env` (default Path B; one bump per `ship.sh` run, shared across both archives). `--set-cfbundle-version N` sets a new baseline. `USE_UE_PACKAGE_VERSION_COUNTER=1` opts into Path A (UE's canonical mechanism). See [versioning.md](docs/versioning.md#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical).
+
+Full build log: `Saved/Logs/build_YYYY-MM-DD_HH-MM-SS.log`. Mac artifacts land in `Saved/Packages/Mac/` (`--build-dir` overrides); iOS artifacts in `Saved/Packages/IOS/`. `Build/{Platform}/` is reserved for committed source-controlled inputs (icons, launch storyboard, entitlements) — see [output.md](docs/output.md#build-vs-saved--what-goes-where).
 
 ## Docs
 

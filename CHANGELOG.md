@@ -6,6 +6,48 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [unreleased] — Add iOS pipeline; migrate Mac to xcodebuild build-setting overrides; canonical icon sync
+
+This branch ships three tightly-related changes. All three rest on the canonical-overrides foundation laid in PR #22 (`Move outputs to Saved/, route Info.plist through canonical UE overrides, auto-bump CFBundleVersion`).
+
+### Added
+- **iOS pipeline (opt-in)**: `ENABLE_IOS=1` / `--ios` runs an iOS pass after the Mac build; `IOS_ONLY=1` / `--ios-only` skips Mac entirely (doesn't require `SIGN_IDENTITY`). Pipeline: UAT `BuildCookRun -targetplatform=IOS` → `xcodebuild archive -destination 'generic/platform=iOS' -allowProvisioningUpdates` → `xcodebuild -exportArchive` → `.ipa` → optional `xcrun altool` validate/upload. Outputs land in `Saved/Packages/IOS/`. Skips notarization (App Store handles the equivalent on submission) and per-component codesign (xcodebuild + ExportOptions handles iOS App Store signing in one pass).
+- **Auto-detection** for iOS: `IOS_WORKSPACE` (`<Project> (iOS).xcworkspace`), `IOS_SCHEME` (inferred from `XCODE_SCHEME` if set, else `xcodebuild -list`), `IOS_EXPORT_PLIST` (conventional name `iOS-ExportOptions.plist`, or content-scan that excludes Mac-only methods like `developer-id`/`mac-application`).
+- **Shared `MARKETING_VERSION` across Mac and iOS.** `ensure_marketing_version_in_engine_ini` now writes to BOTH `[/Script/MacRuntimeSettings.MacRuntimeSettings] VersionInfo=` (read by UE at `XcodeProject.cs:1997`) and `[/Script/IOSRuntimeSettings.IOSRuntimeSettings] VersionInfo=` (read at `XcodeProject.cs:2011`). Optional `IOS_MARKETING_VERSION` overrides only the iOS section (rare; for projects shipping different display versions per platform).
+- **Shared `CFBUNDLE_VERSION` across platforms.** The auto-bump runs once per `ship.sh` invocation; both Mac and iOS `xcodebuild archive` calls receive the same `CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION` build-setting override, so Mac and iOS archives ship the same build counter.
+- **`xcrun altool` integration** for App Store Connect: `--ios-validate-ipa` runs `--validate-app`, `--ios-upload-ipa` runs `--upload-app` (implies validate). `IOS_ASC_API_KEY_ID/ISSUER/KEY_PATH` are auto-detected from `Config/DefaultEngine.ini` (`AppStoreConnectKeyID`, `AppStoreConnectIssuerID`, `AppStoreConnectKeyPath` — what Xcode stores when you configure the API key in project settings). Documentation explicitly distinguishes `altool` (iOS upload to ASC) from `notarytool` (Mac notarization) — different tools, different services, different credential formats.
+- **`iOS-ExportOptions.plist.example`**: annotated template with `method=app-store-connect` (replaces deprecated `app-store`), `signingStyle=automatic`, and a "this is iOS not macOS" warning.
+
+### Changed (BREAKING for the in-flight CFBundleVersion mechanism)
+- **Mac CFBundleVersion: post-export `PlistBuddy` → xcodebuild build-setting override.** Previously the script ran `PlistBuddy` on the exported `.app/Contents/Info.plist` (post-export, pre-codesign) and on `<ARCHIVE_PATH>/Info.plist`'s `ApplicationProperties:CFBundleVersion` (Organizer cosmetic stamp). Now the script passes `CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION` directly to `xcodebuild archive`. Apple-documented behavior: command-line build settings take precedence over xcconfig, so this shadows UE's `CURRENT_PROJECT_VERSION = $(UE_MAC_BUILD_VERSION)` xcconfig line. Xcode bakes the value into both the `.app`'s `Info.plist` and the `.xcarchive` metadata at archive time — one pass, no fixups, no broken signature mid-flow. Removed `override_cfbundle_version_in_app_plist` and `override_cfbundle_version_in_xcarchive_metadata`.
+- **Icon sync: `Intermediate/SourceControlled/` + pbxproj patching → canonical `Build/{Platform}/Resources/Assets.xcassets`.** UE's `XcodeProject.cs:1731-1742` auto-discovers the canonical path via `UnrealData.ProjectOrEnginePath()` at GenerateProjectFiles time. The script stages the source catalog into the canonical UE-discovered path *before* `regenerate_project_files`, eliminating the post-UAT pbxproj-walking sed loop entirely. The `_stage_platform_icon_assets` helper is shared between Mac and iOS.
+
+### New CLI flags
+- `--ios` / `--no-ios`
+- `--ios-only`
+- `--ios-workspace PATH`, `--ios-scheme NAME`, `--ios-export-plist PATH`
+- `--ios-icon-sync` / `--no-ios-icon-sync`, `--ios-icon-xcassets PATH`, `--ios-appicon-set-name NAME`
+- `--ios-marketing-version STRING`
+- `--ios-validate-ipa`, `--ios-upload-ipa`
+- `--ios-asc-api-key-id ID`, `--ios-asc-api-issuer UUID`, `--ios-asc-api-key-path PATH`
+
+### Migration
+- **Existing Mac-only users:** no action required. `ENABLE_IOS=0` (default) means no iOS code runs. The Mac CFBundleVersion mechanism switch is internal — same final value lands in the shipped `Info.plist`, just via a cleaner mechanism.
+- **Adding iOS to an existing project:** copy `iOS-ExportOptions.plist.example` to `iOS-ExportOptions.plist`, edit the team ID. Run `./ship.sh --print-config --ios` to see what the script will do. First `--ios` build creates `Build/IOS/Resources/Assets.xcassets/` from your `iOS-SourceControlled.xcassets` (default `$REPO_ROOT/iOS-SourceControlled.xcassets`).
+- **CI uploads to App Store Connect:** create an ASC API key (appstoreconnect.apple.com → Users and Access → Integrations → App Store Connect API), download the `.p8`, and either set `IOS_ASC_API_KEY_ID/ISSUER/KEY_PATH` in `.env` or let Xcode store them in `Config/DefaultEngine.ini` for auto-detection.
+
+### Docs
+- [README.md](README.md): pipeline list reorganized into Mac and iOS phases; new "Targeting iOS too" quick-start section.
+- [docs/configuration.md](docs/configuration.md): new "iOS pipeline (opt-in)" section with full `IOS_*` env-var reference; new "iOS App Store Connect upload (xcrun altool — NOT notarytool)" subsection with side-by-side comparison; new iOS-only minimal CI config example.
+- [docs/versioning.md](docs/versioning.md): MARKETING_VERSION and CFBUNDLE_VERSION sections updated to call out cross-platform sharing; new IOS_MARKETING_VERSION subsection.
+- [docs/output.md](docs/output.md): split artifact-paths table into Mac and iOS subsections with `Saved/Packages/IOS/` paths.
+- [.env.example](.env.example): new "iOS pipeline (opt-in, default off)" and "iOS App Store Connect upload (xcrun altool — NOT notarytool)" sections.
+
+### New file
+- `iOS-ExportOptions.plist.example`
+
+---
+
 ## [2026-05-09] — Stamp `.xcarchive` metadata so Xcode Organizer shows auto-bumped `CFBundleVersion`
 
 ### Added
