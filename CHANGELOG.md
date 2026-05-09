@@ -6,6 +6,28 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-09] — Default `CFBUNDLE_VERSION` to auto-bump; gate UE-canonical path behind opt-in flag
+
+### Changed (BREAKING)
+- **`CFBUNDLE_VERSION` is now auto-bumped on every build by default.** The script reads `CFBUNDLE_VERSION` from `.env` (treating empty/missing as `0`), pre-increments by 1, ships that value as `CFBundleVersion`, and persists the new value back to `.env` on a successful build. With `.env.example`'s `CFBUNDLE_VERSION="0"`, the first build ships `CFBundleVersion=1`. Failed/interrupted builds don't persist — the next build retries the same number, so no build numbers are wasted.
+- **`--cfbundle-version N` renamed to `--set-cfbundle-version N`** to convey the new "set baseline" semantics: the value is shipped *and* persisted, so subsequent auto-bump builds resume from `N`. Use to reset the counter (`--set-cfbundle-version 100`) or pin to a CI value (`--set-cfbundle-version "$GITHUB_RUN_NUMBER"`).
+- **UE-canonical `CFBundleVersion` path is now opt-in.** The previous default (Path A: seed `Build/Mac/<Project>.PackageVersionCounter` + project-level `UpdateVersionAfterBuild.sh` override) is gated behind a single new flag `USE_UE_PACKAGE_VERSION_COUNTER` (default `0`) / CLI `--use-ue-package-version-counter`. When enabled, the script seeds both files and skips the Info.plist override; UE's flow supplies `CFBundleVersion` end-to-end. Mutually exclusive with the auto-bump.
+- **Removed env vars `SEED_MAC_PACKAGE_VERSION_COUNTER` and `SEED_MAC_UPDATE_VERSION_AFTER_BUILD`** (and their CLI flags). Both seed functions are now gated on `USE_UE_PACKAGE_VERSION_COUNTER` together — one knob covers the whole Path A bundle.
+
+### Added
+- **`_resolve_cfbundle_version_for_build()`**: at build start (after dry-run / print-config exits), decides what `CFBundleVersion` will ship. Three branches: Path A (clear `CFBUNDLE_VERSION`, no override, no persist); explicit set via `--set-cfbundle-version` (use as-is, persist); default auto-bump (pre-increment integer, persist). Sets `_CFBV_PERSIST=1` to mark for end-of-script persistence on success.
+- **`_write_env_var(name, value)`**: shared idempotent in-place writer for `NAME="value"` pairs in `.env`. Updates the line if it exists, appends if it doesn't, creates `.env` if missing. Now used by both `write_bumped_version_to_env` (for `VERSION_STRING`) and the new `write_cfbundle_version_to_env` (for `CFBUNDLE_VERSION`).
+- **`write_cfbundle_version_to_env()`**: persists the bumped/set `CFBUNDLE_VERSION` to `.env` on the success path. Called alongside `write_bumped_version_to_env` at end-of-script. No-op when `_CFBV_PERSIST=0` (Path A or non-integer auto-bump skip).
+- **`.env.example`**: now ships with `CFBUNDLE_VERSION="0"` uncommented, since the script auto-bumps from this baseline. Documentation explains both `--set-cfbundle-version` (new baseline) and `USE_UE_PACKAGE_VERSION_COUNTER=1` (Path A opt-in).
+
+### Migration
+- **No action required for most users.** The auto-bump default produces the same integer-style `CFBundleVersion` you'd want for App Store / Gatekeeper. First build after this change ships `1` (or `<previous CFBUNDLE_VERSION> + 1` if you already had a value in `.env`).
+- **If you previously relied on Path A** (seeded `PackageVersionCounter` + `UpdateVersionAfterBuild.sh` override): set `USE_UE_PACKAGE_VERSION_COUNTER=1` in your `.env` to restore that behavior. The `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` you previously committed is still valid.
+- **If you previously used `--cfbundle-version N`** (one-off override that didn't persist): rename to `--set-cfbundle-version N` and note that the value now persists to `.env`. To explicitly reset to a one-off behavior, follow up by editing `.env` manually — but most callers actually want the new "set baseline" semantics.
+- **`--bump-major/--bump-minor/--bump-patch` are unchanged** — they still bump only `VERSION_STRING` (semver, runtime `Content/<dir>/version.txt`), not `CFBundleVersion`. The two version concepts are intentionally independent.
+
+---
+
 ## [2026-05-09] — Replace xcconfig hijack with canonical UE override paths
 
 ### Removed (BREAKING)

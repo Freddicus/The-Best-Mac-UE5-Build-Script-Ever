@@ -834,8 +834,7 @@ print_config() {
   echo "REGEN_PROJECT_FILES: $REGEN_PROJECT_FILES" >&3
   echo "SEED_APPLE_LAUNCHSCREEN_COMPAT: $SEED_APPLE_LAUNCHSCREEN_COMPAT" >&3
   echo "SEED_MAC_INFO_TEMPLATE_PLIST:   $SEED_MAC_INFO_TEMPLATE_PLIST" >&3
-  echo "SEED_MAC_PACKAGE_VERSION_COUNTER: $SEED_MAC_PACKAGE_VERSION_COUNTER" >&3
-  echo "SEED_MAC_UPDATE_VERSION_AFTER_BUILD: $SEED_MAC_UPDATE_VERSION_AFTER_BUILD" >&3
+  echo "USE_UE_PACKAGE_VERSION_COUNTER: $USE_UE_PACKAGE_VERSION_COUNTER (0=Path B auto-bump default, 1=Path A UE-canonical)" >&3
   echo "CLEAN_BUILD_DIR:   $CLEAN_BUILD_DIR" >&3
   echo "DRY_RUN:           $DRY_RUN" >&3
   echo "PRINT_CONFIG:      $PRINT_CONFIG" >&3
@@ -859,7 +858,14 @@ print_config() {
   echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, leaves DefaultEngine.ini VersionInfo untouched>}" >&3
   echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, leaves Info.Template.plist GameMode keys untouched>}" >&3
   echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, leaves DefaultEngine.ini AppCategory untouched>}" >&3
-  echo "CFBUNDLE_VERSION:  ${CFBUNDLE_VERSION:-<unset, falls back to PackageVersionCounter via UpdateVersionAfterBuild.sh>}" >&3
+  local _cfbv_now _cfbv_next
+  _cfbv_now="${CFBUNDLE_VERSION:-0}"
+  if [[ "$_cfbv_now" =~ ^[0-9]+$ ]]; then
+    _cfbv_next=$((_cfbv_now + 1))
+  else
+    _cfbv_next="<auto-bump skipped: not an integer>"
+  fi
+  echo "CFBUNDLE_VERSION:  $_cfbv_now (in .env; next auto-bump ships $_cfbv_next; --set-cfbundle-version overrides; USE_UE_PACKAGE_VERSION_COUNTER=1 disables Path B)" >&3
   echo "MAC_INFO_TEMPLATE_PLIST: $REPO_ROOT/Build/Mac/Resources/Info.Template.plist" >&3
   if [[ -n "${UPROJECT_NAME:-}" ]]; then
     echo "MAC_PACKAGE_VERSION_COUNTER: $REPO_ROOT/Build/Mac/${UPROJECT_NAME%.uproject}.PackageVersionCounter" >&3
@@ -986,29 +992,7 @@ ensure_game_ini_staging_entry() {
 # Only runs when --bump-* was used this invocation.
 write_bumped_version_to_env() {
   [[ -z "${_VERSION_BUMPED:-}" ]] && return 0
-  local new_line="VERSION_STRING=\"$VERSION_STRING\""
-  local tmp _line
-
-  if [[ ! -f "$ENV_FILE" ]]; then
-    printf '%s\n' "$new_line" > "$ENV_FILE"
-    good "Created $ENV_FILE with $new_line"
-    return 0
-  fi
-
-  if /usr/bin/grep -q "^VERSION_STRING=" "$ENV_FILE"; then
-    tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}env_update_XXXXXX")"
-    while IFS= read -r _line || [[ -n "$_line" ]]; do
-      if [[ "$_line" == VERSION_STRING=* ]]; then
-        printf '%s\n' "$new_line"
-      else
-        printf '%s\n' "$_line"
-      fi
-    done < "$ENV_FILE" > "$tmp"
-    /bin/mv "$tmp" "$ENV_FILE"
-  else
-    printf '\n%s\n' "$new_line" >> "$ENV_FILE"
-  fi
-  good "Persisted to $ENV_FILE: $new_line"
+  _write_env_var "VERSION_STRING" "$VERSION_STRING"
 }
 
 # --- Canonical UE override helpers --------------------------------------------
@@ -1184,23 +1168,15 @@ _set_plist_bool() {
 }
 
 override_cfbundle_version_in_app_plist() {
-  # AA/AAA-studio-style escape hatch from UE's <CL>.<X>.<Y> CFBundleVersion format:
-  # when CFBUNDLE_VERSION is set (e.g. via --cfbundle-version 7), rewrite the
-  # exported .app's Info.plist CFBundleVersion to that exact string. Runs
-  # *after* xcodebuild -exportArchive, but *before* the codesign step — the
-  # signature is computed over the modified Info.plist, so the bundle stays
-  # internally consistent.
+  # Apply the resolved CFBundleVersion to the exported .app's Info.plist.
+  # Runs *after* xcodebuild -exportArchive but *before* the codesign step —
+  # the signature is computed over the modified Info.plist, so the bundle
+  # stays internally consistent.
   #
-  # Useful when CI maintains a single-integer monotonic counter (Jenkins build
-  # number, $GITHUB_RUN_NUMBER, an internal release counter) and you want
-  # CFBundleVersion to match exactly. Bypasses UE's PackageVersionCounter
-  # auto-increment entirely.
-  #
-  # When unset, this function is a no-op and the canonical UE flow
-  # (PackageVersionCounter + project-level UpdateVersionAfterBuild.sh override)
-  # determines CFBundleVersion. The two paths are complementary, not competing:
-  # set CFBUNDLE_VERSION when you want exact control, leave it unset when you
-  # want UE's auto-increment.
+  # The value comes from _resolve_cfbundle_version_for_build() (Path B). When
+  # USE_UE_PACKAGE_VERSION_COUNTER=1 (Path A, opt-in), the resolver leaves
+  # CFBUNDLE_VERSION empty and this function is a no-op — UE's
+  # PackageVersionCounter mechanism supplies CFBundleVersion via the xcconfig.
   [[ -n "${CFBUNDLE_VERSION:-}" ]] || return 0
   [[ -n "${APP_PATH:-}" ]] || die "override_cfbundle_version_in_app_plist called before APP_PATH was resolved"
 
@@ -1219,6 +1195,86 @@ override_cfbundle_version_in_app_plist() {
     /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $CFBUNDLE_VERSION" "$plist"
   fi
   good "Overrode CFBundleVersion in $plist → $CFBUNDLE_VERSION (was: ${current:-<unset>})"
+}
+
+_resolve_cfbundle_version_for_build() {
+  # Decide what value CFBundleVersion should be for this build, based on:
+  #   - USE_UE_PACKAGE_VERSION_COUNTER=1 → Path A; clear CFBUNDLE_VERSION,
+  #     no Info.plist override, no .env persist.
+  #   - --set-cfbundle-version N (CLI_SET_CFBUNDLE_VERSION=1) → use N as-is,
+  #     persist to .env on success ("new baseline" semantics).
+  #   - Default Path B → auto pre-increment the integer in CFBUNDLE_VERSION
+  #     (treating empty/missing as 0), persist on success. With .env at 0,
+  #     the first build ships CFBundleVersion=1.
+  # Sets CFBUNDLE_VERSION (the ship value) and _CFBV_PERSIST (1 if we should
+  # write the value back to .env on successful build).
+  _CFBV_PERSIST=0
+
+  if [[ "${USE_UE_PACKAGE_VERSION_COUNTER:-0}" == "1" ]]; then
+    info "Path A enabled (USE_UE_PACKAGE_VERSION_COUNTER=1) — CFBundleVersion comes from UE's PackageVersionCounter; skipping Info.plist override"
+    CFBUNDLE_VERSION=""
+    return 0
+  fi
+
+  if [[ "${CLI_SET_CFBUNDLE_VERSION:-0}" == "1" ]]; then
+    [[ -n "$CFBUNDLE_VERSION" ]] || die "--set-cfbundle-version requires a value"
+    _CFBV_PERSIST=1
+    info "CFBundleVersion baseline set explicitly via --set-cfbundle-version: $CFBUNDLE_VERSION (will persist to .env on success)"
+    return 0
+  fi
+
+  # Default Path B: auto pre-increment the integer in CFBUNDLE_VERSION.
+  local _current="${CFBUNDLE_VERSION:-0}"
+  [[ -z "$_current" ]] && _current=0
+  if [[ "$_current" =~ ^[0-9]+$ ]]; then
+    CFBUNDLE_VERSION=$((_current + 1))
+    _CFBV_PERSIST=1
+    info "CFBundleVersion auto-bumped: $_current → $CFBUNDLE_VERSION (will persist to .env on success)"
+  else
+    warn "CFBUNDLE_VERSION='$_current' is not a pure integer; auto-bump skipped. Pass --set-cfbundle-version N to reset to a clean integer baseline."
+    _CFBV_PERSIST=0
+  fi
+}
+
+_write_env_var() {
+  # Idempotent in-place writer for a NAME="value" pair in .env. Updates the
+  # line if NAME= exists, otherwise appends. Creates .env if missing.
+  local name="$1" value="$2"
+  local new_line="${name}=\"${value}\""
+  local tmp _line
+
+  if [[ ! -f "$ENV_FILE" ]]; then
+    printf '%s\n' "$new_line" > "$ENV_FILE"
+    good "Created $ENV_FILE with $new_line"
+    return 0
+  fi
+
+  if /usr/bin/grep -q "^${name}=" "$ENV_FILE"; then
+    tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}env_update_XXXXXX")"
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+      if [[ "$_line" == "${name}="* ]]; then
+        printf '%s\n' "$new_line"
+      else
+        printf '%s\n' "$_line"
+      fi
+    done < "$ENV_FILE" > "$tmp"
+    /bin/mv "$tmp" "$ENV_FILE"
+  else
+    printf '\n%s\n' "$new_line" >> "$ENV_FILE"
+  fi
+  good "Persisted to $ENV_FILE: $new_line"
+}
+
+write_cfbundle_version_to_env() {
+  # Persist the CFBundleVersion that just shipped back to .env so the next
+  # auto-bump build picks up where this one left off. Only runs on a
+  # successful build path (called from end-of-script alongside
+  # write_bumped_version_to_env). No-op when:
+  #   - Path A is in use (CFBUNDLE_VERSION was cleared by the resolver)
+  #   - CFBUNDLE_VERSION is non-integer-valued and auto-bump was skipped
+  [[ "${_CFBV_PERSIST:-0}" == "1" ]] || return 0
+  [[ -n "${CFBUNDLE_VERSION:-}" ]] || return 0
+  _write_env_var "CFBUNDLE_VERSION" "$CFBUNDLE_VERSION"
 }
 
 seed_mac_update_version_after_build_script() {
@@ -1240,9 +1296,9 @@ seed_mac_update_version_after_build_script() {
   # PackageVersionCounter read/increment logic, same Versions.xcconfig output
   # path, same handling of the Mac/IOS/TVOS/VisionOS counters.
   #
-  # Idempotent: skips if the destination already exists. Disable with
-  # SEED_MAC_UPDATE_VERSION_AFTER_BUILD=0.
-  [[ "${SEED_MAC_UPDATE_VERSION_AFTER_BUILD:-1}" == "1" ]] || { info "Skipping UpdateVersionAfterBuild.sh override (SEED_MAC_UPDATE_VERSION_AFTER_BUILD=0)"; return 0; }
+  # Idempotent: skips if the destination already exists. Gated on
+  # USE_UE_PACKAGE_VERSION_COUNTER (default 0, opt-in for advanced users).
+  [[ "${USE_UE_PACKAGE_VERSION_COUNTER:-0}" == "1" ]] || return 0
 
   local dst_dir dst
   dst_dir="$REPO_ROOT/Build/BatchFiles/Mac"
@@ -1337,7 +1393,7 @@ seed_mac_package_version_counter() {
   #
   # If you want a specific starting value, edit the counter file directly; the
   # script never overwrites an existing one.
-  [[ "${SEED_MAC_PACKAGE_VERSION_COUNTER:-1}" == "1" ]] || { info "Skipping PackageVersionCounter seed (SEED_MAC_PACKAGE_VERSION_COUNTER=0)"; return 0; }
+  [[ "${USE_UE_PACKAGE_VERSION_COUNTER:-0}" == "1" ]] || return 0
 
   local base counter_dir counter_file
   base="${UPROJECT_NAME%.uproject}"
@@ -1934,8 +1990,12 @@ USE_XCODE_EXPORT="${USE_XCODE_EXPORT:-1}"
 REGEN_PROJECT_FILES="${REGEN_PROJECT_FILES:-1}"
 SEED_APPLE_LAUNCHSCREEN_COMPAT="${SEED_APPLE_LAUNCHSCREEN_COMPAT:-1}"
 SEED_MAC_INFO_TEMPLATE_PLIST="${SEED_MAC_INFO_TEMPLATE_PLIST:-1}"
-SEED_MAC_PACKAGE_VERSION_COUNTER="${SEED_MAC_PACKAGE_VERSION_COUNTER:-1}"
-SEED_MAC_UPDATE_VERSION_AFTER_BUILD="${SEED_MAC_UPDATE_VERSION_AFTER_BUILD:-1}"
+# CFBundleVersion strategy. Default OFF (Path B): the script auto-bumps an
+# integer CFBUNDLE_VERSION every build and persists it to .env on success.
+# When ON (Path A): the script seeds Build/Mac/<Project>.PackageVersionCounter
+# and a project-level UpdateVersionAfterBuild.sh override, then leaves
+# CFBundleVersion to UE. Mutually exclusive with the auto-bump.
+USE_UE_PACKAGE_VERSION_COUNTER="${USE_UE_PACKAGE_VERSION_COUNTER:-0}"
 CLEAN_BUILD_DIR="${CLEAN_BUILD_DIR:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 PRINT_CONFIG="${PRINT_CONFIG:-0}"
@@ -2021,19 +2081,17 @@ Options (highest priority):
                                      this is the canonical home for
                                      LSSupportsGameMode / GCSupportsGameMode and
                                      any other static plist keys (default: enabled)
-  --seed-mac-package-version-counter / --no-seed-mac-package-version-counter
-                                     seed Build/Mac/<Project>.PackageVersionCounter
-                                     to "0.0" if absent. UE auto-increments this
-                                     on every xcodebuild and writes the value to
-                                     CFBundleVersion via Versions.xcconfig
-                                     (default: enabled)
-  --seed-mac-update-version-after-build / --no-seed-mac-update-version-after-build
-                                     drop a project-level
+  --use-ue-package-version-counter / --no-use-ue-package-version-counter
+                                     opt into UE's canonical CFBundleVersion path
+                                     (Path A): seeds Build/Mac/<Project>.PackageVersionCounter
+                                     and a project-level
                                      Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh
+                                     override (sanctioned at AppleToolChain.cs:394-397)
                                      that strips the engine's Build.version
                                      Changelist (e.g. 51494982) from CFBundleVersion.
-                                     Sanctioned override at AppleToolChain.cs:394-397
-                                     (default: enabled)
+                                     Mutually exclusive with the default auto-bump.
+                                     (default: disabled — the script's auto-bump
+                                     of CFBUNDLE_VERSION wins instead)
   --clean-build-dir / --no-clean-build-dir
   --dry-run / --no-dry-run
   --print-config / --no-print-config
@@ -2063,14 +2121,14 @@ Options (highest priority):
   --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
   --game-mode / --no-game-mode       (stamp LSSupportsGameMode + GCSupportsGameMode in xcconfig, default: YES)
   --app-category STRING              (INFOPLIST_KEY_LSApplicationCategoryType, e.g. public.app-category.games)
-  --cfbundle-version STRING          direct override of CFBundleVersion in the
-                                     exported .app's Info.plist, applied after
-                                     Xcode export but before codesign. Bypasses
-                                     UE's PackageVersionCounter auto-increment
-                                     entirely. Use when CI manages a single-integer
-                                     build counter (App Store style: "7", "42",
-                                     "$GITHUB_RUN_NUMBER"). Unset = leave the
-                                     UE-canonical CFBundleVersion alone.
+  --set-cfbundle-version STRING      set CFBundleVersion to STRING for this build
+                                     AND persist it to .env as the new baseline.
+                                     Future auto-bump builds will resume from
+                                     STRING. Use to reset the counter or pin to
+                                     a CI-supplied value (e.g. $GITHUB_RUN_NUMBER).
+                                     Without this flag, the script auto-bumps
+                                     CFBUNDLE_VERSION as an integer every build
+                                     (default behavior; first build ships 1).
   --bump-major / --bump-minor / --bump-patch
                                      bump VERSION_STRING from .env or --version-string;
                                      implies VERSION_MODE=MANUAL if not already set
@@ -2116,10 +2174,8 @@ while [[ $# -gt 0 ]]; do
     --no-seed-apple-launchscreen-compat) SEED_APPLE_LAUNCHSCREEN_COMPAT="0"; shift ;;
     --seed-mac-info-template-plist)      SEED_MAC_INFO_TEMPLATE_PLIST="1"; shift ;;
     --no-seed-mac-info-template-plist)   SEED_MAC_INFO_TEMPLATE_PLIST="0"; shift ;;
-    --seed-mac-package-version-counter)    SEED_MAC_PACKAGE_VERSION_COUNTER="1"; shift ;;
-    --no-seed-mac-package-version-counter) SEED_MAC_PACKAGE_VERSION_COUNTER="0"; shift ;;
-    --seed-mac-update-version-after-build)    SEED_MAC_UPDATE_VERSION_AFTER_BUILD="1"; shift ;;
-    --no-seed-mac-update-version-after-build) SEED_MAC_UPDATE_VERSION_AFTER_BUILD="0"; shift ;;
+    --use-ue-package-version-counter)    USE_UE_PACKAGE_VERSION_COUNTER="1"; shift ;;
+    --no-use-ue-package-version-counter) USE_UE_PACKAGE_VERSION_COUNTER="0"; shift ;;
     --clean-build-dir)      CLEAN_BUILD_DIR="1"; shift ;;
     --no-clean-build-dir)   CLEAN_BUILD_DIR="0"; shift ;;
     --dry-run)              DRY_RUN="1"; shift ;;
@@ -2160,7 +2216,7 @@ while [[ $# -gt 0 ]]; do
     --game-mode)                ENABLE_GAME_MODE="1"; shift ;;
     --no-game-mode)             ENABLE_GAME_MODE="0"; shift ;;
     --app-category)             APP_CATEGORY="$2"; shift 2 ;;
-    --cfbundle-version)         CFBUNDLE_VERSION="$2"; shift 2 ;;
+    --set-cfbundle-version)     CFBUNDLE_VERSION="$2"; CLI_SET_CFBUNDLE_VERSION=1; shift 2 ;;
     --bump-major|--bump-minor|--bump-patch)
       if is_placeholder "${VERSION_STRING:-}"; then
         die "$1 requires a base version. Set VERSION_STRING in .env or pass --version-string X.Y.Z before $1."
@@ -2544,6 +2600,11 @@ if [[ "$DRY_RUN" == "1" ]]; then
   echo "Would run: $steps" >&3
   exit 0
 fi
+
+# Resolve the CFBundleVersion that this build will ship. Mutates CFBUNDLE_VERSION
+# (auto-bump or explicit-set) and sets _CFBV_PERSIST. Done after the dry-run /
+# print-config exits so those modes don't accidentally consume a build number.
+_resolve_cfbundle_version_for_build
 
 echo "== Prep output locations ==" >&3
 rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR" "$ZIP_PATH"
@@ -2980,6 +3041,7 @@ echo "  - If distributing via a launcher (Steam, Epic, etc.), test launching fro
 echo "  - If distributing direct-download, test on a separate Mac (or a clean user account) with Gatekeeper enabled." >&3
 
 write_bumped_version_to_env
+write_cfbundle_version_to_env
 echo "✅ Done" >&3
 echo "App: $APP_PATH" >&3
 if [[ "$ENABLE_ZIP" == "1" ]]; then

@@ -77,7 +77,7 @@ Earlier versions of this script post-processed the UE-generated xcconfig at `Int
 | `CFBundleShortVersionString` (`MARKETING_VERSION`) | `Config/DefaultEngine.ini` → `[/Script/MacRuntimeSettings.MacRuntimeSettings]` `VersionInfo=` | `XcodeProject.cs:1997` |
 | `LSApplicationCategoryType` | `Config/DefaultEngine.ini` → `[/Script/MacTargetPlatform.XcodeProjectSettings]` `AppCategory=` | `XcodeProject.cs:1982` (defaults to `public.app-category.games` in `BaseEngine.ini`) |
 | `LSSupportsGameMode`, `GCSupportsGameMode` | `Build/Mac/Resources/Info.Template.plist` (UE merges this template into the final `Info.plist`) | `BaseEngine.ini:3463` `TemplateMacPlist=` |
-| `CFBundleVersion` (`CURRENT_PROJECT_VERSION`) | **Path A:** `Build/Mac/<Project>.PackageVersionCounter` (UE auto-increments per build); CL prefix stripped via project-level `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` override (`AppleToolChain.cs:394-397`).<br>**Path B:** `CFBUNDLE_VERSION` env var / `--cfbundle-version N` CLI flag (post-export `PlistBuddy` rewrite of `.app/Contents/Info.plist` before codesign). | `Engine/Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` |
+| `CFBundleVersion` (`CURRENT_PROJECT_VERSION`) | **Path B (default):** `CFBUNDLE_VERSION` in `.env`, auto pre-incremented every build by the script and persisted on success. Post-export `PlistBuddy` rewrite of `.app/Contents/Info.plist` before codesign. `--set-cfbundle-version N` sets a new baseline.<br>**Path A (opt-in via `USE_UE_PACKAGE_VERSION_COUNTER=1`):** `Build/Mac/<Project>.PackageVersionCounter` (UE auto-increments per build); CL prefix stripped via project-level `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` override (`AppleToolChain.cs:394-397`). | `Engine/Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` |
 
 The script defensively seeds the two non-ini files (`Info.Template.plist`, `PackageVersionCounter`) when they're missing, so a fresh clone bootstraps without any manual setup. Once seeded, **commit them** — they're project state.
 
@@ -120,92 +120,86 @@ When set, the script edits `Build/Mac/Resources/Info.Template.plist` via `PlistB
 
 The plist is auto-seeded from the engine's stock template (`$UE_ROOT/Engine/Build/Mac/Resources/Info.Template.plist`) on first run if missing. After that, edit it however you want — it's a regular plist file you own.
 
-### CFBundleVersion: two paths, pick one
+### CFBundleVersion: auto-bump by default, opt-in for UE-canonical
 
-There are two ways to control `CFBundleVersion`. They're complementary, not competing — pick whichever fits your workflow:
+`CFBundleVersion` (the integer `Info.plist` build counter) is managed by the script automatically. There are two strategies — Path B is the default and what most projects want; Path A is opt-in for advanced workflows.
 
-| Path | Format | Source of truth | When to use |
-|---|---|---|---|
-| **A. UE-canonical (default)** | `X.Y` (e.g. `0.2`) | `Build/Mac/<Project>.PackageVersionCounter`, auto-incremented by UE every build | You want UE to manage build numbers, with no CI plumbing. Auto-increments per local build. |
-| **B. Direct override** | Anything (`7`, `42`, `1.2.3`) | `CFBUNDLE_VERSION` env var or `--cfbundle-version N` CLI flag | You want App-Store-style explicit control, typically driven by CI (`$GITHUB_RUN_NUMBER`, Jenkins build number, internal release counter). |
+| Path | Default? | Source of truth | Format | When to use |
+|---|---|---|---|---|
+| **B. Auto-bump (default)** | yes | `CFBUNDLE_VERSION` in `.env`, pre-incremented every build by the script | integer (e.g. `1`, `2`, `7`) | You want App-Store-style monotonic integers and zero ceremony — first build ships `1`, every subsequent build ships one more. |
+| **A. UE-canonical** | no — opt in via `USE_UE_PACKAGE_VERSION_COUNTER=1` | `Build/Mac/<Project>.PackageVersionCounter`, auto-incremented by UE inside `xcodebuild` | `X.Y` (e.g. `0.2`) | You're integrating with a larger UE pipeline that already relies on `PackageVersionCounter`, or you specifically want UE's `<CL>.<X>.<Y>` format and the changelist semantics it implies. |
 
-If `CFBUNDLE_VERSION` is set, path B wins (post-export `PlistBuddy` rewrites the `.app`'s `Info.plist` before signing). If unset, path A applies (UE's canonical flow with our CL-stripping override).
+The two paths are mutually exclusive. Setting `USE_UE_PACKAGE_VERSION_COUNTER=1` disables the auto-bump and Info.plist override; UE's canonical flow takes over.
 
-#### Path A — UE-canonical (auto-incrementing, no CL prefix)
+> **Relationship to `--bump-major/--bump-minor/--bump-patch`:** these flags bump the *runtime* `VERSION_STRING` (used for `Content/<dir>/version.txt`) — they don't touch `CFBundleVersion`. The two version concepts are intentionally independent: `VERSION_STRING` is a semver string for in-game display; `CFBundleVersion` is an integer build counter for App Store / Gatekeeper.
 
-`CFBundleVersion` is driven by UE's canonical mechanism: `Build/Mac/<Project>.PackageVersionCounter`. UE's `UpdateVersionAfterBuild.sh` (invoked by xcodebuild) reads it, increments the minor (`0.0` → `0.1` → `0.2` …), and writes the value to `Intermediate/Build/Versions.xcconfig`. The generated xcconfig references this as `CURRENT_PROJECT_VERSION = $(UE_MAC_BUILD_VERSION)`, which Xcode resolves into `CFBundleVersion` in the final `Info.plist`.
+#### Path B — auto-bump (default behavior)
 
-The script seeds the counter to `0.0` if missing, so the first build ships `CFBundleVersion=0.1`.
+Every build, the script reads `CFBUNDLE_VERSION` from `.env` (defaulting to `0` if missing), pre-increments by 1, ships that value as `CFBundleVersion`, and persists the new value back to `.env` on a successful build:
 
-#### Stripping the engine changelist prefix
-
-By default the engine's `UpdateVersionAfterBuild.sh` writes `UE_MAC_BUILD_VERSION = <CL>.<MAC_VERSION>` where `<CL>` comes from `Engine/Build/Build.version`'s `Changelist` field. For an Epic Games Launcher install of 5.7.4 that's `51494982`, so projects ship `CFBundleVersion=51494982.0.2` — almost never what you want.
-
-The script defensively drops a project-level `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` that omits the `<CL>.` prefix. UE's `AppleToolChain.cs:394-397` explicitly checks the project for this script and falls back to the engine's copy only if absent — this is the sanctioned override path. With it in place, `CFBundleVersion` becomes the `PackageVersionCounter` contents verbatim (e.g. `0.2`).
-
-**Commit `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh`** so every machine and CI runner gets the same behavior. Disable the seed (and accept the engine's CL prefix) with `SEED_MAC_UPDATE_VERSION_AFTER_BUILD=0` or `--no-seed-mac-update-version-after-build`.
-
-#### Customizing the starting value
-
-To start at a specific value, edit the counter file directly — the script never overwrites an existing one.
-
-```bash
-echo "1.41" > Build/Mac/MyGame.PackageVersionCounter   # next build: increments to 1.42 → CFBundleVersion=1.42
+```text
+.env: CFBUNDLE_VERSION="0"   →  build 1 ships CFBundleVersion=1, .env now CFBUNDLE_VERSION="1"
+.env: CFBUNDLE_VERSION="1"   →  build 2 ships CFBundleVersion=2, .env now CFBUNDLE_VERSION="2"
 ```
 
-#### Format constraints
+If `CFBUNDLE_VERSION` is not present in `.env` at all, the first build still bumps from the default `0` and writes `CFBUNDLE_VERSION="1"` into `.env` on success. No initial setup required.
 
-The format is `X.Y` — two integers separated by a single dot. The engine's increment script (which our override mirrors) splits on `.` and increments index `[1]`, dropping any third component:
+The persist happens after a fully successful pipeline (notarization + stapling, or earlier success points if notarization is disabled). A failed or interrupted build leaves `.env` untouched, so the next build retries the same number — no wasted build numbers.
+
+##### Setting an explicit baseline
+
+`--set-cfbundle-version N` sets `CFBundleVersion` to exactly `N` for this build *and* persists `N` to `.env`. The next auto-bump build resumes from `N`:
+
+```bash
+./ship.sh --set-cfbundle-version 100      # ships 100, .env becomes CFBUNDLE_VERSION="100"
+./ship.sh                                  # next build ships 101, .env becomes CFBUNDLE_VERSION="101"
+```
+
+Use this to:
+- **Reset the counter** after switching strategies (e.g. coming off a CI-managed counter).
+- **Pin to a CI value** for a release build:
+  ```bash
+  ./ship.sh --set-cfbundle-version "$GITHUB_RUN_NUMBER"
+  ./ship.sh --set-cfbundle-version "$BUILD_NUMBER"            # Jenkins
+  ./ship.sh --set-cfbundle-version "$(cat .release-counter)"  # custom file
+  ```
+- **Pin to a non-integer value** (auto-bump only handles pure integers; `--set-cfbundle-version 1.2.3` works but disables auto-bump on subsequent runs until you re-set to an integer).
+
+##### Format
+
+`CFBUNDLE_VERSION` accepts any value Apple permits for `CFBundleVersion`: a single integer (`7`), or up to three dot-separated integers (`1.2.3`). Auto-bump only operates on pure integers — for non-integer baselines, manage bumping manually via `--set-cfbundle-version` per release.
+
+For App Store submissions, monotonically increasing is required across builds of the same `CFBundleShortVersionString` (`MARKETING_VERSION`).
+
+##### How it works under the hood
+
+The script `PlistBuddy`-rewrites `<App>.app/Contents/Info.plist`'s `CFBundleVersion` *after* `xcodebuild -exportArchive` produces the bundle but *before* the codesign step. The signature is computed over the modified `Info.plist`, so the bundle stays internally consistent. UE's `PackageVersionCounter` and `UpdateVersionAfterBuild.sh` still run as part of the build, but their value is irrelevant because the post-export rewrite always wins.
+
+#### Path A — UE-canonical (opt-in, advanced)
+
+To opt out of the auto-bump and route `CFBundleVersion` through UE's `PackageVersionCounter` mechanism instead, set `USE_UE_PACKAGE_VERSION_COUNTER=1` (env or `--use-ue-package-version-counter`). The script then:
+
+1. Defensively seeds `Build/Mac/<Project>.PackageVersionCounter` to `0.0` if missing. UE's `UpdateVersionAfterBuild.sh` (invoked by xcodebuild) reads it, increments the minor (`0.0` → `0.1` → …), and writes the value to `Intermediate/Build/Versions.xcconfig`. The generated xcconfig references this as `CURRENT_PROJECT_VERSION = $(UE_MAC_BUILD_VERSION)`, which Xcode resolves into `CFBundleVersion`.
+2. Defensively drops a project-level `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` that strips the engine's `Build.version` Changelist (e.g. `51494982` for an Epic Games Launcher install of 5.7.4). UE's `AppleToolChain.cs:394-397` checks the project for this script first and falls back to the engine's copy if absent — sanctioned override path. With it in place, `CFBundleVersion` becomes the `PackageVersionCounter` contents verbatim (e.g. `0.2`) instead of `51494982.0.2`.
+3. Skips the Info.plist override step, so UE's value reaches the shipped bundle untouched.
+
+**Commit `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh`** if you use Path A — every machine and CI runner needs the override.
+
+The format is `X.Y` — two integers separated by a single dot. The engine's increment script splits on `.` and increments index `[1]`, dropping any third component:
 
 ```text
 1.0.5  →  IFS split → [1, 0, 5]  →  writes back as "1.1"   # third part lost
 ```
 
-If you want a single-integer-style `CFBundleVersion` (e.g. App Store style: `1`, `2`, `3`…), use `0.N` and let `N` auto-increment. Apple accepts 1, 2, or 3 dot-separated integers — `0.2` is valid.
+To start at a specific value, edit `Build/Mac/<Project>.PackageVersionCounter` directly — the script never overwrites an existing one. The counter file itself is gitignored per UE convention (alongside `UBTGenerated/` and `FileOpenOrder/`); it's per-checkout state UBT manages.
 
-#### Should `PackageVersionCounter` be committed?
-
-**No.** Per UE convention, `Build/{Platform}/*.PackageVersionCounter` is gitignored — it's per-checkout state that UBT writes during builds (alongside `Build/{Platform}/UBTGenerated/` and `Build/{Platform}/FileOpenOrder/`). UE auto-creates and increments it; our seed just bootstraps a clean starting point so the first build ships `0.1` instead of `0.2`. To enforce a consistent starting point across machines, set the seed value via env var or commit a different mechanism.
-
-The `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` override **is** committed — it's a project-level script your build infrastructure depends on.
-
-#### Path B — Direct override (`CFBUNDLE_VERSION`)
-
-For App-Store-style monotonic integers (a common convention at AA/AAA studios — single digits like `7`, `42`, or whatever the CI build counter says), set `CFBUNDLE_VERSION` to your desired exact value:
-
-```bash
-CFBUNDLE_VERSION="7"
-```
-
-CLI: `--cfbundle-version 7`
-
-When set, the script rewrites `<App>.app/Contents/Info.plist`'s `CFBundleVersion` via `PlistBuddy` *after* `xcodebuild -exportArchive` produces the bundle but *before* the codesign step. The signature is computed over the modified `Info.plist`, so the bundle stays internally consistent. UE's `PackageVersionCounter` and `UpdateVersionAfterBuild.sh` still run as part of the build, but their value is overwritten by this final pass.
-
-This is the pattern AA/AAA UE studios typically use when shipping. CI systems supply the value:
-
-```bash
-# GitHub Actions
-./ship.sh --cfbundle-version "$GITHUB_RUN_NUMBER"
-
-# Jenkins
-./ship.sh --cfbundle-version "$BUILD_NUMBER"
-
-# Manual release counter committed to a file
-./ship.sh --cfbundle-version "$(cat .release-counter)"
-```
-
-`CFBUNDLE_VERSION` accepts any value Apple permits for `CFBundleVersion`: a single integer (`7`), or up to three dot-separated integers (`1.2.3`). For App Store submissions, monotonically increasing is required across builds of the same `CFBundleShortVersionString`.
-
-Path A and Path B are mutually exclusive at the bundle level — when both are configured, Path B wins (because the post-export rewrite happens last). Setting `CFBUNDLE_VERSION` makes the `PackageVersionCounter` increment effectively cosmetic for that build.
-
-### Disabling the seeds
+### Disabling the launch-screen / Info.Template.plist seeds
 
 ```bash
 SEED_MAC_INFO_TEMPLATE_PLIST="0"
-SEED_MAC_PACKAGE_VERSION_COUNTER="0"
-SEED_MAC_UPDATE_VERSION_AFTER_BUILD="0"
+SEED_APPLE_LAUNCHSCREEN_COMPAT="0"
 ```
 
-CLI: `--no-seed-mac-info-template-plist`, `--no-seed-mac-package-version-counter`, `--no-seed-mac-update-version-after-build`
+CLI: `--no-seed-mac-info-template-plist`, `--no-seed-apple-launchscreen-compat`
 
-Disable when you're managing the files outside the script and don't want a missing-file bootstrap.
+Disable when you're managing the files outside the script and don't want a missing-file bootstrap. The Path A files (`Build/Mac/<Project>.PackageVersionCounter` and `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh`) are seeded only when `USE_UE_PACKAGE_VERSION_COUNTER=1` — they share that opt-in flag rather than having individual toggles.

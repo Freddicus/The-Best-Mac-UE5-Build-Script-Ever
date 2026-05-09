@@ -7,16 +7,16 @@ This is the most common source of confusion when wiring up an Unreal project for
 - **`Build/{Platform}/` is for committed source-controlled *inputs*.** App icons, custom launch storyboards, `Info.plist` fragments, entitlements, signing config, `PakBlacklist*.txt`. The folder name is a UE3-era misnomer; treat it as "platform-source-inputs/". UBT does write a small set of intermediates here (`UBTGenerated/`, `FileOpenOrder/`, `*.PackageVersionCounter`); those are managed by the engine and stay gitignored.
 - **`Saved/` is for derived artifacts** — UE's documented dumping ground. It is gitignored by default and is where this script writes everything: cooked content, staged builds, packaged `.app`/`.zip`/`.dmg`, and logs.
 
-`ship.sh` does write four specific files under `Build/` — all of them at their *canonical* UE locations, so UE's regular machinery picks them up at `GenerateProjectFiles` / `xcodebuild` time:
+`ship.sh` writes a few specific files under `Build/` — all of them at their *canonical* UE locations, so UE's regular machinery picks them up at `GenerateProjectFiles` / `xcodebuild` time. The first two are seeded by default; the last two are seeded only when you opt into Path A for `CFBundleVersion`:
 
-| Path | Why the script seeds it | Commit it? | Disable with |
-|---|---|---|---|
-| `Build/Apple/Resources/Interface/LaunchScreen.storyboardc` | Stops Mac from trying to compile a consumer-supplied iOS `.storyboard` source. See [gotchas](gotchas.md#adding-a-custom-ios-launchscreenstoryboard-breaks-the-mac-build). | yes | `--no-seed-apple-launchscreen-compat` |
-| `Build/Mac/Resources/Info.Template.plist` | Canonical home for static `Info.plist` keys like `LSSupportsGameMode`. UE's `BaseEngine.ini` already configures `TemplateMacPlist=` to point here. | yes | `--no-seed-mac-info-template-plist` |
-| `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` | Strips the engine's `Build.version` Changelist from `CFBundleVersion`. Sanctioned override at `AppleToolChain.cs:394-397`. See [versioning.md](versioning.md#stripping-the-engine-changelist-prefix). | yes | `--no-seed-mac-update-version-after-build` |
-| `Build/Mac/<Project>.PackageVersionCounter` | UE's canonical `CFBundleVersion` source. UE rewrites this every build. **Gitignored per UE convention** (`Build/{Platform}/*.PackageVersionCounter` is in the "UBT writes here itself" category alongside `UBTGenerated/` and `FileOpenOrder/`). | no | `--no-seed-mac-package-version-counter` |
+| Path | Default? | Why the script seeds it | Commit it? | Disable with |
+|---|---|---|---|---|
+| `Build/Apple/Resources/Interface/LaunchScreen.storyboardc` | yes | Stops Mac from trying to compile a consumer-supplied iOS `.storyboard` source. See [gotchas](gotchas.md#adding-a-custom-ios-launchscreenstoryboard-breaks-the-mac-build). | yes | `--no-seed-apple-launchscreen-compat` |
+| `Build/Mac/Resources/Info.Template.plist` | yes | Canonical home for static `Info.plist` keys like `LSSupportsGameMode`. UE's `BaseEngine.ini` already configures `TemplateMacPlist=` to point here. | yes | `--no-seed-mac-info-template-plist` |
+| `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` | only when `USE_UE_PACKAGE_VERSION_COUNTER=1` | Strips the engine's `Build.version` Changelist from `CFBundleVersion`. Sanctioned override at `AppleToolChain.cs:394-397`. See [versioning.md](versioning.md#path-a--ue-canonical-opt-in-advanced). | yes | `--no-use-ue-package-version-counter` (turns off Path A entirely) |
+| `Build/Mac/<Project>.PackageVersionCounter` | only when `USE_UE_PACKAGE_VERSION_COUNTER=1` | UE's canonical `CFBundleVersion` source. UE rewrites this every build. **Gitignored per UE convention** (`Build/{Platform}/*.PackageVersionCounter` is in the "UBT writes here itself" category alongside `UBTGenerated/` and `FileOpenOrder/`). | no | `--no-use-ue-package-version-counter` |
 
-All four are seeded only when missing — once present, the script never overwrites them. See [versioning.md](versioning.md#infoplist-values-via-canonical-ue-overrides) for the canonical `Info.plist` story.
+All are seeded only when missing — once present, the script never overwrites them. By default (`USE_UE_PACKAGE_VERSION_COUNTER=0`), `CFBundleVersion` is auto-bumped via `CFBUNDLE_VERSION` in `.env` and the post-export `PlistBuddy` rewrite — no Path A files needed. See [versioning.md](versioning.md#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical) for the full story.
 
 ## Artifact paths
 

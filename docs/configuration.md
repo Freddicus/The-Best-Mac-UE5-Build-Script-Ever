@@ -57,12 +57,11 @@ The script locates your project automatically when run from the project root. Se
 | `REGEN_PROJECT_FILES` | `1` = run `GenerateProjectFiles.sh` once per ship invocation before the Xcode build (default). `0` = skip. Only meaningful when `USE_XCODE_EXPORT=1`. See the [workspace section](#xcode-workspace) for why this matters. |
 | `SEED_APPLE_LAUNCHSCREEN_COMPAT` | `1` = copy the engine's pre-compiled `LaunchScreen.storyboardc` into `Build/Apple/Resources/Interface/` if absent (default). Prevents Mac builds from trying to compile a consumer-supplied iOS `.storyboard`. |
 | `SEED_MAC_INFO_TEMPLATE_PLIST` | `1` = copy the engine's stock `Info.Template.plist` into `Build/Mac/Resources/` if absent (default). Canonical home for `LSSupportsGameMode`, `GCSupportsGameMode`, and any other static plist keys. UE's `BaseEngine.ini` already configures `TemplateMacPlist=` to point here, so any plist landing at this path is auto-discovered. |
-| `SEED_MAC_PACKAGE_VERSION_COUNTER` | `1` = seed `Build/Mac/<Project>.PackageVersionCounter` to `0.0` if absent (default). UE auto-increments this on each xcodebuild and writes the value into `CFBundleVersion` via `Versions.xcconfig`. |
-| `SEED_MAC_UPDATE_VERSION_AFTER_BUILD` | `1` = drop a project-level `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` if absent (default). Strips the engine's `Build.version` Changelist (e.g. `51494982` for Epic Games Launcher 5.7.4) from `CFBundleVersion` so projects ship `CFBundleVersion=0.2` instead of `CFBundleVersion=51494982.0.2`. Sanctioned override path at `AppleToolChain.cs:394-397`. **Commit the override** so CI and other machines get the same behavior. |
+| `USE_UE_PACKAGE_VERSION_COUNTER` | `0` (default, Path B) = the script auto-bumps `CFBUNDLE_VERSION` every build and rewrites the exported `.app`'s `Info.plist` post-export. `1` (Path A, opt-in) = the script seeds `Build/Mac/<Project>.PackageVersionCounter` and a project-level `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` override (sanctioned at `AppleToolChain.cs:394-397`) that strips Epic's engine Changelist; UE manages `CFBundleVersion` end-to-end and the script doesn't override the Info.plist. Mutually exclusive with the auto-bump. **Commit the seeded override script** if you opt in. |
 | `MARKETING_VERSION` | If set, the script writes `VersionInfo=` to `Config/DefaultEngine.ini` under `[/Script/MacRuntimeSettings.MacRuntimeSettings]` (UE's canonical `CFBundleShortVersionString` source). Unset = leave `DefaultEngine.ini` alone. See [versioning.md](versioning.md#marketing_version). |
 | `APP_CATEGORY` | If set, the script writes `AppCategory=` to `Config/DefaultEngine.ini` under `[/Script/MacTargetPlatform.XcodeProjectSettings]`. UE's `BaseEngine.ini` already defaults to `public.app-category.games` — only override when you need a different value. |
 | `ENABLE_GAME_MODE` | `1` = set `LSSupportsGameMode` + `GCSupportsGameMode` to `true` in your `Build/Mac/Resources/Info.Template.plist`. `0` = set to `false`. Unset = leave the plist's GameMode keys alone (your plist is sovereign). |
-| `CFBUNDLE_VERSION` | Direct override of `CFBundleVersion` in the exported `.app`'s `Info.plist`, applied after Xcode export but before codesign. Use for App-Store-style explicit control (e.g. `"7"`, `"$GITHUB_RUN_NUMBER"`). When set, bypasses UE's `PackageVersionCounter` auto-increment for the shipped bundle. Unset = use the UE-canonical path. See [versioning.md](versioning.md#cfbundleversion-two-paths-pick-one) for the two-paths breakdown. |
+| `CFBUNDLE_VERSION` | Source of truth for the auto-bumped integer build counter. The script reads this on every run, pre-increments by 1, ships the new value as `CFBundleVersion`, and persists the new value back to `.env` on a successful build. Empty/missing = `0`, so the first build ships `1`. Use `--set-cfbundle-version N` to set a new baseline (persists `N`; next build resumes from `N`). See [versioning.md](versioning.md#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical) for the two paths. |
 | `CLEAN_BUILD_DIR` | `1` = wipe `BUILD_DIR_REL` before building. Default: `0`. |
 | `DRY_RUN` | `1` = print the plan and exit without building. |
 | `PRINT_CONFIG` | `1` = print resolved configuration and exit without building. |
@@ -82,10 +81,9 @@ Run `./ship.sh --help` for the full list. Common flags:
 ./ship.sh --app-category public.app-category.games
 ./ship.sh --build-dir Output/Mac           # override BUILD_DIR_REL
 ./ship.sh --no-regen-project-files         # skip the GenerateProjectFiles step
-./ship.sh --no-seed-mac-info-template-plist          # opt out of plist seed
-./ship.sh --no-seed-mac-package-version-counter      # opt out of CFBundleVersion seed
-./ship.sh --no-seed-mac-update-version-after-build   # accept engine's CL prefix in CFBundleVersion
-./ship.sh --cfbundle-version 7                       # App-Store-style explicit CFBundleVersion
+./ship.sh --no-seed-mac-info-template-plist          # opt out of Info.Template.plist seed
+./ship.sh --use-ue-package-version-counter           # Path A: UE-canonical CFBundleVersion (opt-in)
+./ship.sh --set-cfbundle-version 100                 # set new baseline; next build resumes from 100
 ```
 
 CLI flags override `.env`. Both forms are equivalent — you can mix and match.
