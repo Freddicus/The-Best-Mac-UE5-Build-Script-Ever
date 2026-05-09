@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  iOS-ExportOptions.plist — Xcode iOS export configuration
+  Used by: xcodebuild -exportArchive -exportOptionsPlist <this file>
+
+  Usage:
+    1. Copy this file to your repo root as "iOS-ExportOptions.plist"
+    2. Replace YOUR_TEAM_ID with your 10-character Apple Developer Team ID
+       (find it at: developer.apple.com → Account → Membership)
+    3. ship.sh auto-detects this file by name when ENABLE_IOS=1, or override
+       with IOS_EXPORT_PLIST=/path/to/your-iOS-ExportOptions.plist (or
+       --ios-export-plist PATH).
+
+  NOTE: This is the iOS export plist — NOT the macOS one. iOS uses
+        method=app-store-connect (or release-testing for ad hoc); macOS uses
+        method=developer-id. They are not interchangeable; keep them separate.
+
+  For additional keys, see: man xcodebuild (search -exportOptionsPlist)
+-->
+<plist version="1.0">
+<dict>
+
+  <!-- Distribution method.
+       "app-store-connect" = submit to App Store / TestFlight (replaces deprecated "app-store")
+       "release-testing"   = ad hoc distribution to registered devices (replaces deprecated "ad-hoc")
+       "enterprise"        = Apple Developer Enterprise Program
+       "debugging"         = development distribution
+
+       Note: "developer-id" and "mac-application" are macOS-only — do not use for iOS. -->
+  <key>method</key>
+  <string>app-store-connect</string>
+
+  <!-- Your 10-character Apple Developer Team ID.
+       Example: ABCDE12345 -->
+  <key>teamID</key>
+  <string>YOUR_TEAM_ID</string>
+
+  <!-- Signing style.
+       "automatic"  = Xcode selects the best matching certificate and provisioning profile (recommended)
+       "manual"     = pin a specific provisioning profile (add "provisioningProfiles" key) -->
+  <key>signingStyle</key>
+  <string>automatic</string>
+
+  <!-- Bitcode was deprecated in Xcode 14. Keep false — UE5 does not use bitcode. -->
+  <key>compileBitcode</key>
+  <false/>
+
+</dict>
+</plist>

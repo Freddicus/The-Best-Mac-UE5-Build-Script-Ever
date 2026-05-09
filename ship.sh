@@ -844,6 +844,24 @@ print_config() {
   echo "MACOS_ICON_SYNC:   $MACOS_ICON_SYNC" >&3
   echo "MACOS_ICON_XCASSETS: ${MACOS_ICON_XCASSETS:-<unset>}" >&3
   echo "MACOS_APPICON_SET_NAME: ${MACOS_APPICON_SET_NAME:-<unset>}" >&3
+  echo "ENABLE_IOS:        ${ENABLE_IOS:-0}" >&3
+  echo "IOS_ONLY:          ${IOS_ONLY:-0}" >&3
+  if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+    echo "IOS_WORKSPACE:     ${IOS_WORKSPACE:-<unset>}" >&3
+    echo "IOS_SCHEME:        ${IOS_SCHEME:-<unset>}" >&3
+    echo "IOS_EXPORT_PLIST:  ${IOS_EXPORT_PLIST:-<unset>}" >&3
+    echo "IOS_ICON_SYNC:     ${IOS_ICON_SYNC:-1}" >&3
+    echo "IOS_ICON_XCASSETS: ${IOS_ICON_XCASSETS:-<unset>}" >&3
+    echo "IOS_APPICON_SET_NAME: ${IOS_APPICON_SET_NAME:-<unset>}" >&3
+    echo "IOS_MARKETING_VERSION: ${IOS_MARKETING_VERSION:-<unset, inherits MARKETING_VERSION>}" >&3
+    echo "IOS_ASC_VALIDATE:  ${IOS_ASC_VALIDATE:-0}" >&3
+    echo "IOS_ASC_UPLOAD:    ${IOS_ASC_UPLOAD:-0}" >&3
+    if [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]]; then
+      echo "IOS_ASC_API_KEY_ID: ${IOS_ASC_API_KEY_ID:-<unset>}" >&3
+      echo "IOS_ASC_API_ISSUER: ${IOS_ASC_API_ISSUER:-<unset>}" >&3
+      echo "IOS_ASC_API_KEY_PATH: ${IOS_ASC_API_KEY_PATH:-<unset>}" >&3
+    fi
+  fi
   echo "ENABLE_ZIP:        ${ENABLE_ZIP:-<unset>}" >&3
   echo "ENABLE_DMG:        $ENABLE_DMG" >&3
   echo "FANCY_DMG:         $FANCY_DMG" >&3
@@ -1090,14 +1108,34 @@ set_engine_ini_value() {
 
 ensure_marketing_version_in_engine_ini() {
   # Write MARKETING_VERSION (CFBundleShortVersionString) to its canonical
-  # location when the user has supplied one via .env / env var / CLI flag.
-  # UE picks up VersionInfo at GenerateProjectFiles time and stamps it into
-  # MARKETING_VERSION in the generated xcconfig.
-  [[ -n "${MARKETING_VERSION:-}" ]] || return 0
-  set_engine_ini_value \
-    "[/Script/MacRuntimeSettings.MacRuntimeSettings]" \
-    "VersionInfo" \
-    "$MARKETING_VERSION"
+  # locations. UE has separate ini sections for Mac and iOS runtime settings
+  # — both keys are read by XcodeProject.cs::WriteXcconfigFile (lines 1997
+  # and 2011 respectively) and stamped into the generated xcconfig.
+  #
+  # By default, MARKETING_VERSION is shared across platforms — we write the
+  # same value to both sections so Mac and iOS ship with the same display
+  # version. If IOS_MARKETING_VERSION is set, it overrides the iOS-side
+  # value only (rare, but useful when platforms ship on different cadences).
+  [[ -n "${MARKETING_VERSION:-}" || -n "${IOS_MARKETING_VERSION:-}" ]] || return 0
+
+  if [[ -n "${MARKETING_VERSION:-}" ]]; then
+    set_engine_ini_value \
+      "[/Script/MacRuntimeSettings.MacRuntimeSettings]" \
+      "VersionInfo" \
+      "$MARKETING_VERSION"
+  fi
+
+  # iOS section: explicit IOS_MARKETING_VERSION wins; otherwise inherit
+  # MARKETING_VERSION. We only write when ENABLE_IOS=1 (or when the user
+  # explicitly set IOS_MARKETING_VERSION) to avoid touching the iOS section
+  # for Mac-only projects.
+  local ios_value="${IOS_MARKETING_VERSION:-${MARKETING_VERSION:-}}"
+  if [[ -n "$ios_value" ]] && [[ "${ENABLE_IOS:-0}" == "1" || -n "${IOS_MARKETING_VERSION:-}" ]]; then
+    set_engine_ini_value \
+      "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
+      "VersionInfo" \
+      "$ios_value"
+  fi
 }
 
 ensure_app_category_in_engine_ini() {
@@ -1599,6 +1637,169 @@ autodetect_scheme_if_needed() {
   fi
 }
 
+autodetect_ios_workspace_if_needed() {
+  # Mirror autodetect_workspace_if_needed for the iOS workspace. UE generates
+  # "<Project> (iOS).xcworkspace" alongside the Mac one in a single regen.
+  [[ "${ENABLE_IOS:-0}" == "1" ]] || return 0
+  is_placeholder "${IOS_WORKSPACE:-}" || return 0
+
+  local base guess
+  base="${UPROJECT_NAME%.uproject}"
+  guess="$REPO_ROOT/${base} (iOS).xcworkspace"
+  if [[ -d "$guess" ]]; then
+    IOS_WORKSPACE="$guess"
+    info "Auto-detected iOS workspace by convention: $IOS_WORKSPACE"
+    return 0
+  fi
+
+  local found=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && found+=("$line")
+  done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 2 -type d -name '*iOS*.xcworkspace' 2>/dev/null)
+
+  if [[ "${#found[@]}" -eq 1 ]]; then
+    IOS_WORKSPACE="${found[0]}"
+    info "Auto-detected iOS workspace: $IOS_WORKSPACE"
+    return 0
+  fi
+
+  if [[ "${#found[@]}" -gt 1 ]]; then
+    warn "Multiple iOS .xcworkspace candidates found. Set IOS_WORKSPACE explicitly."
+  fi
+}
+
+autodetect_ios_scheme_if_needed() {
+  [[ "${ENABLE_IOS:-0}" == "1" ]] || return 0
+  is_placeholder "${IOS_SCHEME:-}" || return 0
+  [[ -d "${IOS_WORKSPACE:-}" ]] || return 0
+
+  # If the Mac scheme was resolved, iOS typically uses the same name.
+  if ! is_placeholder "${XCODE_SCHEME:-}"; then
+    IOS_SCHEME="$XCODE_SCHEME"
+    info "iOS scheme inferred from Mac scheme: $IOS_SCHEME"
+    return 0
+  fi
+
+  info "IOS_SCHEME not set — attempting auto-detect from iOS workspace"
+  local list
+  list="$(xcodebuild -list -workspace "$IOS_WORKSPACE" 2>/dev/null || true)"
+  if [[ -z "$list" ]]; then
+    warn "Could not list schemes from iOS workspace: $IOS_WORKSPACE"
+    return 0
+  fi
+
+  local schemes=() in_section=0
+  while IFS= read -r line; do
+    if [[ "$in_section" -eq 0 ]]; then
+      if [[ "$line" =~ ^[[:space:]]*Schemes:[[:space:]]*$ ]]; then
+        in_section=1
+      fi
+      continue
+    fi
+    [[ -z "$line" ]] && continue
+    if [[ "$line" =~ ^[[:space:]]+[^[:space:]] ]]; then
+      local trimmed
+      trimmed="${line#"${line%%[![:space:]]*}"}"
+      schemes+=("$trimmed")
+    else
+      break
+    fi
+  done <<< "$list"
+
+  if [[ "${#schemes[@]}" -eq 1 ]]; then
+    IOS_SCHEME="${schemes[0]}"
+    info "Auto-detected iOS scheme: $IOS_SCHEME"
+  elif [[ "${#schemes[@]}" -gt 1 ]]; then
+    local base expected s
+    base="${UPROJECT_NAME%.uproject}"
+    expected="$base"
+    for s in "${schemes[@]}"; do
+      if [[ "$s" == "$expected" ]]; then
+        IOS_SCHEME="$s"
+        info "Auto-selected iOS scheme (name match): $IOS_SCHEME"
+        return 0
+      fi
+    done
+    warn "Multiple iOS schemes found, none matched project name. Set IOS_SCHEME explicitly."
+  fi
+}
+
+autodetect_ios_export_plist_if_needed() {
+  # Mirror autodetect_export_plist_if_needed for iOS. Skip Mac-only methods
+  # (developer-id, mac-application) when scanning by content.
+  [[ "${ENABLE_IOS:-0}" == "1" ]] || return 0
+  is_placeholder "${IOS_EXPORT_PLIST:-}" || return 0
+
+  local conventional="$REPO_ROOT/iOS-ExportOptions.plist"
+  if [[ -f "$conventional" ]]; then
+    IOS_EXPORT_PLIST="$conventional"
+    info "Auto-detected iOS ExportOptions.plist (by name): $IOS_EXPORT_PLIST"
+    return 0
+  fi
+
+  local matches=() p flat
+  while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    flat="$(/bin/cat "$p" 2>/dev/null | /usr/bin/tr -d '[:space:]')"
+    if echo "$flat" | /usr/bin/grep -qiE '<key>method</key><string>(developer-id|mac-application)</string>'; then
+      continue
+    fi
+    if echo "$flat" | /usr/bin/grep -qiE '<key>method</key><string>(app-store-connect|release-testing|ad-hoc|enterprise|debugging|development)</string>'; then
+      matches+=("$p")
+    fi
+  done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 1 -type f -name '*.plist' 2>/dev/null | /usr/bin/sort)
+
+  if [[ "${#matches[@]}" -eq 1 ]]; then
+    IOS_EXPORT_PLIST="${matches[0]}"
+    info "Auto-detected iOS ExportOptions.plist (by contents): $IOS_EXPORT_PLIST"
+    return 0
+  fi
+
+  if [[ "${#matches[@]}" -gt 1 ]]; then
+    warn "Multiple iOS ExportOptions-like plist files found. Pass --ios-export-plist PATH to select one."
+    return 0
+  fi
+
+  warn "No iOS ExportOptions.plist found. Copy iOS-ExportOptions.plist.example to iOS-ExportOptions.plist and edit, or pass --ios-export-plist PATH."
+}
+
+autodetect_ios_asc_credentials_if_needed() {
+  # Read App Store Connect API credentials from Config/DefaultEngine.ini
+  # if Xcode previously configured them there. The fields Xcode writes are
+  # AppStoreConnectKeyID, AppStoreConnectIssuerID, AppStoreConnectKeyPath
+  # under [/Script/IOSRuntimeSettings.IOSRuntimeSettings] or its enclosing
+  # section. We read them with the existing simple read_ini_value helper —
+  # no per-section qualifying since these keys are unique within the file.
+  [[ "${ENABLE_IOS:-0}" == "1" ]] || return 0
+  [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]] || return 0
+
+  local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
+  [[ -f "$engine_ini" ]] || return 0
+
+  local v
+  if is_placeholder "${IOS_ASC_API_KEY_ID:-}"; then
+    v="$(read_ini_value "$engine_ini" "AppStoreConnectKeyID")"
+    if [[ -n "$v" ]]; then
+      IOS_ASC_API_KEY_ID="$v"
+      info "Auto-detected IOS_ASC_API_KEY_ID from DefaultEngine.ini: $IOS_ASC_API_KEY_ID"
+    fi
+  fi
+  if is_placeholder "${IOS_ASC_API_ISSUER:-}"; then
+    v="$(read_ini_value "$engine_ini" "AppStoreConnectIssuerID")"
+    if [[ -n "$v" ]]; then
+      IOS_ASC_API_ISSUER="$v"
+      info "Auto-detected IOS_ASC_API_ISSUER from DefaultEngine.ini"
+    fi
+  fi
+  if is_placeholder "${IOS_ASC_API_KEY_PATH:-}"; then
+    v="$(read_ini_value "$engine_ini" "AppStoreConnectKeyPath")"
+    if [[ -n "$v" ]]; then
+      IOS_ASC_API_KEY_PATH="$v"
+      info "Auto-detected IOS_ASC_API_KEY_PATH from DefaultEngine.ini: $IOS_ASC_API_KEY_PATH"
+    fi
+  fi
+}
+
 first_appiconset_name_in_catalog() {
   # Return the first *.appiconset folder name (without suffix) from an asset catalog.
   local catalog_dir="$1"
@@ -1987,6 +2188,28 @@ MACOS_ICON_SYNC="${MACOS_ICON_SYNC:-1}"
 MACOS_ICON_XCASSETS="${MACOS_ICON_XCASSETS:-}"
 MACOS_APPICON_SET_NAME="${MACOS_APPICON_SET_NAME:-}"
 
+# iOS pipeline (opt-in). Default off; set ENABLE_IOS=1 / pass --ios to enable.
+ENABLE_IOS="${ENABLE_IOS:-0}"
+IOS_ONLY="${IOS_ONLY:-0}"
+IOS_WORKSPACE="${IOS_WORKSPACE:-}"
+IOS_SCHEME="${IOS_SCHEME:-}"
+IOS_EXPORT_PLIST="${IOS_EXPORT_PLIST:-}"
+IOS_ICON_SYNC="${IOS_ICON_SYNC:-1}"
+IOS_ICON_XCASSETS="${IOS_ICON_XCASSETS:-}"
+IOS_APPICON_SET_NAME="${IOS_APPICON_SET_NAME:-}"
+IOS_MARKETING_VERSION="${IOS_MARKETING_VERSION:-}"
+
+# iOS App Store Connect upload (xcrun altool — NOT notarytool; different
+# tools, different services). altool talks to ASC's submission/validation
+# API and is the documented path for IPA uploads. It auths via an API key
+# (.p8 file + key ID + issuer UUID), distinct from the keychain profile
+# notarytool uses for Mac notarization.
+IOS_ASC_VALIDATE="${IOS_ASC_VALIDATE:-0}"
+IOS_ASC_UPLOAD="${IOS_ASC_UPLOAD:-0}"
+IOS_ASC_API_KEY_ID="${IOS_ASC_API_KEY_ID:-}"
+IOS_ASC_API_ISSUER="${IOS_ASC_API_ISSUER:-}"
+IOS_ASC_API_KEY_PATH="${IOS_ASC_API_KEY_PATH:-}"
+
 ENABLE_ZIP="${ENABLE_ZIP:-}"
 ENABLE_DMG="${ENABLE_DMG:-0}"
 FANCY_DMG="${FANCY_DMG:-0}"
@@ -2071,6 +2294,37 @@ Options (highest priority):
   --macos-icon-sync / --no-macos-icon-sync
   --macos-icon-xcassets PATH
   --macos-appicon-set-name NAME
+
+  --ios / --no-ios                   enable iOS pass after the Mac pipeline
+                                     (default: off)
+  --ios-only                         skip Mac entirely and run only iOS;
+                                     does not require SIGN_IDENTITY
+  --ios-workspace FILE_OR_PATH       (e.g. "MyGame (iOS).xcworkspace")
+  --ios-scheme NAME                  iOS Xcode scheme (auto-detected if unset)
+  --ios-export-plist PATH            iOS-ExportOptions.plist path
+                                     (auto-detected; conventional name
+                                     "iOS-ExportOptions.plist")
+  --ios-icon-sync / --no-ios-icon-sync
+  --ios-icon-xcassets PATH           source iOS .xcassets to stage into
+                                     Build/IOS/Resources/Assets.xcassets
+                                     (default: $REPO_ROOT/iOS-SourceControlled.xcassets)
+  --ios-appicon-set-name NAME
+  --ios-marketing-version STRING     CFBundleShortVersionString for iOS only
+                                     (when not set, MARKETING_VERSION applies
+                                     to both platforms)
+  --ios-validate-ipa                 validate the IPA via xcrun altool
+                                     --validate-app (App Store Connect; NOT
+                                     notarytool — different tool, different
+                                     service)
+  --ios-upload-ipa                   upload the IPA via xcrun altool
+                                     --upload-app; implies --ios-validate-ipa
+  --ios-asc-api-key-id ID            App Store Connect API key ID (10-char)
+  --ios-asc-api-issuer UUID          ASC API issuer UUID
+  --ios-asc-api-key-path PATH        path to the .p8 API key file
+                                     (auto-detected from
+                                     Config/DefaultEngine.ini's
+                                     AppStoreConnectKeyID/IssuerID/KeyPath
+                                     fields if Xcode wrote them)
 
   --zip / --no-zip
   --dmg / --no-dmg
@@ -2161,6 +2415,23 @@ while [[ $# -gt 0 ]]; do
     --no-macos-icon-sync)   MACOS_ICON_SYNC="0"; shift ;;
     --macos-icon-xcassets)  MACOS_ICON_XCASSETS="$2"; CLI_SET_MACOS_ICON_XCASSETS=1; shift 2 ;;
     --macos-appicon-set-name) MACOS_APPICON_SET_NAME="$2"; shift 2 ;;
+
+    --ios)                    ENABLE_IOS="1"; shift ;;
+    --no-ios)                 ENABLE_IOS="0"; shift ;;
+    --ios-only)               IOS_ONLY="1"; ENABLE_IOS="1"; shift ;;
+    --ios-workspace)          IOS_WORKSPACE="$2"; shift 2 ;;
+    --ios-scheme)             IOS_SCHEME="$2"; shift 2 ;;
+    --ios-export-plist)       IOS_EXPORT_PLIST="$2"; shift 2 ;;
+    --ios-icon-sync)          IOS_ICON_SYNC="1"; shift ;;
+    --no-ios-icon-sync)       IOS_ICON_SYNC="0"; shift ;;
+    --ios-icon-xcassets)      IOS_ICON_XCASSETS="$2"; CLI_SET_IOS_ICON_XCASSETS=1; shift 2 ;;
+    --ios-appicon-set-name)   IOS_APPICON_SET_NAME="$2"; shift 2 ;;
+    --ios-marketing-version)  IOS_MARKETING_VERSION="$2"; shift 2 ;;
+    --ios-validate-ipa)       IOS_ASC_VALIDATE="1"; shift ;;
+    --ios-upload-ipa)         IOS_ASC_UPLOAD="1"; IOS_ASC_VALIDATE="1"; shift ;;
+    --ios-asc-api-key-id)     IOS_ASC_API_KEY_ID="$2"; shift 2 ;;
+    --ios-asc-api-issuer)     IOS_ASC_API_ISSUER="$2"; shift 2 ;;
+    --ios-asc-api-key-path)   IOS_ASC_API_KEY_PATH="$2"; shift 2 ;;
 
     --zip)                  ENABLE_ZIP="1"; shift ;;
     --no-zip)               ENABLE_ZIP="0"; shift ;;
@@ -2264,6 +2535,9 @@ autodetect_names_if_needed
 # Try the common "<Project> (Mac).xcworkspace" guess before the more general workspace find.
 autodetect_workspace_guess_if_needed
 autodetect_export_plist_if_needed
+autodetect_ios_workspace_if_needed
+autodetect_ios_export_plist_if_needed
+autodetect_ios_asc_credentials_if_needed
 autodetect_steam_if_needed
 autodetect_steam_dylib_src_from_engine_if_needed
 
@@ -2273,6 +2547,17 @@ if is_placeholder "${MACOS_ICON_XCASSETS:-}"; then
 fi
 if [[ "$MACOS_ICON_XCASSETS" != /* ]]; then
   MACOS_ICON_XCASSETS="$(abspath_from "$REPO_ROOT" "$MACOS_ICON_XCASSETS")"
+fi
+
+# Default iOS icon catalog location is source-controlled in repo root, mirroring
+# the macOS convention. Only resolved when ENABLE_IOS=1 to keep no-op runs lean.
+if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+  if is_placeholder "${IOS_ICON_XCASSETS:-}"; then
+    IOS_ICON_XCASSETS="$REPO_ROOT/iOS-SourceControlled.xcassets"
+  fi
+  if [[ "$IOS_ICON_XCASSETS" != /* ]]; then
+    IOS_ICON_XCASSETS="$(abspath_from "$REPO_ROOT" "$IOS_ICON_XCASSETS")"
+  fi
 fi
 
 # Derive common paths (after CLI parsing/autodetect)
@@ -2316,12 +2601,18 @@ require_not_placeholder "UPROJECT_NAME" "$UPROJECT_NAME" "Example: MyGame.uproje
 require_not_placeholder "UPROJECT_PATH" "$UPROJECT_PATH" "Example: /path/to/MyGame.uproject"
 require_not_placeholder "UE_ROOT" "$UE_ROOT" "Example: /Users/Shared/Epic Games/UE_5.7"
 require_not_placeholder "DEVELOPMENT_TEAM" "$DEVELOPMENT_TEAM" "Example: ABCDE12345"
-require_not_placeholder "SIGN_IDENTITY" "$SIGN_IDENTITY" "Example: Developer ID Application: Your Company (ABCDE12345)"
+# SIGN_IDENTITY is Mac-specific (Developer ID Application). iOS uses
+# automatic provisioning via xcodebuild, so don't require it for IOS_ONLY runs.
+if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+  require_not_placeholder "SIGN_IDENTITY" "$SIGN_IDENTITY" "Example: Developer ID Application: Your Company (ABCDE12345)"
+fi
 require_not_placeholder "SHORT_NAME" "$SHORT_NAME" "Example: MG"
 require_not_placeholder "LONG_NAME" "$LONG_NAME" "Example: MyGame"
 
 # Xcode inputs are only required if you use the Xcode archive/export steps.
-if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+# When IOS_ONLY=1, Mac is skipped entirely so SIGN_IDENTITY / EXPORT_PLIST /
+# XCODE_WORKSPACE are not required either.
+if [[ "$USE_XCODE_EXPORT" == "1" && "${IOS_ONLY:-0}" != "1" ]]; then
   # Ensure derived paths are available to autodetect.
   WORKSPACE="${WORKSPACE:-$REPO_ROOT/$XCODE_WORKSPACE}"
   SCHEME="$XCODE_SCHEME"
@@ -2333,6 +2624,16 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   require_not_placeholder "EXPORT_PLIST" "$EXPORT_PLIST" "Point at an ExportOptions.plist compatible with Developer ID exports"
   require_not_placeholder "XCODE_WORKSPACE" "$XCODE_WORKSPACE" "Example: YourProject (Mac).xcworkspace"
   require_not_placeholder "XCODE_SCHEME" "$XCODE_SCHEME" "Example: YourProject"
+fi
+
+# iOS validation only when iOS is opted into AND we're actually going to build.
+# --print-config and --dry-run bail out before this; we still want to surface
+# unset iOS workspace/scheme as a die() at actual build time.
+if [[ "${ENABLE_IOS:-0}" == "1" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
+  autodetect_ios_scheme_if_needed
+  require_not_placeholder "IOS_WORKSPACE" "${IOS_WORKSPACE:-}" "Example: YourProject (iOS).xcworkspace"
+  require_not_placeholder "IOS_SCHEME" "${IOS_SCHEME:-}" "Example: YourProject"
+  require_not_placeholder "IOS_EXPORT_PLIST" "${IOS_EXPORT_PLIST:-}" "Copy iOS-ExportOptions.plist.example to iOS-ExportOptions.plist and edit"
 fi
 
 
@@ -2451,10 +2752,18 @@ echo "Log file: $LOG_FILE" >&3
 trap on_error_exit ERR
 trap 'restore_content_version_file' EXIT
 
-# Build outputs
+# Build outputs (Mac)
 ARCHIVE_PATH="$BUILD_DIR/${SHORT_NAME}.xcarchive"
 EXPORT_DIR="$BUILD_DIR/${SHORT_NAME}-export"
 ZIP_PATH="$BUILD_DIR/${LONG_NAME}.zip"
+
+# Build outputs (iOS) — parallel of Mac, but under Saved/Packages/IOS/.
+# UAT writes to UAT_ARCHIVE_DIR/<TargetPlatform>/, which for iOS is
+# Saved/Packages/IOS/. Script-side artifacts (xcarchive, export dir, .ipa)
+# live alongside.
+IOS_BUILD_DIR="$REPO_ROOT/Saved/Packages/IOS"
+IOS_ARCHIVE_PATH="$IOS_BUILD_DIR/${SHORT_NAME}-iOS.xcarchive"
+IOS_EXPORT_DIR="$IOS_BUILD_DIR/${SHORT_NAME}-iOS-export"
 
 # NOTE: ZIP_PATH name is cosmetic (uses LONG_NAME). Change LONG_NAME to match your game.
 ### ===================================
@@ -2478,14 +2787,18 @@ fi
 # Tools used later
 command -v codesign  >/dev/null 2>&1 || die "codesign not found (unexpected on macOS)."
 
-# Verify the signing identity exists in the keychain before the multi-hour build.
-# A typo or expired cert will fail here rather than after UAT finishes cooking.
-if ! /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep -qF "$SIGN_IDENTITY"; then
-  echo "Available Developer ID codesigning identities:" >&3
-  /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep "Developer ID" >&3 || echo "  (none found)" >&3
-  die "SIGN_IDENTITY not found in keychain: $SIGN_IDENTITY"
+# Verify the Mac signing identity exists in the keychain before the multi-hour
+# build. A typo or expired cert will fail here rather than after UAT finishes
+# cooking. iOS doesn't use SIGN_IDENTITY (xcodebuild + automatic provisioning
+# handles signing via the team ID), so skip this check on IOS_ONLY runs.
+if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+  if ! /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep -qF "$SIGN_IDENTITY"; then
+    echo "Available Developer ID codesigning identities:" >&3
+    /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep "Developer ID" >&3 || echo "  (none found)" >&3
+    die "SIGN_IDENTITY not found in keychain: $SIGN_IDENTITY"
+  fi
+  good "Signing identity found in keychain."
 fi
-good "Signing identity found in keychain."
 
 # Xcode steps are optional
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
@@ -2508,12 +2821,17 @@ if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
   good "Notary profile '$NOTARY_PROFILE' is accessible."
 fi
 
-# Export options plist must exist if you are exporting
-if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+# Mac ExportOptions.plist must exist if we're exporting Mac (i.e. not IOS_ONLY).
+if [[ "$USE_XCODE_EXPORT" == "1" && "${IOS_ONLY:-0}" != "1" ]]; then
   [[ -f "$EXPORT_PLIST" ]] || die "ExportOptions.plist not found: $EXPORT_PLIST"
 fi
 
-if [[ "$USE_XCODE_EXPORT" == "1" && "$MACOS_ICON_SYNC" == "1" ]]; then
+# iOS ExportOptions.plist must exist if we're exporting iOS.
+if [[ "${ENABLE_IOS:-0}" == "1" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
+  [[ -f "${IOS_EXPORT_PLIST:-}" ]] || die "iOS-ExportOptions.plist not found: ${IOS_EXPORT_PLIST:-<unset>}"
+fi
+
+if [[ "$USE_XCODE_EXPORT" == "1" && "$MACOS_ICON_SYNC" == "1" && "${IOS_ONLY:-0}" != "1" ]]; then
   if [[ ! -d "$MACOS_ICON_XCASSETS" ]]; then
     if [[ "${CLI_SET_MACOS_ICON_XCASSETS:-0}" == "1" ]]; then
       die "Configured --macos-icon-xcassets path not found: $MACOS_ICON_XCASSETS"
@@ -2521,6 +2839,17 @@ if [[ "$USE_XCODE_EXPORT" == "1" && "$MACOS_ICON_SYNC" == "1" ]]; then
     warn "macOS icon catalog not found at default path: $MACOS_ICON_XCASSETS"
     warn "Continuing without macOS icon catalog seeding (pass --no-macos-icon-sync to silence this)."
     MACOS_ICON_SYNC="0"
+  fi
+fi
+
+if [[ "${ENABLE_IOS:-0}" == "1" && "${IOS_ICON_SYNC:-0}" == "1" ]]; then
+  if [[ ! -d "${IOS_ICON_XCASSETS:-}" ]]; then
+    if [[ "${CLI_SET_IOS_ICON_XCASSETS:-0}" == "1" ]]; then
+      die "Configured --ios-icon-xcassets path not found: ${IOS_ICON_XCASSETS:-<unset>}"
+    fi
+    warn "iOS icon catalog not found at default path: ${IOS_ICON_XCASSETS:-<unset>}"
+    warn "Continuing without iOS icon catalog seeding (pass --no-ios-icon-sync to silence this)."
+    IOS_ICON_SYNC="0"
   fi
 fi
 
@@ -2542,27 +2871,39 @@ if [[ "$DRY_RUN" == "1" ]]; then
   if [[ "$USE_XCODE_EXPORT" == "1" && "$REGEN_PROJECT_FILES" == "1" ]]; then
     steps="$steps → GenerateProjectFiles"
   fi
-  steps="$steps → UAT BuildCookRun"
-  if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
-    steps="$steps → Xcode archive/export"
-  else
-    steps="$steps → (skip Xcode archive/export)"
-  fi
-  steps="$steps → codesign"
-  if [[ "$ENABLE_ZIP" == "1" ]]; then
-    steps="$steps → zip"
-  fi
-  if [[ "$ENABLE_DMG" == "1" ]]; then
-    steps="$steps → DMG create+sign"
-    if [[ "$FANCY_DMG" == "1" ]]; then
-      steps="$steps → DMG Finder layout (experimental)"
+  if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+    steps="$steps → UAT BuildCookRun (Mac)"
+    if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+      steps="$steps → Mac Xcode archive/export"
+    else
+      steps="$steps → (skip Mac Xcode archive/export)"
+    fi
+    steps="$steps → Mac codesign"
+    if [[ "$ENABLE_ZIP" == "1" ]]; then
+      steps="$steps → Mac zip"
+    fi
+    if [[ "$ENABLE_DMG" == "1" ]]; then
+      steps="$steps → Mac DMG create+sign"
+      if [[ "$FANCY_DMG" == "1" ]]; then
+        steps="$steps → DMG Finder layout (experimental)"
+      fi
+    fi
+    if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
+      steps="$steps → Mac notarize+staple"
     fi
   fi
-  if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
-    steps="$steps → notarize+staple"
+  if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+    steps="$steps → UAT BuildCookRun (iOS) → iOS archive/export → IPA"
+    if [[ "${IOS_ASC_VALIDATE:-0}" == "1" ]]; then
+      steps="$steps → ASC validate"
+    fi
+    if [[ "${IOS_ASC_UPLOAD:-0}" == "1" ]]; then
+      steps="$steps → ASC upload"
+    fi
   fi
   if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
-    echo "Would wipe build dir: $BUILD_DIR" >&3
+    [[ "${IOS_ONLY:-0}" != "1" ]] && echo "Would wipe Mac build dir: $BUILD_DIR" >&3
+    [[ "${ENABLE_IOS:-0}" == "1" ]] && echo "Would wipe iOS build dir: $IOS_BUILD_DIR" >&3
   fi
   echo "Would run: $steps" >&3
   exit 0
@@ -2574,12 +2915,22 @@ fi
 _resolve_cfbundle_version_for_build
 
 echo "== Prep output locations ==" >&3
-rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR" "$ZIP_PATH"
-if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
-  warn "CLEAN_BUILD_DIR=1 — wiping entire build dir: $BUILD_DIR"
-  rm -rf "$BUILD_DIR"
+if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+  rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR" "$ZIP_PATH"
+  if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
+    warn "CLEAN_BUILD_DIR=1 — wiping entire build dir: $BUILD_DIR"
+    rm -rf "$BUILD_DIR"
+  fi
+  mkdir -p "$BUILD_DIR"
 fi
-mkdir -p "$BUILD_DIR"
+if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+  rm -rf "$IOS_ARCHIVE_PATH" "$IOS_EXPORT_DIR"
+  if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
+    warn "CLEAN_BUILD_DIR=1 — wiping entire iOS build dir: $IOS_BUILD_DIR"
+    rm -rf "$IOS_BUILD_DIR"
+  fi
+  mkdir -p "$IOS_BUILD_DIR"
+fi
 
 ensure_game_ini_staging_entry
 write_version_to_content
@@ -2593,18 +2944,24 @@ ensure_app_category_in_engine_ini
 ensure_marketing_version_in_engine_ini
 regenerate_project_files
 
-info "Building game (UAT BuildCookRun)"
+if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+  info "Building game (UAT BuildCookRun, Mac)"
 
-"$SCRIPTS/RunUAT.sh" BuildCookRun \
-  -unrealexe="$UE_EDITOR" \
-  -project="$UPROJECT_PATH" \
-  -noP4 -build -cook -pak -iostore \
-  -targetplatform=Mac -clientconfig="$UE_CLIENT_CONFIG" \
-  -stage -package \
-  -archive -archivedirectory="$UAT_ARCHIVE_DIR" \
-  -utf8output -verbose -specifiedarchitecture=arm64+x86_64
+  "$SCRIPTS/RunUAT.sh" BuildCookRun \
+    -unrealexe="$UE_EDITOR" \
+    -project="$UPROJECT_PATH" \
+    -noP4 -build -cook -pak -iostore \
+    -targetplatform=Mac -clientconfig="$UE_CLIENT_CONFIG" \
+    -stage -package \
+    -archive -archivedirectory="$UAT_ARCHIVE_DIR" \
+    -utf8output -verbose -specifiedarchitecture=arm64+x86_64
 
-echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3
+  echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3
+fi
+
+# Mac post-UAT pipeline (Xcode archive/export → codesign → ZIP/DMG → notarize).
+# Skipped entirely when IOS_ONLY=1.
+if [[ "${IOS_ONLY:-0}" != "1" ]]; then
 
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   # CFBundleVersion build-setting override. Apple-documented: command-line
@@ -3010,23 +3367,115 @@ else
   echo "== Notarization disabled (NOTARIZE=no) ==" >&3
 fi
 
+fi  # end if [[ "${IOS_ONLY:-0}" != "1" ]] — Mac post-UAT pipeline
+
+# ---------------------------------------------------------------------------
+# iOS pipeline (UAT → archive → IPA → optional ASC validate/upload)
+# ---------------------------------------------------------------------------
+# Runs after Mac when ENABLE_IOS=1, or alone when IOS_ONLY=1. Skipped entirely
+# when ENABLE_IOS=0. iOS doesn't need our per-component codesign or notarization
+# — xcodebuild + ExportOptions.plist handle App Store signing, and the App
+# Store equivalent of notarization is the upload itself.
+if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+  info "Building game (UAT BuildCookRun, iOS)"
+
+  "$SCRIPTS/RunUAT.sh" BuildCookRun \
+    -unrealexe="$UE_EDITOR" \
+    -project="$UPROJECT_PATH" \
+    -noP4 -build -cook -pak -iostore \
+    -targetplatform=IOS -clientconfig="$UE_CLIENT_CONFIG" \
+    -stage -package \
+    -archive -archivedirectory="$UAT_ARCHIVE_DIR" \
+    -utf8output -verbose
+
+  # Same CFBundleVersion build-setting override as Mac. Shared CFBUNDLE_VERSION
+  # value across both archives — one bump per ship.sh run, both platforms ship
+  # the same number.
+  _ios_xcb_settings=()
+  [[ -n "${CFBUNDLE_VERSION:-}" ]] && _ios_xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
+
+  echo "== iOS Archive ==" >&3
+  xcodebuild \
+    -workspace "$IOS_WORKSPACE" \
+    -scheme "$IOS_SCHEME" \
+    -configuration "$XCODE_CONFIG" \
+    -destination 'generic/platform=iOS' \
+    -archivePath "$IOS_ARCHIVE_PATH" \
+    -allowProvisioningUpdates \
+    archive \
+    CODE_SIGN_STYLE=Automatic \
+    DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+    "${_ios_xcb_settings[@]}"
+
+  echo "== iOS Export (IPA) ==" >&3
+  xcodebuild -exportArchive \
+    -archivePath "$IOS_ARCHIVE_PATH" \
+    -exportPath "$IOS_EXPORT_DIR" \
+    -exportOptionsPlist "$IOS_EXPORT_PLIST" \
+    -allowProvisioningUpdates
+
+  IOS_IPA_PATH="$(/usr/bin/find "$IOS_EXPORT_DIR" -maxdepth 3 -type f -name '*.ipa' -print -quit 2>/dev/null || true)"
+  if [[ -z "${IOS_IPA_PATH:-}" ]]; then
+    /bin/ls -la "$IOS_EXPORT_DIR" >&3 || true
+    die "No .ipa found under iOS export dir: $IOS_EXPORT_DIR"
+  fi
+  good "iOS IPA: $IOS_IPA_PATH"
+
+  if [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]]; then
+    require_not_placeholder "IOS_ASC_API_KEY_ID"   "${IOS_ASC_API_KEY_ID:-}"   "10-char ASC API key ID; get from appstoreconnect.apple.com → Users and Access → Integrations → App Store Connect API"
+    require_not_placeholder "IOS_ASC_API_ISSUER"   "${IOS_ASC_API_ISSUER:-}"   "ASC API issuer UUID (same page as the key ID)"
+    require_not_placeholder "IOS_ASC_API_KEY_PATH" "${IOS_ASC_API_KEY_PATH:-}" "Path to the .p8 file you downloaded from ASC"
+    [[ -f "$IOS_ASC_API_KEY_PATH" ]] || die "ASC API key file not found: $IOS_ASC_API_KEY_PATH"
+  fi
+
+  if [[ "${IOS_ASC_VALIDATE:-0}" == "1" ]]; then
+    echo "== iOS Validate (App Store Connect) ==" >&3
+    /usr/bin/xcrun altool --validate-app \
+      -f "$IOS_IPA_PATH" \
+      -t ios \
+      --apiKey "$IOS_ASC_API_KEY_ID" \
+      --apiIssuer "$IOS_ASC_API_ISSUER" \
+      --private-key "$IOS_ASC_API_KEY_PATH"
+    good "iOS IPA passed App Store Connect validation."
+  fi
+
+  if [[ "${IOS_ASC_UPLOAD:-0}" == "1" ]]; then
+    echo "== iOS Upload (App Store Connect) ==" >&3
+    /usr/bin/xcrun altool --upload-app \
+      -f "$IOS_IPA_PATH" \
+      -t ios \
+      --apiKey "$IOS_ASC_API_KEY_ID" \
+      --apiIssuer "$IOS_ASC_API_ISSUER" \
+      --private-key "$IOS_ASC_API_KEY_PATH"
+    good "iOS IPA uploaded to App Store Connect."
+  fi
+fi
+
 echo "REMINDER: Test your distribution path." >&3
 echo "  - If distributing via a launcher (Steam, Epic, etc.), test launching from that launcher." >&3
 echo "  - If distributing direct-download, test on a separate Mac (or a clean user account) with Gatekeeper enabled." >&3
+if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+  echo "  - For iOS: TestFlight delivers the uploaded build for QA; App Store review consumes the same upload." >&3
+fi
 
 write_bumped_version_to_env
 write_cfbundle_version_to_env
 echo "✅ Done" >&3
-echo "App: $APP_PATH" >&3
-if [[ "$ENABLE_ZIP" == "1" ]]; then
-  echo "Zip: $ZIP_PATH" >&3
-else
-  echo "Zip: (not created — ENABLE_ZIP=0)" >&3
+if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+  echo "App: $APP_PATH" >&3
+  if [[ "$ENABLE_ZIP" == "1" ]]; then
+    echo "Zip: $ZIP_PATH" >&3
+  else
+    echo "Zip: (not created — ENABLE_ZIP=0)" >&3
+  fi
+  if [[ "$ENABLE_DMG" == "1" ]]; then
+    echo "DMG: $DMG_PATH" >&3
+  else
+    echo "DMG: (not created — ENABLE_DMG=0)" >&3
+  fi
 fi
-if [[ "$ENABLE_DMG" == "1" ]]; then
-  echo "DMG: $DMG_PATH" >&3
-else
-  echo "DMG: (not created — ENABLE_DMG=0)" >&3
+if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+  echo "IPA: ${IOS_IPA_PATH:-<not produced>}" >&3
 fi
 
 # Cleanup script-generated temp entitlements file only (user-provided files are never deleted).
