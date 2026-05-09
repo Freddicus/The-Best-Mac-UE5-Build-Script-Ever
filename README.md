@@ -48,7 +48,7 @@ When you run `./ship.sh`, this is the execution order:
 7. **Icon seeding** *(if enabled)* — copies your source-controlled `.xcassets` into the workspace so Xcode uses your app icon instead of the engine default.
 8. **Xcode archive** — runs `xcodebuild archive` → `.xcarchive`. UE's `UpdateVersionAfterBuild.sh` increments the `PackageVersionCounter` here, propagating to `CFBundleVersion`.
 9. **Xcode export** — runs `xcodebuild -exportArchive` with your `ExportOptions.plist` → signed `.app`.
-10. **CFBundleVersion override** *(if `CFBUNDLE_VERSION` is set)* — `PlistBuddy`-rewrites `CFBundleVersion` in the exported `.app/Contents/Info.plist`. AAA-studio-style escape hatch for explicit single-integer build numbers (`7`, `$GITHUB_RUN_NUMBER`, etc.). When unset, UE's `PackageVersionCounter` flow from step 8 supplies the value. See [versioning.md](docs/versioning.md#cfbundleversion-two-paths-pick-one).
+10. **CFBundleVersion override** *(if `CFBUNDLE_VERSION` is set)* — `PlistBuddy`-rewrites `CFBundleVersion` in the exported `.app/Contents/Info.plist`. Escape hatch for explicit single-integer build numbers (`7`, `$GITHUB_RUN_NUMBER`, etc.) — the pattern AA/AAA studios typically use when CI manages a monotonic counter. When unset, UE's `PackageVersionCounter` flow from step 8 supplies the value. See [versioning.md](docs/versioning.md#cfbundleversion-two-paths-pick-one).
 11. **Component signing** — signs all nested `.dylib`, `.so`, and `.framework` files individually, then signs the outer `.app`. Never uses `--deep`.
 12. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.
 13. **ZIP / DMG** — packages the signed app for distribution.

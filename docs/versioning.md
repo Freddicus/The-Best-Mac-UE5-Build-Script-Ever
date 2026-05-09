@@ -171,7 +171,7 @@ The `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` override **is** committed 
 
 #### Path B — Direct override (`CFBUNDLE_VERSION`)
 
-For App-Store-style monotonic integers (e.g. Psychonauts 2 ships `CFBundleVersion=7`), set `CFBUNDLE_VERSION` to your desired exact value:
+For App-Store-style monotonic integers (a common convention at AA/AAA studios — single digits like `7`, `42`, or whatever the CI build counter says), set `CFBUNDLE_VERSION` to your desired exact value:
 
 ```bash
 CFBUNDLE_VERSION="7"
@@ -181,7 +181,7 @@ CLI: `--cfbundle-version 7`
 
 When set, the script rewrites `<App>.app/Contents/Info.plist`'s `CFBundleVersion` via `PlistBuddy` *after* `xcodebuild -exportArchive` produces the bundle but *before* the codesign step. The signature is computed over the modified `Info.plist`, so the bundle stays internally consistent. UE's `PackageVersionCounter` and `UpdateVersionAfterBuild.sh` still run as part of the build, but their value is overwritten by this final pass.
 
-This is what AAA UE studios typically do when shipping. CI systems supply the value:
+This is the pattern AA/AAA UE studios typically use when shipping. CI systems supply the value:
 
 ```bash
 # GitHub Actions

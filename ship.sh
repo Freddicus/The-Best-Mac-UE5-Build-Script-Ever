@@ -1184,7 +1184,7 @@ _set_plist_bool() {
 }
 
 override_cfbundle_version_in_app_plist() {
-  # AAA-studio escape hatch from UE's <CL>.<X>.<Y> CFBundleVersion format:
+  # AA/AAA-studio-style escape hatch from UE's <CL>.<X>.<Y> CFBundleVersion format:
   # when CFBUNDLE_VERSION is set (e.g. via --cfbundle-version 7), rewrite the
   # exported .app's Info.plist CFBundleVersion to that exact string. Runs
   # *after* xcodebuild -exportArchive, but *before* the codesign step — the
