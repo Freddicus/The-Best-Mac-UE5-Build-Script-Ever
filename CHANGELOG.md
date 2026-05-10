@@ -8,9 +8,16 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ## [unreleased] — Add iOS pipeline; migrate Mac to xcodebuild build-setting overrides; canonical icon sync
 
-### Fixed (within this PR, before merge)
-- **`actool` failure when the appiconset isn't named "AppIcon"**: UE's xcconfig hardcodes `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon` (`XcodeProject.cs:2157`), so projects that keep their appiconset under a different name (e.g. `OmgIcon.appiconset`) at the canonical `Build/{Platform}/Resources/Assets.xcassets/` path failed at `actool` with "None of the input catalogs contained a matching ... icon set ... named 'AppIcon'". The script now passes `ASSETCATALOG_COMPILER_APPICON_NAME=$MACOS_APPICON_SET_NAME` (Mac) and `ASSETCATALOG_COMPILER_APPICON_NAME=$IOS_APPICON_SET_NAME` (iOS) as `xcodebuild` build-setting overrides when the env vars are set — Apple-documented mechanism, takes precedence over xcconfig. No need to rename the appiconset on disk.
-- **`_stage_platform_icon_assets` could leave a half-staged catalog at `Build/{Platform}/Resources/Assets.xcassets/`** if the source-controlled `.xcassets` existed but had no usable appiconset: the function rsync'd to the destination first, then died on validation, leaving an incomplete catalog that UE auto-discovered on the next regen and `actool` then choked on. Reordered to validate the source first (presence + at least one appiconset) and only touch the destination on success. On invalid source: warn-and-skip, leaving any existing canonical catalog untouched (so user-managed catalogs are safe).
+### Removed
+- **`<Platform>-SourceControlled.xcassets/` source-controlled staging.** The previous flow rsync'd a separate `macOS-SourceControlled.xcassets/` (or `iOS-SourceControlled.xcassets/`) into `Build/{Platform}/Resources/Assets.xcassets/`. That added a sync step and a second copy of the icons. The simpler convention: maintain `Build/{Platform}/Resources/Assets.xcassets/` directly (UE's auto-discovered canonical path per `XcodeProject.cs:1731-1742`) and commit it. Removed: `_stage_platform_icon_assets`, `seed_macos_icon_assets`, `seed_ios_icon_assets`, env vars `MACOS_ICON_SYNC`/`MACOS_ICON_XCASSETS`/`IOS_ICON_SYNC`/`IOS_ICON_XCASSETS`, CLI flags `--macos-icon-sync`/`--no-macos-icon-sync`/`--macos-icon-xcassets`/`--ios-icon-sync`/`--no-ios-icon-sync`/`--ios-icon-xcassets`, and the associated default-path resolution + pre-flight checks.
+- **Migration:** if you have a `<Platform>-SourceControlled.xcassets/` at the repo root, move its contents into `Build/<Platform>/Resources/Assets.xcassets/` and commit. UE auto-discovers it at `GenerateProjectFiles` time.
+
+### Kept
+- **`MACOS_APPICON_SET_NAME` and `IOS_APPICON_SET_NAME`** (env vars + CLI flags) — repurposed to drive the canonical-catalog AppIcon mirror. UE's xcconfig hardcodes `ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon` (`XcodeProject.cs:2157`), so if your appiconset is named differently, the script mirrors it to `AppIcon.appiconset` alongside via `_mirror_appicon_in_catalog`. Auto-detects the first appiconset if the env var is unset.
+
+### Added (icon mirror)
+- **`_mirror_appicon_in_catalog(catalog, override)`**: idempotent helper that creates `AppIcon.appiconset` by copying from a named (or auto-detected first) appiconset within the catalog. No-op when `AppIcon.appiconset` already exists or when the catalog has no appiconsets.
+- **`ensure_macos_canonical_appicon` / `ensure_ios_canonical_appicon`**: pipeline helpers that run before `regenerate_project_files`, ensuring `Build/Mac/Resources/Assets.xcassets/AppIcon.appiconset/` and `Build/IOS/Resources/Assets.xcassets/AppIcon.appiconset/` exist (mirroring from a non-`AppIcon`-named set if the user maintains their catalog under a different name).
 
 This branch ships three tightly-related changes. All three rest on the canonical-overrides foundation laid in PR #22 (`Move outputs to Saved/, route Info.plist through canonical UE overrides, auto-bump CFBundleVersion`).
 
@@ -30,14 +37,14 @@ This branch ships three tightly-related changes. All three rest on the canonical
 - `--ios` / `--no-ios`
 - `--ios-only`
 - `--ios-workspace PATH`, `--ios-scheme NAME`, `--ios-export-plist PATH`
-- `--ios-icon-sync` / `--no-ios-icon-sync`, `--ios-icon-xcassets PATH`, `--ios-appicon-set-name NAME`
+- `--ios-appicon-set-name NAME` (mirror an existing `*.appiconset` in `Build/IOS/Resources/Assets.xcassets/` to `AppIcon.appiconset`)
 - `--ios-marketing-version STRING`
 - `--ios-validate-ipa`, `--ios-upload-ipa`
 - `--ios-asc-api-key-id ID`, `--ios-asc-api-issuer UUID`, `--ios-asc-api-key-path PATH`
 
 ### Migration
 - **Existing Mac-only users:** no action required. `ENABLE_IOS=0` (default) means no iOS code runs. The Mac CFBundleVersion mechanism switch is internal — same final value lands in the shipped `Info.plist`, just via a cleaner mechanism.
-- **Adding iOS to an existing project:** copy `iOS-ExportOptions.plist.example` to `iOS-ExportOptions.plist`, edit the team ID. Run `./ship.sh --print-config --ios` to see what the script will do. First `--ios` build creates `Build/IOS/Resources/Assets.xcassets/` from your `iOS-SourceControlled.xcassets` (default `$REPO_ROOT/iOS-SourceControlled.xcassets`).
+- **Adding iOS to an existing project:** copy `iOS-ExportOptions.plist.example` to `iOS-ExportOptions.plist`, edit the team ID. Create `Build/IOS/Resources/Assets.xcassets/AppIcon.appiconset/` (or rely on the mirror — see "Kept" above). Run `./ship.sh --print-config --ios` to see what the script will do.
 - **CI uploads to App Store Connect:** create an ASC API key (appstoreconnect.apple.com → Users and Access → Integrations → App Store Connect API), download the `.p8`, and either set `IOS_ASC_API_KEY_ID/ISSUER/KEY_PATH` in `.env` or let Xcode store them in `Config/DefaultEngine.ini` for auto-detection.
 
 ### Docs

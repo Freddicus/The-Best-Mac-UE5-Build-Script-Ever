@@ -93,24 +93,38 @@ Additional requirements for `FANCY_DMG=1`:
 
 Keep `FANCY_DMG=0` (the default) for CI or when you just need a working DMG.
 
-## App icon seeding
+## App icons
 
-By default, the `.app` uses whichever icon is baked into the engine-global `Assets.xcassets` — which means a UAT build silently shows the Unreal default icon unless you've changed it engine-side.
+UE auto-discovers asset catalogs at `$(Project)/Build/<Platform>/Resources/Assets.xcassets/` at `GenerateProjectFiles` time (verified at `XcodeProject.cs:1731-1742` via `UnrealData.ProjectOrEnginePath()`). Maintain your `.xcassets` directly there:
 
-Icon seeding solves this by copying a source-controlled `.xcassets` catalog into `Intermediate/SourceControlled/Assets.xcassets` and patching every `project.pbxproj` in the workspace to reference it before archiving. Your icon ships without any engine-side changes.
+```
+Build/Mac/Resources/Assets.xcassets/
+  Contents.json
+  AppIcon.appiconset/        ← required name (UE's xcconfig hardcodes ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon)
+    Contents.json
+    icon_*.png
 
-**Enabled by default.** Expected location: `$REPO_ROOT/macOS-SourceControlled.xcassets`. If the path doesn't exist and wasn't set explicitly, the script warns and continues without seeding.
-
-```bash
-MACOS_ICON_SYNC="0"   # disable entirely
+Build/IOS/Resources/Assets.xcassets/
+  Contents.json
+  AppIcon.appiconset/
+    ...
 ```
 
+Commit those directories. UE picks them up; `actool` uses them at build time.
+
+### Non-AppIcon-named appiconsets
+
+If your appiconset is named something other than `AppIcon` (e.g. `MyAppIcon.appiconset`), UE's xcconfig still tells `actool` to look for `AppIcon`. The script defensively mirrors a non-`AppIcon` set to `AppIcon.appiconset` alongside the original, so `actool` finds it where it expects:
+
 ```bash
-MACOS_ICON_XCASSETS="macOS-SourceControlled.xcassets"   # relative to REPO_ROOT or absolute
+MACOS_APPICON_SET_NAME="MyAppIcon"   # explicit; otherwise auto-detects the first appiconset
+IOS_APPICON_SET_NAME="MyAppIcon"
 ```
 
-If your catalog uses a non-standard `*.appiconset` name (not `AppIcon`), the script auto-detects it. Override explicitly if needed:
+CLI: `--macos-appicon-set-name NAME`, `--ios-appicon-set-name NAME`.
 
-```bash
-MACOS_APPICON_SET_NAME="MyCustomIcon"
-```
+The mirror is idempotent (no-op when `AppIcon.appiconset` already exists). When the catalog has no usable appiconset, UE falls back to the engine's default icon at build time.
+
+### Engine fallback
+
+If `Build/Mac/Resources/Assets.xcassets/` doesn't exist in your project, UE falls back to `Engine/Build/Mac/Resources/Assets.xcassets/` (and analogously for iOS) — the stock engine icon. To use your own, create the project-level catalog and add an `AppIcon.appiconset` to it.

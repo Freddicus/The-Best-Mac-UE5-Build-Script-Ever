@@ -841,18 +841,14 @@ print_config() {
   echo "NOTARIZE:          ${NOTARIZE:-<unset>}" >&3
   echo "ENABLE_STEAM:      $ENABLE_STEAM" >&3
   echo "WRITE_STEAM_APPID: $WRITE_STEAM_APPID" >&3
-  echo "MACOS_ICON_SYNC:   $MACOS_ICON_SYNC" >&3
-  echo "MACOS_ICON_XCASSETS: ${MACOS_ICON_XCASSETS:-<unset>}" >&3
-  echo "MACOS_APPICON_SET_NAME: ${MACOS_APPICON_SET_NAME:-<unset>}" >&3
+  echo "MACOS_APPICON_SET_NAME: ${MACOS_APPICON_SET_NAME:-<unset, mirror auto-detects first appiconset in Build/Mac/Resources/Assets.xcassets>}" >&3
   echo "ENABLE_IOS:        ${ENABLE_IOS:-0}" >&3
   echo "IOS_ONLY:          ${IOS_ONLY:-0}" >&3
   if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
     echo "IOS_WORKSPACE:     ${IOS_WORKSPACE:-<unset>}" >&3
     echo "IOS_SCHEME:        ${IOS_SCHEME:-<unset>}" >&3
     echo "IOS_EXPORT_PLIST:  ${IOS_EXPORT_PLIST:-<unset>}" >&3
-    echo "IOS_ICON_SYNC:     ${IOS_ICON_SYNC:-1}" >&3
-    echo "IOS_ICON_XCASSETS: ${IOS_ICON_XCASSETS:-<unset>}" >&3
-    echo "IOS_APPICON_SET_NAME: ${IOS_APPICON_SET_NAME:-<unset>}" >&3
+    echo "IOS_APPICON_SET_NAME: ${IOS_APPICON_SET_NAME:-<unset, mirror auto-detects first appiconset in Build/IOS/Resources/Assets.xcassets>}" >&3
     echo "IOS_MARKETING_VERSION: ${IOS_MARKETING_VERSION:-<unset, inherits MARKETING_VERSION>}" >&3
     echo "IOS_ASC_VALIDATE:  ${IOS_ASC_VALIDATE:-0}" >&3
     echo "IOS_ASC_UPLOAD:    ${IOS_ASC_UPLOAD:-0}" >&3
@@ -1812,96 +1808,71 @@ first_appiconset_name_in_catalog() {
   echo "${d%.appiconset}"
 }
 
-_stage_platform_icon_assets() {
-  # Stage a source-controlled .xcassets catalog into UE's canonical
-  # Build/<Platform>/Resources/Assets.xcassets path, where UE auto-discovers
-  # it at GenerateProjectFiles time (XcodeProject.cs:1731). No pbxproj
-  # patching, no Intermediate/ shenanigans — this is the platform-shared
-  # canonical location.
+_mirror_appicon_in_catalog() {
+  # Ensure $catalog/AppIcon.appiconset exists by mirroring from a named (or
+  # auto-detected first) appiconset within $catalog. Idempotent.
   #
-  # Validates source FIRST (presence + at least one appiconset). Only touches
-  # destination on success — refuses to leave a half-staged catalog behind
-  # that would confuse UE's auto-discovery and break actool.
+  # Why this exists: UE's xcconfig hardcodes
+  #   ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon         (XcodeProject.cs:2157)
+  # for both UAT BuildCookRun's internal actool invocation and the script's
+  # subsequent xcodebuild archive. There is no UE-supported way to change
+  # that name. So if the user maintains an appiconset under a different name
+  # (e.g. MyAppIcon.appiconset), we mirror it to AppIcon.appiconset
+  # alongside so actool finds it where it expects.
+  #
+  # Returns 0 on success (mirror created or already present), 1 if the
+  # catalog has no usable appiconset to mirror from.
+  #
+  # Args:
+  #   $1 = catalog directory absolute path
+  #   $2 = explicit appiconset name override (empty = auto-detect first)
+  local catalog="$1" override="$2"
+
+  [[ -d "$catalog" ]] || return 0
+  [[ -d "$catalog/AppIcon.appiconset" ]] && return 0
+
+  local source_name="$override"
+  if is_placeholder "$source_name"; then
+    source_name="$(first_appiconset_name_in_catalog "$catalog")"
+  fi
+  if is_placeholder "$source_name" || [[ ! -d "$catalog/$source_name.appiconset" ]]; then
+    return 1
+  fi
+
+  /bin/cp -R "$catalog/$source_name.appiconset" "$catalog/AppIcon.appiconset"
+  good "Mirrored $catalog/$source_name.appiconset → AppIcon.appiconset (UE's xcconfig hardcodes ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon)"
+}
+
+ensure_canonical_appicon_for_platform() {
+  # After seed_<platform>_icon_assets (if any) has run, make sure the
+  # canonical Build/<Platform>/Resources/Assets.xcassets has an
+  # AppIcon.appiconset. This handles users who manage the canonical catalog
+  # directly (no source-controlled stage) and have their appiconset named
+  # something other than AppIcon — e.g. MyAppIcon.appiconset.
   #
   # Args:
   #   $1 = label for log lines (e.g. "macOS", "iOS")
-  #   $2 = source catalog absolute path
-  #   $3 = platform subdir under Build/ ("Mac", "IOS", etc.)
-  #   $4 = explicit appiconset name override, or empty for auto-detect
-  local label="$1" src="$2" platform="$3" appicon_name_override="$4"
-  local dst="$REPO_ROOT/Build/$platform/Resources/Assets.xcassets"
+  #   $2 = platform subdir under Build/ ("Mac", "IOS")
+  #   $3 = explicit appiconset name override (e.g. $MACOS_APPICON_SET_NAME)
+  local label="$1" platform="$2" override="$3"
+  local catalog="$REPO_ROOT/Build/$platform/Resources/Assets.xcassets"
 
-  if [[ ! -d "$src" ]]; then
-    warn "$label icon source not found: $src — skipping seed (UE will use whatever's at Build/$platform/Resources/Assets.xcassets, or fall back to the engine default)"
-    return 0
-  fi
-
-  # Determine the appiconset name from SOURCE (not dst — dst doesn't exist yet
-  # in the validated path).
-  local source_appicon_name="$appicon_name_override"
-  if is_placeholder "$source_appicon_name"; then
-    if [[ -d "$src/AppIcon.appiconset" ]]; then
-      source_appicon_name="AppIcon"
-    else
-      source_appicon_name="$(first_appiconset_name_in_catalog "$src")"
+  if ! _mirror_appicon_in_catalog "$catalog" "$override"; then
+    if [[ -d "$catalog" ]]; then
+      warn "$label catalog at $catalog has no usable appiconset; UE/actool will fail. Add an AppIcon.appiconset (or set the appiconset-name override and re-run)."
     fi
   fi
-
-  if is_placeholder "$source_appicon_name" || [[ ! -d "$src/$source_appicon_name.appiconset" ]]; then
-    warn "$label icon source has no usable *.appiconset: $src — skipping seed. Add an AppIcon.appiconset (or set the appiconset-name override) and re-run."
-    return 0
-  fi
-
-  # Source validated. Now stage to canonical destination.
-  /bin/mkdir -p "$(/usr/bin/dirname "$dst")"
-  /bin/rm -rf "$dst"
-  /bin/mkdir -p "$dst"
-  /usr/bin/rsync -a --delete "$src"/ "$dst"/
-
-  # Xcode expects "AppIcon" by default (set via ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon
-  # in UE's xcconfig at XcodeProject.cs:2157). If the source catalog uses a
-  # different appiconset name, mirror it to AppIcon so we don't have to edit
-  # the build setting. (Alternatively, the user can pass the appiconset name
-  # via --macos-appicon-set-name / --ios-appicon-set-name and the script will
-  # also pass ASSETCATALOG_COMPILER_APPICON_NAME=<name> to xcodebuild as a
-  # build-setting override.)
-  if [[ "$source_appicon_name" != "AppIcon" ]]; then
-    /bin/rm -rf "$dst/AppIcon.appiconset"
-    /bin/cp -R "$dst/$source_appicon_name.appiconset" "$dst/AppIcon.appiconset"
-  fi
-
-  if [[ ! -f "$dst/Contents.json" ]]; then
-    /bin/cat > "$dst/Contents.json" <<'JSON'
-{
-  "info" : {
-    "author" : "xcode",
-    "version" : 1
-  }
-}
-JSON
-  fi
-
-  good "Seeded $label icon catalog: $src → $dst (UE auto-discovers via Build/$platform/Resources/Assets.xcassets)"
 }
 
-seed_macos_icon_assets() {
-  # Stage MACOS_ICON_XCASSETS into Build/Mac/Resources/Assets.xcassets so UE
-  # picks it up at GenerateProjectFiles time. Must run BEFORE regenerate_project_files.
-  [[ "$USE_XCODE_EXPORT" == "1" ]] || return 0
-  [[ "${MACOS_ICON_SYNC:-0}" == "1" ]] || return 0
-  [[ -d "$MACOS_ICON_XCASSETS" ]] || die "Configured macOS icon catalog not found: $MACOS_ICON_XCASSETS"
-
-  _stage_platform_icon_assets "macOS" "$MACOS_ICON_XCASSETS" "Mac" "${MACOS_APPICON_SET_NAME:-}"
+ensure_macos_canonical_appicon() {
+  # Mac: only meaningful when we're going to invoke xcodebuild for Mac.
+  [[ "$USE_XCODE_EXPORT" == "1" && "${IOS_ONLY:-0}" != "1" ]] || return 0
+  ensure_canonical_appicon_for_platform "macOS" "Mac" "${MACOS_APPICON_SET_NAME:-}"
 }
 
-seed_ios_icon_assets() {
-  # Stage IOS_ICON_XCASSETS into Build/IOS/Resources/Assets.xcassets so UE
-  # picks it up at GenerateProjectFiles time. Must run BEFORE regenerate_project_files.
+ensure_ios_canonical_appicon() {
   [[ "${ENABLE_IOS:-0}" == "1" ]] || return 0
-  [[ "${IOS_ICON_SYNC:-0}" == "1" ]] || return 0
-  [[ -d "${IOS_ICON_XCASSETS:-}" ]] || die "Configured iOS icon catalog not found: ${IOS_ICON_XCASSETS:-<unset>}"
-
-  _stage_platform_icon_assets "iOS" "$IOS_ICON_XCASSETS" "IOS" "${IOS_APPICON_SET_NAME:-}"
+  ensure_canonical_appicon_for_platform "iOS" "IOS" "${IOS_APPICON_SET_NAME:-}"
 }
 
 find_first_app_under() {
@@ -2200,8 +2171,6 @@ STEAM_APP_ID="${STEAM_APP_ID:-480}"
 WRITE_STEAM_APPID="${WRITE_STEAM_APPID:-0}"
 STEAM_DYLIB_SRC="${STEAM_DYLIB_SRC:-}"
 
-MACOS_ICON_SYNC="${MACOS_ICON_SYNC:-1}"
-MACOS_ICON_XCASSETS="${MACOS_ICON_XCASSETS:-}"
 MACOS_APPICON_SET_NAME="${MACOS_APPICON_SET_NAME:-}"
 
 # iOS pipeline (opt-in). Default off; set ENABLE_IOS=1 / pass --ios to enable.
@@ -2210,8 +2179,6 @@ IOS_ONLY="${IOS_ONLY:-0}"
 IOS_WORKSPACE="${IOS_WORKSPACE:-}"
 IOS_SCHEME="${IOS_SCHEME:-}"
 IOS_EXPORT_PLIST="${IOS_EXPORT_PLIST:-}"
-IOS_ICON_SYNC="${IOS_ICON_SYNC:-1}"
-IOS_ICON_XCASSETS="${IOS_ICON_XCASSETS:-}"
 IOS_APPICON_SET_NAME="${IOS_APPICON_SET_NAME:-}"
 IOS_MARKETING_VERSION="${IOS_MARKETING_VERSION:-}"
 
@@ -2307,9 +2274,11 @@ Options (highest priority):
   --steam-app-id ID
   --steam-dylib-src PATH
 
-  --macos-icon-sync / --no-macos-icon-sync
-  --macos-icon-xcassets PATH
-  --macos-appicon-set-name NAME
+  --macos-appicon-set-name NAME      name of the *.appiconset to mirror to
+                                     "AppIcon" inside Build/Mac/Resources/Assets.xcassets
+                                     (UE's xcconfig hardcodes the lookup
+                                     name to "AppIcon"). Auto-detects the
+                                     first appiconset in the catalog if unset.
 
   --ios / --no-ios                   enable iOS pass after the Mac pipeline
                                      (default: off)
@@ -2320,11 +2289,8 @@ Options (highest priority):
   --ios-export-plist PATH            iOS-ExportOptions.plist path
                                      (auto-detected; conventional name
                                      "iOS-ExportOptions.plist")
-  --ios-icon-sync / --no-ios-icon-sync
-  --ios-icon-xcassets PATH           source iOS .xcassets to stage into
+  --ios-appicon-set-name NAME        same as --macos-appicon-set-name but for
                                      Build/IOS/Resources/Assets.xcassets
-                                     (default: $REPO_ROOT/iOS-SourceControlled.xcassets)
-  --ios-appicon-set-name NAME
   --ios-marketing-version STRING     CFBundleShortVersionString for iOS only
                                      (when not set, MARKETING_VERSION applies
                                      to both platforms)
@@ -2427,9 +2393,6 @@ while [[ $# -gt 0 ]]; do
     --steam-app-id)         STEAM_APP_ID="$2"; shift 2 ;;
     --steam-dylib-src)      STEAM_DYLIB_SRC="$2"; shift 2 ;;
 
-    --macos-icon-sync)      MACOS_ICON_SYNC="1"; shift ;;
-    --no-macos-icon-sync)   MACOS_ICON_SYNC="0"; shift ;;
-    --macos-icon-xcassets)  MACOS_ICON_XCASSETS="$2"; CLI_SET_MACOS_ICON_XCASSETS=1; shift 2 ;;
     --macos-appicon-set-name) MACOS_APPICON_SET_NAME="$2"; shift 2 ;;
 
     --ios)                    ENABLE_IOS="1"; shift ;;
@@ -2438,9 +2401,6 @@ while [[ $# -gt 0 ]]; do
     --ios-workspace)          IOS_WORKSPACE="$2"; shift 2 ;;
     --ios-scheme)             IOS_SCHEME="$2"; shift 2 ;;
     --ios-export-plist)       IOS_EXPORT_PLIST="$2"; shift 2 ;;
-    --ios-icon-sync)          IOS_ICON_SYNC="1"; shift ;;
-    --no-ios-icon-sync)       IOS_ICON_SYNC="0"; shift ;;
-    --ios-icon-xcassets)      IOS_ICON_XCASSETS="$2"; CLI_SET_IOS_ICON_XCASSETS=1; shift 2 ;;
     --ios-appicon-set-name)   IOS_APPICON_SET_NAME="$2"; shift 2 ;;
     --ios-marketing-version)  IOS_MARKETING_VERSION="$2"; shift 2 ;;
     --ios-validate-ipa)       IOS_ASC_VALIDATE="1"; shift ;;
@@ -2556,25 +2516,6 @@ autodetect_ios_export_plist_if_needed
 autodetect_ios_asc_credentials_if_needed
 autodetect_steam_if_needed
 autodetect_steam_dylib_src_from_engine_if_needed
-
-# Default macOS icon catalog location is source-controlled in repo root.
-if is_placeholder "${MACOS_ICON_XCASSETS:-}"; then
-  MACOS_ICON_XCASSETS="$REPO_ROOT/macOS-SourceControlled.xcassets"
-fi
-if [[ "$MACOS_ICON_XCASSETS" != /* ]]; then
-  MACOS_ICON_XCASSETS="$(abspath_from "$REPO_ROOT" "$MACOS_ICON_XCASSETS")"
-fi
-
-# Default iOS icon catalog location is source-controlled in repo root, mirroring
-# the macOS convention. Only resolved when ENABLE_IOS=1 to keep no-op runs lean.
-if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
-  if is_placeholder "${IOS_ICON_XCASSETS:-}"; then
-    IOS_ICON_XCASSETS="$REPO_ROOT/iOS-SourceControlled.xcassets"
-  fi
-  if [[ "$IOS_ICON_XCASSETS" != /* ]]; then
-    IOS_ICON_XCASSETS="$(abspath_from "$REPO_ROOT" "$IOS_ICON_XCASSETS")"
-  fi
-fi
 
 # Derive common paths (after CLI parsing/autodetect)
 UPROJECT_PATH="${UPROJECT_PATH:-$REPO_ROOT/$UPROJECT_NAME}"
@@ -2847,28 +2788,6 @@ if [[ "${ENABLE_IOS:-0}" == "1" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}
   [[ -f "${IOS_EXPORT_PLIST:-}" ]] || die "iOS-ExportOptions.plist not found: ${IOS_EXPORT_PLIST:-<unset>}"
 fi
 
-if [[ "$USE_XCODE_EXPORT" == "1" && "$MACOS_ICON_SYNC" == "1" && "${IOS_ONLY:-0}" != "1" ]]; then
-  if [[ ! -d "$MACOS_ICON_XCASSETS" ]]; then
-    if [[ "${CLI_SET_MACOS_ICON_XCASSETS:-0}" == "1" ]]; then
-      die "Configured --macos-icon-xcassets path not found: $MACOS_ICON_XCASSETS"
-    fi
-    warn "macOS icon catalog not found at default path: $MACOS_ICON_XCASSETS"
-    warn "Continuing without macOS icon catalog seeding (pass --no-macos-icon-sync to silence this)."
-    MACOS_ICON_SYNC="0"
-  fi
-fi
-
-if [[ "${ENABLE_IOS:-0}" == "1" && "${IOS_ICON_SYNC:-0}" == "1" ]]; then
-  if [[ ! -d "${IOS_ICON_XCASSETS:-}" ]]; then
-    if [[ "${CLI_SET_IOS_ICON_XCASSETS:-0}" == "1" ]]; then
-      die "Configured --ios-icon-xcassets path not found: ${IOS_ICON_XCASSETS:-<unset>}"
-    fi
-    warn "iOS icon catalog not found at default path: ${IOS_ICON_XCASSETS:-<unset>}"
-    warn "Continuing without iOS icon catalog seeding (pass --no-ios-icon-sync to silence this)."
-    IOS_ICON_SYNC="0"
-  fi
-fi
-
 if [[ "$ENABLE_DMG" == "1" ]]; then
   command -v hdiutil >/dev/null 2>&1 || die "hdiutil not found (required to create DMG)."
   if [[ "$FANCY_DMG" == "1" ]] && ! command -v osascript >/dev/null 2>&1; then
@@ -2954,8 +2873,8 @@ seed_apple_launchscreen_compat
 seed_mac_info_template_plist
 seed_mac_update_version_after_build_script
 seed_mac_package_version_counter
-seed_macos_icon_assets
-seed_ios_icon_assets
+ensure_macos_canonical_appicon
+ensure_ios_canonical_appicon
 ensure_app_category_in_engine_ini
 ensure_marketing_version_in_engine_ini
 regenerate_project_files
@@ -2989,11 +2908,6 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   # leaves CFBUNDLE_VERSION empty when USE_UE_PACKAGE_VERSION_COUNTER=1).
   _xcb_settings=()
   [[ -n "${CFBUNDLE_VERSION:-}" ]] && _xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
-  # ASSETCATALOG_COMPILER_APPICON_NAME override: Xcode/UE default is "AppIcon",
-  # but if the user keeps their appiconset under a different name in
-  # Build/Mac/Resources/Assets.xcassets, pass the name through here so actool
-  # finds it without renaming the appiconset on disk.
-  [[ -n "${MACOS_APPICON_SET_NAME:-}" ]] && _xcb_settings+=("ASSETCATALOG_COMPILER_APPICON_NAME=$MACOS_APPICON_SET_NAME")
 
   echo "== Archive (NO CLEAN) with Automatic signing ==" >&3
   xcodebuild \
@@ -3414,10 +3328,6 @@ if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
   # the same number.
   _ios_xcb_settings=()
   [[ -n "${CFBUNDLE_VERSION:-}" ]] && _ios_xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
-  # Same ASSETCATALOG_COMPILER_APPICON_NAME override as Mac, for projects whose
-  # iOS appiconset isn't named "AppIcon" (e.g. you keep it as "OmgIcon" in
-  # Build/IOS/Resources/Assets.xcassets and don't want to rename on disk).
-  [[ -n "${IOS_APPICON_SET_NAME:-}" ]] && _ios_xcb_settings+=("ASSETCATALOG_COMPILER_APPICON_NAME=$IOS_APPICON_SET_NAME")
 
   echo "== iOS Archive ==" >&3
   xcodebuild \
