@@ -89,9 +89,24 @@ MARKETING_VERSION="1.2.0"
 
 CLI: `--marketing-version 1.2.0`
 
-When set, the script writes `VersionInfo=1.2.0` to `Config/DefaultEngine.ini` under `[/Script/MacRuntimeSettings.MacRuntimeSettings]` (creating the section if needed). UE's `XcodeProject.cs::WriteXcconfigFile` reads it and stamps `MARKETING_VERSION` into the generated xcconfig at regen time. The value is therefore visible to you in your committed `DefaultEngine.ini` — not buried in `Intermediate/`.
+`MARKETING_VERSION` is **shared across Mac and iOS by default**. When set, the script writes `VersionInfo=1.2.0` to *both* canonical UE ini sections:
+
+- `[/Script/MacRuntimeSettings.MacRuntimeSettings] VersionInfo=` (read by UE at `XcodeProject.cs:1997`)
+- `[/Script/IOSRuntimeSettings.IOSRuntimeSettings] VersionInfo=` (read at `XcodeProject.cs:2011`, only written when `ENABLE_IOS=1`)
+
+UE then stamps the value into each platform's generated xcconfig at regen time, and Xcode bakes it into `CFBundleShortVersionString` in the final `Info.plist`. The value is visible to you in your committed `DefaultEngine.ini` — not buried in `Intermediate/`.
 
 When unset, the script does **not** touch `DefaultEngine.ini`. UE falls back to the engine display version (e.g. `5.7.0`) — almost certainly not what you want, so set this once.
+
+### IOS_MARKETING_VERSION (rare)
+
+```bash
+IOS_MARKETING_VERSION="1.2.1"
+```
+
+CLI: `--ios-marketing-version 1.2.1`
+
+When set, overrides `MARKETING_VERSION` for the iOS-only ini section. Use this only when Mac and iOS ship on different cadences and the displayed versions need to diverge — most projects can leave it unset and let `MARKETING_VERSION` apply to both.
 
 ### APP_CATEGORY
 
@@ -145,6 +160,8 @@ Every build, the script reads `CFBUNDLE_VERSION` from `.env` (defaulting to `0` 
 If `CFBUNDLE_VERSION` is not present in `.env` at all, the first build still bumps from the default `0` and writes `CFBUNDLE_VERSION="1"` into `.env` on success. No initial setup required.
 
 The persist happens after a fully successful pipeline (notarization + stapling, or earlier success points if notarization is disabled). A failed or interrupted build leaves `.env` untouched, so the next build retries the same number — no wasted build numbers.
+
+**Shared across platforms.** When `ENABLE_IOS=1`, the same `CFBUNDLE_VERSION` flows into both the Mac `xcodebuild archive` and the iOS `xcodebuild archive` as a `CURRENT_PROJECT_VERSION=` build-setting override. One bump per `ship.sh` invocation, both archives ship the same number. This is intentional — App Store Connect and most release tracking systems expect Mac/iOS builds of the same release to share a build counter.
 
 ##### Setting an explicit baseline
 
