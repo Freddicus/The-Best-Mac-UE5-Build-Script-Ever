@@ -1759,6 +1759,26 @@ autodetect_ios_export_plist_if_needed() {
   warn "No iOS ExportOptions.plist found. Copy iOS-ExportOptions.plist.example to iOS-ExportOptions.plist and edit, or pass --ios-export-plist PATH."
 }
 
+_extract_ue_filepath() {
+  # UE serializes FFilePath ini values as (FilePath="/path/to/file"). Strip the
+  # struct wrapper if present, otherwise return the value as-is. Tolerates
+  # whitespace and the optional quoting Xcode sometimes emits. Regex is held
+  # in a variable so bash's [[ =~ ]] parser doesn't choke on the literal
+  # parens/brackets in the pattern.
+  local v="$1"
+  local quoted='^[[:space:]]*\(FilePath="(.*)"\)[[:space:]]*$'
+  local unquoted='^[[:space:]]*\(FilePath=([^)]*)\)[[:space:]]*$'
+  if [[ "$v" =~ $quoted ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ "$v" =~ $unquoted ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  printf '%s' "$v"
+}
+
 autodetect_ios_asc_credentials_if_needed() {
   # Read App Store Connect API credentials from Config/DefaultEngine.ini
   # if Xcode previously configured them there. The fields Xcode writes are
@@ -1766,6 +1786,10 @@ autodetect_ios_asc_credentials_if_needed() {
   # under [/Script/IOSRuntimeSettings.IOSRuntimeSettings] or its enclosing
   # section. We read them with the existing simple read_ini_value helper —
   # no per-section qualifying since these keys are unique within the file.
+  #
+  # AppStoreConnectKeyPath is serialized as an FFilePath struct:
+  #   AppStoreConnectKeyPath=(FilePath="/Users/.../AuthKey_XXXX.p8")
+  # so we run it through _extract_ue_filepath to get the plain path.
   [[ "${ENABLE_IOS:-0}" == "1" ]] || return 0
   [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]] || return 0
 
@@ -1790,7 +1814,7 @@ autodetect_ios_asc_credentials_if_needed() {
   if is_placeholder "${IOS_ASC_API_KEY_PATH:-}"; then
     v="$(read_ini_value "$engine_ini" "AppStoreConnectKeyPath")"
     if [[ -n "$v" ]]; then
-      IOS_ASC_API_KEY_PATH="$v"
+      IOS_ASC_API_KEY_PATH="$(_extract_ue_filepath "$v")"
       info "Auto-detected IOS_ASC_API_KEY_PATH from DefaultEngine.ini: $IOS_ASC_API_KEY_PATH"
     fi
   fi
@@ -2788,6 +2812,18 @@ if [[ "${ENABLE_IOS:-0}" == "1" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}
   [[ -f "${IOS_EXPORT_PLIST:-}" ]] || die "iOS-ExportOptions.plist not found: ${IOS_EXPORT_PLIST:-<unset>}"
 fi
 
+# ASC creds: validate up-front so a typo in the API key path doesn't fail
+# after a multi-minute Mac build + iOS archive + IPA export.
+if [[ "${ENABLE_IOS:-0}" == "1" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
+  if [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]]; then
+    require_not_placeholder "IOS_ASC_API_KEY_ID"   "${IOS_ASC_API_KEY_ID:-}"   "10-char ASC API key ID; get from appstoreconnect.apple.com → Users and Access → Integrations → App Store Connect API"
+    require_not_placeholder "IOS_ASC_API_ISSUER"   "${IOS_ASC_API_ISSUER:-}"   "ASC API issuer UUID (same page as the key ID)"
+    require_not_placeholder "IOS_ASC_API_KEY_PATH" "${IOS_ASC_API_KEY_PATH:-}" "Path to the .p8 file you downloaded from ASC"
+    [[ -f "$IOS_ASC_API_KEY_PATH" ]] || die "ASC API key file not found: $IOS_ASC_API_KEY_PATH"
+    good "ASC API credentials accessible."
+  fi
+fi
+
 if [[ "$ENABLE_DMG" == "1" ]]; then
   command -v hdiutil >/dev/null 2>&1 || die "hdiutil not found (required to create DMG)."
   if [[ "$FANCY_DMG" == "1" ]] && ! command -v osascript >/dev/null 2>&1; then
@@ -3356,12 +3392,7 @@ if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
   fi
   good "iOS IPA: $IOS_IPA_PATH"
 
-  if [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]]; then
-    require_not_placeholder "IOS_ASC_API_KEY_ID"   "${IOS_ASC_API_KEY_ID:-}"   "10-char ASC API key ID; get from appstoreconnect.apple.com → Users and Access → Integrations → App Store Connect API"
-    require_not_placeholder "IOS_ASC_API_ISSUER"   "${IOS_ASC_API_ISSUER:-}"   "ASC API issuer UUID (same page as the key ID)"
-    require_not_placeholder "IOS_ASC_API_KEY_PATH" "${IOS_ASC_API_KEY_PATH:-}" "Path to the .p8 file you downloaded from ASC"
-    [[ -f "$IOS_ASC_API_KEY_PATH" ]] || die "ASC API key file not found: $IOS_ASC_API_KEY_PATH"
-  fi
+  # ASC creds were validated at pre-flight (see "ASC API credentials accessible.").
 
   if [[ "${IOS_ASC_VALIDATE:-0}" == "1" ]]; then
     echo "== iOS Validate (App Store Connect) ==" >&3
