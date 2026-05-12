@@ -118,6 +118,27 @@ The xcconfig at `Intermediate/ProjectFiles/XcconfigsMac/<project>.xcconfig` does
   -game
 ```
 
+## iOS Game Center entitlement missing from the IPA
+
+After the first `--game-center` run, commit `Build/IOS/Resources/<Project>.entitlements`. Without it, the entitlement silently drops from the IPA on a clean checkout.
+
+`bEnableGameCenterSupport=True` in `DefaultEngine.ini` tells UBT to write `com.apple.developer.game-center` to `Intermediate/IOS/<Target>.entitlements`, but that intermediate file is **not** picked up by `xcodebuild` under `CODE_SIGN_STYLE=Automatic`. ship.sh passes `CODE_SIGN_ENTITLEMENTS=<path>` as a build setting override pointing to the committed `Build/IOS/Resources/<Project>.entitlements`. If that file is missing, the override points at nothing and Apple's automatic signing drops the entitlement.
+
+Verify the file exists and contains the key:
+
+```bash
+/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" \
+  "Build/IOS/Resources/$(basename *.uproject .uproject).entitlements"
+```
+
+Should print `true`. If the file is missing, run `./ship.sh --game-center --ios-only` (or any run with `ENABLE_IOS=1` and `--game-center`) once and commit the seeded file.
+
+## I want Game Center working on the Mac build too
+
+Not possible through ship.sh's Direct Distribution pipeline. Game Center on macOS is structurally a Mac App Store feature — the entitlement is "restricted" and AMFI requires authorization via an embedded MAS provisioning profile, which only exists for App Store distribution. Developer-ID-signed Mac apps with `com.apple.developer.game-center` are killed at launch by the kernel with `Error -413 "No matching profile found"` even after successful notarization and stapling. See [gotchas](gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only) for the full mechanism.
+
+To ship a Mac App Store build with Game Center, use Xcode Organizer's `Distribute App → App Store Connect` (the App Sandbox entitlement is required for that pipeline; Steam entitlements are forbidden). Automating the MAS Mac path inside ship.sh is a future-PR item.
+
 ## Getting more detail
 
 The full log is at `Logs/build_YYYY-MM-DD_HH-MM-SS.log`. All command output from UAT, `xcodebuild`, `codesign`, and `notarytool` goes there. The terminal only shows status lines.

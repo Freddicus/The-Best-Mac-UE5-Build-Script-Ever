@@ -61,6 +61,7 @@ The script locates your project automatically when run from the project root. Se
 | `MARKETING_VERSION` | If set, the script writes `VersionInfo=` to `Config/DefaultEngine.ini` under `[/Script/MacRuntimeSettings.MacRuntimeSettings]` (UE's canonical `CFBundleShortVersionString` source). Unset = leave `DefaultEngine.ini` alone. See [versioning.md](versioning.md#marketing_version). |
 | `APP_CATEGORY` | If set, the script writes `AppCategory=` to `Config/DefaultEngine.ini` under `[/Script/MacTargetPlatform.XcodeProjectSettings]`. UE's `BaseEngine.ini` already defaults to `public.app-category.games` — only override when you need a different value. |
 | `ENABLE_GAME_MODE` | `1` = set `LSSupportsGameMode` + `GCSupportsGameMode` to `true` in your `Build/Mac/Resources/Info.Template.plist`. `0` = set to `false`. Unset = leave the plist's GameMode keys alone (your plist is sovereign). |
+| `ENABLE_GAME_CENTER` | **iOS only.** `1` = seed `Build/IOS/Resources/<Project>.entitlements` with `com.apple.developer.game-center`, write `bEnableGameCenterSupport=True` to `DefaultEngine.ini`, and pass `CODE_SIGN_ENTITLEMENTS=<path>` to the iOS `xcodebuild archive` (UBT's `Intermediate/IOS/<Target>.entitlements` file is ignored under automatic signing). `0` = remove the key from the entitlements file and write `bEnableGameCenterSupport=False`. Unset = no-op. **Commit the seeded `.entitlements` file** so it survives project regeneration. The bundle ID must have Game Center enabled in App Store Connect. Setting this without `ENABLE_IOS=1` is a no-op (with a warning) — Game Center on Mac requires App Store distribution, which ship.sh does not produce; see [gotchas](gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only). |
 | `CFBUNDLE_VERSION` | Source of truth for the auto-bumped integer build counter. The script reads this on every run, pre-increments by 1, ships the new value as `CFBundleVersion`, and persists the new value back to `.env` on a successful build. Empty/missing = `0`, so the first build ships `1`. Use `--set-cfbundle-version N` to set a new baseline (persists `N`; next build resumes from `N`). See [versioning.md](versioning.md#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical) for the two paths. |
 | `CLEAN_BUILD_DIR` | `1` = wipe `BUILD_DIR_REL` before building. Default: `0`. |
 | `DRY_RUN` | `1` = print the plan and exit without building. |
@@ -78,6 +79,7 @@ Run `./ship.sh --help` for the full list. Common flags:
 ./ship.sh --marketing-version 1.2.0
 ./ship.sh --game-mode          # enable Game Mode in Info.plist
 ./ship.sh --no-game-mode       # disable Game Mode in Info.plist
+./ship.sh --game-center        # add Game Center entitlement (Mac + iOS)
 ./ship.sh --app-category public.app-category.games
 ./ship.sh --build-dir Output/Mac           # override BUILD_DIR_REL
 ./ship.sh --no-regen-project-files         # skip the GenerateProjectFiles step
@@ -93,14 +95,15 @@ CLI flags override `.env`. Both forms are equivalent — you can mix and match.
 The script does not require you to set up or maintain the Xcode workspace manually.
 
 **Auto-detection behavior:**
+- Workspace detection runs **after** `GenerateProjectFiles.sh`, so a first-time run always has a workspace to detect.
 - If exactly one `.xcworkspace` is found under `REPO_ROOT`, it's used automatically.
 - If multiple workspaces are found, you're prompted to choose (interactive runs only).
-- If no workspace is found, the script offers to run `GenerateProjectFiles.sh` to create one.
-- In non-interactive contexts (CI), the script fails with a clear error if it can't resolve the workspace uniquely — set `XCODE_WORKSPACE` explicitly.
+- If no workspace is found after generation, the script fails with a clear error — set `XCODE_WORKSPACE` explicitly or check that `UPROJECT_PATH` is valid.
+- In CI, set `XCODE_WORKSPACE` explicitly.
 
 ### Project files are regenerated every ship
 
-By default the script runs `GenerateProjectFiles.sh` **before every Xcode build**, regardless of whether the workspace already exists. This is not just for first-time setup.
+By default the script runs `GenerateProjectFiles.sh` **before every Xcode build**, regardless of whether the workspace already exists. On a first-time run this creates the workspace; on subsequent runs it keeps the pbxproj in sync with your `Build/{Platform}/Resources/` inputs.
 
 UBT bakes resolved absolute paths from `Build/{Platform}/Resources/` into `Intermediate/ProjectFilesMac/<Project> (Mac).xcodeproj/project.pbxproj` at *project-file-generation time*, not at xcodebuild time. The path priority list in `Engine/Source/Programs/UnrealBuildTool/ProjectFiles/Xcode/XcodeProject.cs::ProcessAssets` (modern Xcode mode) is walked once during regeneration; the resolved absolute paths are then frozen into the pbxproj.
 
@@ -109,7 +112,7 @@ Implications:
 - **Editing the contents** of an already-referenced file *does* flow through (Xcode reads it at build time).
 - Changes to `[/Script/MacTargetPlatform.XcodeProjectSettings] ExtraFolderToCopyToApp` and similar config-driven resource hooks also require a regen.
 
-The regen runs early in the build pipeline, before `update_xcconfig_versions` (which stamps the freshly-generated xcconfig). It's cheap (~few seconds) and idempotent. Disable it with `REGEN_PROJECT_FILES=0` or `--no-regen-project-files` if you have a specific reason — the most common is if you need a `--no-xcode-export` UAT-only build, where the regen is also skipped automatically.
+The regen runs before workspace detection and the Xcode archive step. It's cheap (~few seconds) and idempotent. Disable it with `REGEN_PROJECT_FILES=0` or `--no-regen-project-files` if you have a specific reason — the most common is a `--no-xcode-export` UAT-only build, where regen is also skipped automatically. If `REGEN_PROJECT_FILES=0` and no workspace is found, the script fails with a clear message.
 
 To generate or regenerate a workspace manually:
 

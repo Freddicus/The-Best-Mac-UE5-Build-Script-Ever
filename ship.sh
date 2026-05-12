@@ -336,36 +336,6 @@ autodetect_workspace_guess_if_needed() {
   fi
 }
 
-maybe_generate_workspace_interactively() {
-  # Offer to generate the Xcode workspace using Unreal's GenerateProjectFiles script.
-  # Only runs in interactive terminals.
-  # Requires UE_ROOT and UPROJECT_PATH.
-
-  # If stdin is not a TTY, we cannot prompt.
-  if [[ ! -t 0 ]]; then
-    return 1
-  fi
-
-  local gen_script
-  gen_script="$UE_ROOT/Engine/Build/BatchFiles/Mac/GenerateProjectFiles.sh"
-
-  if [[ ! -x "$gen_script" ]]; then
-    warn "GenerateProjectFiles.sh not found/executable at: $gen_script"
-    warn "If you installed Unreal elsewhere, pass --ue-root or set UE_ROOT."
-    return 1
-  fi
-
-  echo "No .xcworkspace found." >&3
-  echo "I can try to generate it now using Unreal's GenerateProjectFiles." >&3
-  read -r -p "Generate Xcode workspace now? (Y/n) " ans
-  if [[ "${ans:-Y}" =~ ^[Nn]$ ]]; then
-    return 1
-  fi
-
-  info "Generating Xcode workspace via GenerateProjectFiles.sh"
-  "$gen_script" -project="$UPROJECT_PATH" -game
-  return 0
-}
 
 seed_apple_launchscreen_compat() {
   # Defensively place a pre-compiled LaunchScreen.storyboardc at
@@ -871,6 +841,7 @@ print_config() {
   fi
   echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, leaves DefaultEngine.ini VersionInfo untouched>}" >&3
   echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, leaves Info.Template.plist GameMode keys untouched>}" >&3
+  echo "ENABLE_GAME_CENTER: ${ENABLE_GAME_CENTER:-<unset, leaves iOS Game Center entitlements alone>} (iOS only; 1=add, 0=remove com.apple.developer.game-center)" >&3
   echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, leaves DefaultEngine.ini AppCategory untouched>}" >&3
   local _cfbv_now _cfbv_next
   _cfbv_now="${CFBUNDLE_VERSION:-0}"
@@ -1143,6 +1114,87 @@ ensure_app_category_in_engine_ini() {
     "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
     "AppCategory" \
     "$APP_CATEGORY"
+}
+
+ensure_game_center_entitlements() {
+  # Manage com.apple.developer.game-center for iOS.
+  # Unset = no opinion; 1 = add the entitlement; 0 = remove it.
+  #
+  # iOS only: macOS Game Center requires Mac App Store distribution (Apple
+  # Distribution cert + MAS provisioning profile + app sandbox), which is not
+  # what ship.sh produces. Developer ID / Direct Distribution Mac apps cannot
+  # carry com.apple.developer.game-center at all — AMFI rejects the entitlement
+  # at exec time regardless of notarization, because Apple does not encode the
+  # entitlement into Developer ID provisioning profile binaries. See
+  # docs/gotchas.md "Game Center is a Mac App Store feature."
+  #
+  # iOS (add): seeds Build/IOS/Resources/<Project>.entitlements and passes
+  # CODE_SIGN_ENTITLEMENTS=<path> directly to xcodebuild archive (UBT's
+  # `bEnableGameCenterSupport=True` only writes to Intermediate/IOS, which
+  # xcodebuild ignores under automatic signing). Also writes
+  # bEnableGameCenterSupport=True to DefaultEngine.ini for the UAT cook step.
+  # iOS (remove): removes the key from the .entitlements file, writes False.
+  [[ -n "${ENABLE_GAME_CENTER:-}" ]] || return 0
+
+  if [[ "${ENABLE_IOS:-0}" != "1" ]]; then
+    warn "ENABLE_GAME_CENTER is set but ENABLE_IOS=0 — Game Center automation is iOS-only in ship.sh (Mac Game Center requires App Store distribution; not supported here). Skipping."
+    return 0
+  fi
+
+  local project_name="${UPROJECT_NAME%.uproject}"
+  local ios_ent_rel="Build/IOS/Resources/${project_name}.entitlements"
+  local ios_ent="$REPO_ROOT/$ios_ent_rel"
+
+  if [[ "$ENABLE_GAME_CENTER" == "1" ]]; then
+    /bin/mkdir -p "$(/usr/bin/dirname "$ios_ent")"
+    if [[ ! -f "$ios_ent" ]]; then
+      cat > "$ios_ent" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.game-center</key>
+	<true/>
+</dict>
+</plist>
+PLIST
+      /bin/chmod 644 "$ios_ent"
+      good "Seeded $ios_ent (commit it — passed as CODE_SIGN_ENTITLEMENTS to xcodebuild)"
+    else
+      local _ios_gc_val
+      _ios_gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ios_ent" 2>/dev/null || true)"
+      if [[ "$_ios_gc_val" != "true" ]]; then
+        if [[ -n "$_ios_gc_val" ]]; then
+          /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$ios_ent"
+        else
+          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$ios_ent"
+        fi
+        good "Updated $ios_ent → com.apple.developer.game-center=true"
+      else
+        info "iOS entitlements already have Game Center: $ios_ent"
+      fi
+    fi
+    set_engine_ini_value \
+      "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
+      "bEnableGameCenterSupport" \
+      "True"
+
+  else
+    if [[ -f "$ios_ent" ]]; then
+      local _ios_gc_val
+      _ios_gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ios_ent" 2>/dev/null || true)"
+      if [[ -n "$_ios_gc_val" ]]; then
+        /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.game-center" "$ios_ent"
+        good "Removed com.apple.developer.game-center from $ios_ent"
+      else
+        info "Game Center key not present in $ios_ent — nothing to remove"
+      fi
+    fi
+    set_engine_ini_value \
+      "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
+      "bEnableGameCenterSupport" \
+      "False"
+  fi
 }
 
 seed_mac_info_template_plist() {
@@ -1432,27 +1484,10 @@ autodetect_workspace_if_needed() {
       WORKSPACE="${found[0]}"
       info "Auto-detected workspace: $WORKSPACE"
     elif [[ "${#found[@]}" -eq 0 ]]; then
-      # Offer to generate the workspace interactively.
-      if maybe_generate_workspace_interactively; then
-        # Re-scan after generation.
-        found=()
-        while IFS= read -r line; do
-          [[ -n "$line" ]] && found+=("$line")
-        done < <(/usr/bin/find "$REPO_ROOT" -maxdepth 2 -type d -name '*.xcworkspace' 2>/dev/null)
-
-        if [[ "${#found[@]}" -eq 1 ]]; then
-          XCODE_WORKSPACE="$(/usr/bin/basename "${found[0]}")"
-          WORKSPACE="${found[0]}"
-          info "Auto-detected workspace after generation: $WORKSPACE"
-          return 0
-        fi
-
-        # Fall through to multi-candidate handling below.
-        if [[ "${#found[@]}" -eq 0 ]]; then
-          die "GenerateProjectFiles completed, but no .xcworkspace was found under REPO_ROOT. Set XCODE_WORKSPACE explicitly."
-        fi
+      if [[ "${REGEN_PROJECT_FILES:-1}" == "1" ]]; then
+        die "GenerateProjectFiles ran but no .xcworkspace was found under REPO_ROOT: $REPO_ROOT. Check that UPROJECT_PATH points to a valid .uproject."
       else
-        die "No .xcworkspace found under REPO_ROOT. Generate it (GenerateProjectFiles) or set XCODE_WORKSPACE."
+        die "No .xcworkspace found under REPO_ROOT: $REPO_ROOT. Set XCODE_WORKSPACE explicitly, or remove --no-regen-project-files / REGEN_PROJECT_FILES=0 to let the script generate it."
       fi
     fi
 
@@ -2229,6 +2264,7 @@ VERSION_STRING="${VERSION_STRING:-}"
 VERSION_CONTENT_DIR="${VERSION_CONTENT_DIR:-BuildInfo}"
 MARKETING_VERSION="${MARKETING_VERSION:-}"
 ENABLE_GAME_MODE="${ENABLE_GAME_MODE:-}"
+ENABLE_GAME_CENTER="${ENABLE_GAME_CENTER:-}"
 APP_CATEGORY="${APP_CATEGORY:-}"
 CFBUNDLE_VERSION="${CFBUNDLE_VERSION:-}"
 
@@ -2347,6 +2383,18 @@ Options (highest priority):
   --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
   --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
   --game-mode / --no-game-mode       (stamp LSSupportsGameMode + GCSupportsGameMode in xcconfig, default: YES)
+  --game-center / --no-game-center   iOS-only: seed Build/IOS/Resources/<project>.entitlements
+                                     with com.apple.developer.game-center, write
+                                     bEnableGameCenterSupport=True to DefaultEngine.ini,
+                                     and pass CODE_SIGN_ENTITLEMENTS=<path> to the iOS
+                                     xcodebuild archive (UBT's intermediate entitlements
+                                     file is ignored under automatic signing). No-op for
+                                     Mac — Game Center on Mac requires App Store
+                                     distribution, which ship.sh doesn't produce
+                                     (Direct Distribution / Developer ID Mac apps
+                                     cannot carry com.apple.developer.game-center;
+                                     AMFI rejects the entitlement at launch).
+                                     Default: unset (leaves things alone).
   --app-category STRING              (INFOPLIST_KEY_LSApplicationCategoryType, e.g. public.app-category.games)
   --set-cfbundle-version STRING      set CFBundleVersion to STRING for this build
                                      AND persist it to .env as the new baseline.
@@ -2453,6 +2501,8 @@ while [[ $# -gt 0 ]]; do
     --marketing-version)        MARKETING_VERSION="$2"; shift 2 ;;
     --game-mode)                ENABLE_GAME_MODE="1"; shift ;;
     --no-game-mode)             ENABLE_GAME_MODE="0"; shift ;;
+    --game-center)              ENABLE_GAME_CENTER="1"; shift ;;
+    --no-game-center)           ENABLE_GAME_CENTER="0"; shift ;;
     --app-category)             APP_CATEGORY="$2"; shift 2 ;;
     --set-cfbundle-version)     CFBUNDLE_VERSION="$2"; CLI_SET_CFBUNDLE_VERSION=1; shift 2 ;;
     --bump-major|--bump-minor|--bump-patch)
@@ -2533,18 +2583,23 @@ fi
 autodetect_names_if_needed
 
 # Try the common "<Project> (Mac).xcworkspace" guess before the more general workspace find.
+# Full workspace detection (including iOS) is deferred to after GenerateProjectFiles runs.
 autodetect_workspace_guess_if_needed
 autodetect_export_plist_if_needed
-autodetect_ios_workspace_if_needed
 autodetect_ios_export_plist_if_needed
 autodetect_ios_asc_credentials_if_needed
 autodetect_steam_if_needed
 autodetect_steam_dylib_src_from_engine_if_needed
 
-# Derive common paths (after CLI parsing/autodetect)
+# Derive common paths (after CLI parsing/autodetect).
+# WORKSPACE/SCHEME are deferred: full detection runs after GenerateProjectFiles.
+# Only construct WORKSPACE now if XCODE_WORKSPACE is already resolved (CLI,
+# env, or the early convention guess) — avoid a garbage "$REPO_ROOT/" path.
 UPROJECT_PATH="${UPROJECT_PATH:-$REPO_ROOT/$UPROJECT_NAME}"
-WORKSPACE="${WORKSPACE:-$REPO_ROOT/$XCODE_WORKSPACE}"
-SCHEME="$XCODE_SCHEME"
+if ! is_placeholder "${XCODE_WORKSPACE:-}"; then
+  WORKSPACE="${WORKSPACE:-$REPO_ROOT/$XCODE_WORKSPACE}"
+fi
+SCHEME="${XCODE_SCHEME:-}"
 
 SCRIPTS="$UE_ROOT/$UAT_SCRIPTS_SUBPATH"
 UE_EDITOR="$UE_ROOT/$UE_EDITOR_SUBPATH"
@@ -2561,7 +2616,7 @@ UAT_ARCHIVE_DIR="$(/usr/bin/dirname "$BUILD_DIR")"
 
 # Normalize a few important paths to absolute paths when possible.
 # (This helps when the user passes relative paths via env/CLI.)
-if [[ -d "$WORKSPACE" ]]; then
+if [[ -d "${WORKSPACE:-}" ]]; then
   WORKSPACE="$(abspath_existing "$WORKSPACE")"
 fi
 if [[ -f "$EXPORT_PLIST" ]]; then
@@ -2593,27 +2648,14 @@ require_not_placeholder "LONG_NAME" "$LONG_NAME" "Example: MyGame"
 # Xcode inputs are only required if you use the Xcode archive/export steps.
 # When IOS_ONLY=1, Mac is skipped entirely so SIGN_IDENTITY / EXPORT_PLIST /
 # XCODE_WORKSPACE are not required either.
+# Workspace + scheme detection and validation are deferred to after
+# GenerateProjectFiles runs (see post-regen block below).
 if [[ "$USE_XCODE_EXPORT" == "1" && "${IOS_ONLY:-0}" != "1" ]]; then
-  # Ensure derived paths are available to autodetect.
-  WORKSPACE="${WORKSPACE:-$REPO_ROOT/$XCODE_WORKSPACE}"
-  SCHEME="$XCODE_SCHEME"
-
-  # Try auto-detect first (helps new users).
-  autodetect_workspace_if_needed
-  autodetect_scheme_if_needed
-
   require_not_placeholder "EXPORT_PLIST" "$EXPORT_PLIST" "Point at an ExportOptions.plist compatible with Developer ID exports"
-  require_not_placeholder "XCODE_WORKSPACE" "$XCODE_WORKSPACE" "Example: YourProject (Mac).xcworkspace"
-  require_not_placeholder "XCODE_SCHEME" "$XCODE_SCHEME" "Example: YourProject"
 fi
 
-# iOS validation only when iOS is opted into AND we're actually going to build.
-# --print-config and --dry-run bail out before this; we still want to surface
-# unset iOS workspace/scheme as a die() at actual build time.
+# iOS export plist validated early (doesn't depend on workspace generation).
 if [[ "${ENABLE_IOS:-0}" == "1" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
-  autodetect_ios_scheme_if_needed
-  require_not_placeholder "IOS_WORKSPACE" "${IOS_WORKSPACE:-}" "Example: YourProject (iOS).xcworkspace"
-  require_not_placeholder "IOS_SCHEME" "${IOS_SCHEME:-}" "Example: YourProject"
   require_not_placeholder "IOS_EXPORT_PLIST" "${IOS_EXPORT_PLIST:-}" "Copy iOS-ExportOptions.plist.example to iOS-ExportOptions.plist and edit"
 fi
 
@@ -2783,10 +2825,9 @@ fi
 
 # Xcode steps are optional
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
-  # Xcode workspaces are directory bundles (".xcworkspace" folders), not regular files.
-  [[ -d "$WORKSPACE" ]] || die "Xcode workspace not found (expected a .xcworkspace directory): $WORKSPACE"
   command -v xcodebuild >/dev/null 2>&1 || die "xcodebuild not found. Install Xcode and the Command Line Tools."
 fi
+# Workspace existence is checked after GenerateProjectFiles runs (post-regen block).
 
 # Notarization requires Apple tools and a configured, accessible notary profile
 if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
@@ -2913,7 +2954,36 @@ ensure_macos_canonical_appicon
 ensure_ios_canonical_appicon
 ensure_app_category_in_engine_ini
 ensure_marketing_version_in_engine_ini
+ensure_game_center_entitlements
 regenerate_project_files
+
+# ---------------------------------------------------------------------------
+# Post-regen workspace + scheme resolution
+# GenerateProjectFiles has now run (when REGEN_PROJECT_FILES=1), so workspaces
+# that didn't exist before the regen are on disk. Detect them here rather than
+# up-front so a first-time run never needs to prompt or pre-generate manually.
+# ---------------------------------------------------------------------------
+if [[ "$USE_XCODE_EXPORT" == "1" && "${IOS_ONLY:-0}" != "1" ]]; then
+  autodetect_workspace_if_needed
+  autodetect_scheme_if_needed
+  if ! is_placeholder "${XCODE_WORKSPACE:-}"; then
+    WORKSPACE="${WORKSPACE:-$REPO_ROOT/$XCODE_WORKSPACE}"
+  fi
+  if [[ -d "${WORKSPACE:-}" ]]; then
+    WORKSPACE="$(abspath_existing "$WORKSPACE")"
+  fi
+  SCHEME="$XCODE_SCHEME"
+  require_not_placeholder "XCODE_WORKSPACE" "$XCODE_WORKSPACE" "Example: YourProject (Mac).xcworkspace"
+  require_not_placeholder "XCODE_SCHEME" "$XCODE_SCHEME" "Example: YourProject"
+  [[ -d "$WORKSPACE" ]] || die "Xcode workspace not found after project file generation (expected a .xcworkspace directory): $WORKSPACE"
+fi
+
+if [[ "${ENABLE_IOS:-0}" == "1" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
+  autodetect_ios_workspace_if_needed
+  autodetect_ios_scheme_if_needed
+  require_not_placeholder "IOS_WORKSPACE" "${IOS_WORKSPACE:-}" "Example: YourProject (iOS).xcworkspace"
+  require_not_placeholder "IOS_SCHEME" "${IOS_SCHEME:-}" "Example: YourProject"
+fi
 
 if [[ "${IOS_ONLY:-0}" != "1" ]]; then
   info "Building game (UAT BuildCookRun, Mac)"
@@ -3364,6 +3434,9 @@ if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
   # the same number.
   _ios_xcb_settings=()
   [[ -n "${CFBUNDLE_VERSION:-}" ]] && _ios_xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
+  if [[ "${ENABLE_GAME_CENTER:-}" == "1" ]]; then
+    _ios_xcb_settings+=("CODE_SIGN_ENTITLEMENTS=$REPO_ROOT/Build/IOS/Resources/${UPROJECT_NAME%.uproject}.entitlements")
+  fi
 
   echo "== iOS Archive ==" >&3
   xcodebuild \
