@@ -112,20 +112,27 @@ The script solves both cases with committed source files:
 
 **Commit both files** after the first `--game-center` run. Without them in source control, any clean or teammate/CI regen loses the entitlement path.
 
-## `com.apple.developer.game-center` is a restricted entitlement — AMFI kills your app without an embedded provisioning profile
+## `com.apple.developer.game-center` is a restricted entitlement — but the Mac Developer ID story is "notarization, not profile"
 
-A Developer-ID-signed Mac app that declares `com.apple.developer.game-center` (or any other "provisioned" entitlement) **must** have a matching provisioning profile embedded at `Contents/embedded.provisionprofile`. The signature itself can be perfectly valid — `codesign --verify --deep --strict` passes, hardened runtime is on, the cert chain is fine — but at exec time the kernel's AMFI (Apple Mobile File Integrity) checks restricted entitlements against an embedded profile, and SIGKILLs the process if no profile authorizes them. The error in `log show` looks like:
+A Mac app that declares `com.apple.developer.game-center` (or any other "provisioned" entitlement) has its entitlement authorization checked by the kernel's AMFI (Apple Mobile File Integrity). Two distinct mechanisms can satisfy AMFI:
+
+1. **Embedded provisioning profile lists the entitlement.** This is the Apple Development / Mac App Store / iOS path. The profile's `Entitlements` dict explicitly contains `com.apple.developer.game-center=true`, and AMFI verifies that the signed entitlements are a subset of the profile's claimed entitlements.
+2. **Notarization ticket vouches for the entitlement.** This is the Mac Developer ID / Direct Distribution path. The notarization service validates the signed entitlements against the App ID's enabled capabilities in App Store Connect, then issues a ticket. Once stapled to the `.app`, AMFI accepts the launched binary even with no provisioning profile embedded.
+
+**Apple does not encode `com.apple.developer.game-center` into Developer ID provisioning profile binaries**, even when the App ID has Game Center enabled and the portal's "Enabled Capabilities" panel claims the profile carries it. The portal display reflects what's enabled on the App ID, not the actual encoded `.provisionprofile` contents. Decoding any Developer ID profile binary with `security cms -D -i <file>` confirms this — the `Entitlements` dict only contains `application-identifier`, `team-identifier`, and `keychain-access-groups`. There is no portal flow that adds Game Center to a Developer ID profile.
+
+This has a direct consequence for the CLI build pipeline: **`xcodebuild -exportArchive` with `method=developer-id` cannot succeed** for an archive whose binary declares a restricted entitlement. It pre-validates restricted entitlements against the named profile and fails with:
 
 ```
-amfid: ... not valid: Error -413 "No matching profile found"
-  unsatisfiedEntitlements: com.apple.developer.game-center
-kernel: AMFI: Code has restricted entitlements, but the validation of
-its code signature failed.
+error: exportArchive Provisioning profile "..." doesn't include the Game Center capability.
+error: exportArchive Provisioning profile "..." doesn't include the com.apple.developer.game-center entitlement.
 ```
 
-For the CLI pipeline to behave like Xcode's GUI, `xcodebuild archive` and `xcodebuild -exportArchive` both need `-allowProvisioningUpdates`. That flag is the CLI equivalent of being logged into your Apple team in Xcode — without it, automatic signing cannot reach Apple to mint the Developer ID Direct Distribution profile that authorizes the restricted entitlement. The script passes it on both calls when `USE_XCODE_EXPORT=1`.
+This is true regardless of `-allowProvisioningUpdates`, `signingStyle=automatic` vs `manual`, or which profile/cert is named in `ExportOptions.plist`. There is no CLI flag to skip the validation. Xcode GUI's `Distribute App → Direct Distribution` succeeds because `IDEDistribution` skips this pre-validation entirely and relies on notarization at runtime.
 
-The post-export per-component re-sign in the script is fine: `codesign --force --sign --entitlements <file>` rewrites the signature and entitlements blob but does **not** touch `Contents/embedded.provisionprofile`, so the profile Xcode placed during export survives.
+**ship.sh handles this by bypassing `xcodebuild -exportArchive` whenever `ENABLE_GAME_CENTER=1`.** The `.app` is copied directly out of `<archive>/Products/Applications/`, its development `Contents/embedded.provisionprofile` is removed (bound to the Apple Development cert, incompatible with the Developer ID re-sign), the existing per-component re-sign applies the Developer ID signature + script-managed entitlements, and notarization+stapling complete the chain. The stapled ticket is what makes AMFI accept the launched app on clean machines. Without notarization+stapling, a Developer-ID-signed app with `com.apple.developer.game-center` and no embedded profile will be killed at launch by AMFI with `Error -413 "No matching profile found"` — that's expected; the ticket is the missing piece.
+
+The post-export per-component re-sign is otherwise fine: `codesign --force --sign --entitlements <file>` rewrites the signature and entitlements blob but does **not** touch `Contents/embedded.provisionprofile`. (In the bypass path, the profile is already gone before re-sign runs.)
 
 ## App Sandbox and Game Mode are separate
 

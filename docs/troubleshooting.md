@@ -145,9 +145,26 @@ Verify the iOS entitlements file exists and contains the key:
 
 Should print `true`. If the file is missing, run `./ship.sh --game-center` once and commit both `.entitlements` files.
 
-## Mac app exits immediately at launch / "cannot be opened" with Game Center enabled
+## `xcodebuild -exportArchive` fails with "doesn't include the Game Center capability"
 
-Symptoms: the exported `.app` is signed (`codesign --verify --deep --strict` passes), notarized or not, but trying to launch it from Finder or the terminal exits the process instantly. `log show --last 2m --predicate 'eventMessage CONTAINS "<bundle id>"'` shows:
+```
+error: exportArchive Provisioning profile "..." doesn't include the Game Center capability.
+error: exportArchive Provisioning profile "..." doesn't include the com.apple.developer.game-center entitlement.
+```
+
+Expected. Apple does not encode `com.apple.developer.game-center` into Developer ID provisioning profile binaries, regardless of what the dev portal's "Enabled Capabilities" panel shows. See [gotchas](gotchas.md#comappledevelopergame-center-is-a-restricted-entitlement--but-the-mac-developer-id-story-is-notarization-not-profile) for the full mechanism.
+
+If you're seeing this error from `./ship.sh`, check that `ENABLE_GAME_CENTER=1` is set on the run — when it is, the script bypasses `xcodebuild -exportArchive` entirely and copies the `.app` straight out of the `.xcarchive`. Re-running with the flag set should skip the export step. Verify:
+
+```bash
+grep -E "Copy \\.app from archive \\(bypassing" Saved/Logs/build_*.log | head -2
+```
+
+If you see that line, the bypass is active and `xcodebuild -exportArchive` is not being called for the Mac export.
+
+## Mac app exits immediately at launch (Game Center enabled), pre-notarization test
+
+Symptoms: the exported `.app` is signed (`codesign --verify --deep --strict` passes) but trying to launch it from Finder or the terminal exits the process instantly. `log show --last 2m --predicate 'eventMessage CONTAINS "<bundle id>"'` shows:
 
 ```
 amfid: ... Error -413 "No matching profile found"
@@ -156,29 +173,23 @@ kernel: AMFI: Code has restricted entitlements, but the validation of
 its code signature failed.
 ```
 
-`com.apple.developer.game-center` is a **restricted entitlement** — macOS AMFI requires an embedded provisioning profile inside the `.app` bundle that authorizes it. Without that profile, the kernel SIGKILLs the process at exec, regardless of how the app is signed.
+This is **expected before notarization** for Mac Developer ID builds with `com.apple.developer.game-center`. The Mac Direct Distribution path authorizes restricted entitlements at runtime via the **notarization ticket**, not via an embedded provisioning profile — and the ticket only exists after `notarytool submit` succeeds and `stapler staple` writes it into the bundle.
 
-For the CLI flow to produce a launchable app, `xcodebuild archive` and `xcodebuild -exportArchive` both need `-allowProvisioningUpdates` (which is the CLI equivalent of being logged into your team in Xcode's GUI). The script passes the flag on both calls when `USE_XCODE_EXPORT=1`. Verify by checking the build log:
+To unblock launch testing:
 
-```bash
-grep -E "xcodebuild .*-allowProvisioningUpdates" Saved/Logs/build_*.log | head -5
-```
+1. Confirm `ENABLE_GAME_CENTER=1` is set on the run.
+2. Run `./ship.sh` with `NOTARIZE=yes` (or the `--notarize` flag).
+3. Wait for `notarytool wait` to return `status: Accepted`.
+4. Confirm the staple succeeded with `xcrun stapler validate "<App>.app"`.
+5. Launch the stapled `.app`. AMFI will now accept it because the embedded ticket vouches for the restricted entitlement.
 
-If the flag is absent on the Mac archive line, your `ship.sh` is out of date — pull `main`. If the flag is present but the export still produces an app without `Contents/embedded.provisionprofile`, your Apple team likely isn't authorized for Game Center on this bundle ID yet:
-
-1. Sign in at https://developer.apple.com/account
-2. Identifiers → select your bundle ID → ensure **Game Center** capability is checked
-3. Save, then re-run `./ship.sh --game-center`
-
-You can confirm the embedded profile is present after a build:
+If `notarytool` rejects the submission, run:
 
 ```bash
-ls -la "Saved/Packages/Mac/<Project>-export/<App>.app/Contents/embedded.provisionprofile"
-security cms -D -i "Saved/Packages/Mac/<Project>-export/<App>.app/Contents/embedded.provisionprofile" \
-  | /usr/libexec/PlistBuddy -c "Print :Entitlements" /dev/stdin
+xcrun notarytool log <submission-id> --keychain-profile "<your-notary-profile>"
 ```
 
-The printed dict should include `com.apple.developer.game-center = true`.
+A rejection citing Game Center usually means **the App ID in App Store Connect doesn't have Game Center enabled** — confirm at https://developer.apple.com/account/resources/identifiers/list → your bundle ID → Capabilities. The script doesn't manage this; it's a one-time portal step.
 
 ## Getting more detail
 

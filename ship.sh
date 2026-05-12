@@ -3140,17 +3140,47 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     OTHER_CODE_SIGN_FLAGS="--timestamp" \
     "${_xcb_settings[@]}"
 
-  echo "== Export signed app for Developer ID ==" >&3
-  # ExportOptions.plist controls how Xcode exports the archive. -exportArchive
-  # also gets -allowProvisioningUpdates so it can auto-mint the Developer ID
-  # Direct Distribution profile that re-signs the app under method=developer-id.
-  # This script expects you to provide an ExportOptions.plist (and can
-  # auto-detect a suitable plist in repo root).
-  xcodebuild -exportArchive \
-    -archivePath "$ARCHIVE_PATH" \
-    -exportPath "$EXPORT_DIR" \
-    -exportOptionsPlist "$EXPORT_PLIST" \
-    -allowProvisioningUpdates
+  if [[ "${ENABLE_GAME_CENTER:-0}" == "1" ]]; then
+    # Bypass `xcodebuild -exportArchive` when the binary declares restricted
+    # entitlements like com.apple.developer.game-center. Apple's portal does
+    # not encode `com.apple.developer.game-center` into Developer ID
+    # provisioning profile binaries (even when the App ID has Game Center
+    # enabled and the portal UI claims the profile does), and `-exportArchive`
+    # pre-validates restricted entitlements against the named profile and
+    # fails with "Provisioning profile ... doesn't include the Game Center
+    # capability" regardless of -allowProvisioningUpdates or signingStyle.
+    #
+    # On macOS Direct Distribution, restricted entitlements are authorized at
+    # runtime by the notarization ticket, not by an embedded profile. Pull
+    # the archive's .app out directly, drop its development provisioning
+    # profile (it's bound to the Apple Development cert and incompatible with
+    # the upcoming Developer ID re-sign), let the existing per-component
+    # re-sign apply the Developer ID signature + final entitlements, and
+    # notarize+staple as usual — the stapled ticket is what makes AMFI accept
+    # the launched app on clean machines.
+    echo "== Copy .app from archive (bypassing xcodebuild -exportArchive; ENABLE_GAME_CENTER=1) ==" >&3
+    /bin/rm -rf "$EXPORT_DIR"
+    /bin/mkdir -p "$EXPORT_DIR"
+    _archived_app="$(/usr/bin/find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit 2>/dev/null || true)"
+    [[ -n "$_archived_app" ]] || die "No .app found under $ARCHIVE_PATH/Products/Applications — archive layout unexpected."
+    /usr/bin/ditto "$_archived_app" "$EXPORT_DIR/$(/usr/bin/basename "$_archived_app")"
+    _embedded_in_archive_copy="$EXPORT_DIR/$(/usr/bin/basename "$_archived_app")/Contents/embedded.provisionprofile"
+    if [[ -f "$_embedded_in_archive_copy" ]]; then
+      /bin/rm -f "$_embedded_in_archive_copy"
+      info "Removed development embedded.provisionprofile from archive copy (incompatible with Developer ID re-sign)"
+    fi
+  else
+    echo "== Export signed app for Developer ID ==" >&3
+    # ExportOptions.plist controls how Xcode exports the archive.
+    # -allowProvisioningUpdates lets xcodebuild auto-mint the Developer ID
+    # Direct Distribution profile under method=developer-id. The script
+    # auto-detects a suitable plist in repo root when EXPORT_PLIST is unset.
+    xcodebuild -exportArchive \
+      -archivePath "$ARCHIVE_PATH" \
+      -exportPath "$EXPORT_DIR" \
+      -exportOptionsPlist "$EXPORT_PLIST" \
+      -allowProvisioningUpdates
+  fi
 else
   info "USE_XCODE_EXPORT=0 — skipping Xcode archive/export"
 fi
