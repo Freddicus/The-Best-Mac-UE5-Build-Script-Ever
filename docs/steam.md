@@ -31,14 +31,10 @@ These are **only added when `ENABLE_STEAM=1`**. They weaken your app's security 
 
 If you don't use Steam or don't need the overlay: keep `ENABLE_STEAM=0`.
 
-## Combining Steam and Game Center
+## Steam and Game Center are mutually exclusive on Mac
 
-`ENABLE_STEAM=1` and `ENABLE_GAME_CENTER=1` can be set together. The script-generated codesign plist will contain all three keys:
+A Steam build is a **Direct Distribution** build (Developer ID Application cert, hardened runtime, notarized, no App Sandbox, with the two Steam entitlements above).
 
-```xml
-<key>com.apple.security.cs.disable-library-validation</key><true/>
-<key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
-<key>com.apple.developer.game-center</key><true/>
-```
+A Game Center build is a **Mac App Store** build (Apple Distribution cert, MAS provisioning profile, App Sandbox required, uploaded to App Store Connect for review). MAS review forbids the Steam entitlements (`disable-library-validation` and `allow-dyld-environment-variables`) outright.
 
-The Steam keys and the Game Center key serve unrelated purposes and do not conflict.
+You cannot ship one Mac binary that does both. `ENABLE_STEAM=1` and the iOS-only `ENABLE_GAME_CENTER=1` can be set on the same ship.sh run — the iOS build gets Game Center and the Mac build gets Steam, since they target different distribution channels. But on a single Mac build, Game Center is unreachable through this script (Direct Distribution / Developer ID Mac apps cannot carry `com.apple.developer.game-center`; AMFI rejects the entitlement at launch). For a Mac Game Center build, use Xcode Organizer's `Distribute App → App Store Connect`; see [gotchas](gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only).

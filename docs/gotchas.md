@@ -95,44 +95,51 @@ xcrun notarytool log <submission-id> --keychain-profile "MyNotaryProfile"
 
 The rejection reason is almost never surfaced in the CLI output itself.
 
-## Game Center entitlements must be committed source files — intermediate-only paths don't reach signing
+## Game Center is a Mac App Store feature — ship.sh handles iOS only
 
-**macOS:** There is no UBT ini boolean equivalent of `bEnableGameCenterSupport` for macOS. The mechanism is two ini keys under `[/Script/MacTargetPlatform.XcodeProjectSettings]`:
+There are two mutually exclusive macOS product builds:
 
-- `PremadeMacEntitlements` — used for Debug/Development/DebugGame builds
-- `ShippingSpecificMacEntitlements` — used for **Shipping** builds; UE's `BaseEngine.ini` defaults this to `/Game/Build/Mac/Resources/Sandbox.NoNet.entitlements` and prefers it over `PremadeMacEntitlements`
+| | Mac App Store | Direct Distribution (Developer ID) |
+|---|---|---|
+| Signing cert | Apple Distribution | Developer ID Application |
+| Provisioning profile | Mac App Store profile (carries restricted entitlements) | Developer ID profile (cannot) |
+| App Sandbox (`com.apple.security.app-sandbox`) | **Required** | Not used |
+| Hardened runtime | Optional | **Required** (notarization gates on it) |
+| Restricted entitlements (`com.apple.developer.game-center`, IAP, Sign in with Apple) | Yes — authorized by the embedded MAS profile | No — AMFI rejects them at launch |
+| Steam entitlements (`com.apple.security.cs.disable-library-validation`, `com.apple.security.cs.allow-dyld-environment-variables`) | Forbidden by MAS review | Used here |
+| Submission | `altool --upload-app` → App Store Connect → review | `notarytool submit` → `stapler staple` → host yourself |
 
-Setting only `PremadeMacEntitlements` leaves Shipping archives pointed at UE's stock `Sandbox.NoNet.entitlements` (no Game Center). The script sets **both** keys to the seeded `Build/Mac/Resources/<Project>.entitlements` so every config picks it up. `GenerateProjectFiles` then writes `CODE_SIGN_ENTITLEMENTS = <path>` into each per-config xcconfig.
+You cannot ship one binary that does both. The entitlement lists conflict; the certs conflict; the submission flows conflict.
 
-**iOS:** UBT reads `bEnableGameCenterSupport=True` from `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` and injects the entitlement into `Intermediate/IOS/<Target>.entitlements` during the build. However, this file is in `Intermediate/` and is not picked up by `xcodebuild` when using `CODE_SIGN_STYLE=Automatic` — xcodebuild defers to the provisioning portal, which only reflects what `CODE_SIGN_ENTITLEMENTS` explicitly declares. Without an explicit `CODE_SIGN_ENTITLEMENTS` build setting pointing to a real file, the Game Center entitlement is silently dropped from the IPA.
+**ship.sh produces Direct Distribution Mac builds**, which means **Game Center on Mac is structurally unavailable** through this script. Empirical confirmation: a Developer-ID-signed Mac app with `com.apple.developer.game-center` in its entitlements, fully notarized and stapled (`Notarization Ticket=stapled`, `spctl` accepted as "source=Notarized Developer ID"), is still SIGKILLed at exec by AMFI:
 
-The script solves both cases with committed source files:
-- Mac: seeds `Build/Mac/Resources/<Project>.entitlements` → both `PremadeMacEntitlements` and `ShippingSpecificMacEntitlements` in `DefaultEngine.ini` → `GenerateProjectFiles` bakes `CODE_SIGN_ENTITLEMENTS` into every config's xcconfig
-- iOS: seeds `Build/IOS/Resources/<Project>.entitlements` → passed as `CODE_SIGN_ENTITLEMENTS=<path>` directly to `xcodebuild archive` as a build setting override
+```
+amfid: ... Error -413 "No matching profile found"
+  unsatisfiedEntitlements: com.apple.developer.game-center
+kernel: AMFI: Code has restricted entitlements, but the validation of
+its code signature failed.
+```
 
-**Commit both files** after the first `--game-center` run. Without them in source control, any clean or teammate/CI regen loses the entitlement path.
+The stapled notarization ticket does **not** authorize restricted entitlements. AMFI only accepts them when an embedded provisioning profile claims them — and Apple does not encode `com.apple.developer.game-center` into Developer ID provisioning profile binaries. The dev portal's "Enabled Capabilities" panel for a Developer ID profile reflects what's enabled on the App ID, not the encoded profile contents. Decoding a fresh Developer ID profile with `security cms -D -i <file>` confirms the `Entitlements` dict carries only `application-identifier`, `team-identifier`, and `keychain-access-groups`.
 
-## `com.apple.developer.game-center` is a restricted entitlement — but the Mac Developer ID story is "notarization, not profile"
-
-A Mac app that declares `com.apple.developer.game-center` (or any other "provisioned" entitlement) has its entitlement authorization checked by the kernel's AMFI (Apple Mobile File Integrity). Two distinct mechanisms can satisfy AMFI:
-
-1. **Embedded provisioning profile lists the entitlement.** This is the Apple Development / Mac App Store / iOS path. The profile's `Entitlements` dict explicitly contains `com.apple.developer.game-center=true`, and AMFI verifies that the signed entitlements are a subset of the profile's claimed entitlements.
-2. **Notarization ticket vouches for the entitlement.** This is the Mac Developer ID / Direct Distribution path. The notarization service validates the signed entitlements against the App ID's enabled capabilities in App Store Connect, then issues a ticket. Once stapled to the `.app`, AMFI accepts the launched binary even with no provisioning profile embedded.
-
-**Apple does not encode `com.apple.developer.game-center` into Developer ID provisioning profile binaries**, even when the App ID has Game Center enabled and the portal's "Enabled Capabilities" panel claims the profile carries it. The portal display reflects what's enabled on the App ID, not the actual encoded `.provisionprofile` contents. Decoding any Developer ID profile binary with `security cms -D -i <file>` confirms this — the `Entitlements` dict only contains `application-identifier`, `team-identifier`, and `keychain-access-groups`. There is no portal flow that adds Game Center to a Developer ID profile.
-
-This has a direct consequence for the CLI build pipeline: **`xcodebuild -exportArchive` with `method=developer-id` cannot succeed** for an archive whose binary declares a restricted entitlement. It pre-validates restricted entitlements against the named profile and fails with:
+This is also why `xcodebuild -exportArchive` with `method=developer-id` refuses to export an archive whose binary declares a restricted entitlement:
 
 ```
 error: exportArchive Provisioning profile "..." doesn't include the Game Center capability.
 error: exportArchive Provisioning profile "..." doesn't include the com.apple.developer.game-center entitlement.
 ```
 
-This is true regardless of `-allowProvisioningUpdates`, `signingStyle=automatic` vs `manual`, or which profile/cert is named in `ExportOptions.plist`. There is no CLI flag to skip the validation. Xcode GUI's `Distribute App → Direct Distribution` succeeds because `IDEDistribution` skips this pre-validation entirely and relies on notarization at runtime.
+True regardless of `-allowProvisioningUpdates`, `signingStyle=automatic`/`manual`, or which profile is named in `ExportOptions.plist`. Xcode GUI's `Distribute App → Direct Distribution` *appears* to succeed only because `IDEDistribution` skips this pre-validation — but the resulting binary still fails AMFI at launch on macOS if game-center is in the entitlements.
 
-**ship.sh handles this by bypassing `xcodebuild -exportArchive` whenever `ENABLE_GAME_CENTER=1`.** The `.app` is copied directly out of `<archive>/Products/Applications/`, its development `Contents/embedded.provisionprofile` is removed (bound to the Apple Development cert, incompatible with the Developer ID re-sign), the existing per-component re-sign applies the Developer ID signature + script-managed entitlements, and notarization+stapling complete the chain. The stapled ticket is what makes AMFI accept the launched app on clean machines. Without notarization+stapling, a Developer-ID-signed app with `com.apple.developer.game-center` and no embedded profile will be killed at launch by AMFI with `Error -413 "No matching profile found"` — that's expected; the ticket is the missing piece.
+**For Mac Game Center, you need a Mac App Store build:** Apple Distribution signing, MAS provisioning profile (which does authorize game-center), App Sandbox entitlement, no Steam entitlements, uploaded via `altool` to App Store Connect for TestFlight/review. That pipeline is not in ship.sh today; do it via Xcode Organizer's `Distribute App → App Store Connect`.
 
-The post-export per-component re-sign is otherwise fine: `codesign --force --sign --entitlements <file>` rewrites the signature and entitlements blob but does **not** touch `Contents/embedded.provisionprofile`. (In the bypass path, the profile is already gone before re-sign runs.)
+## Game Center entitlement wiring (iOS path, which ship.sh handles)
+
+UBT reads `bEnableGameCenterSupport=True` from `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` and injects the entitlement into `Intermediate/IOS/<Target>.entitlements` during the build. However, this file is in `Intermediate/` and is **not picked up by `xcodebuild` under `CODE_SIGN_STYLE=Automatic`** — xcodebuild defers to the provisioning portal, which only reflects what `CODE_SIGN_ENTITLEMENTS` explicitly declares. Without an explicit `CODE_SIGN_ENTITLEMENTS` build setting pointing to a real file, the Game Center entitlement is silently dropped from the IPA.
+
+ship.sh solves this by seeding `Build/IOS/Resources/<Project>.entitlements` (a committed source file) and passing `CODE_SIGN_ENTITLEMENTS=<path>` directly to `xcodebuild archive` as a build setting override. It also writes `bEnableGameCenterSupport=True` to `DefaultEngine.ini` for the UAT cook step.
+
+**Commit `Build/IOS/Resources/<Project>.entitlements`** after the first `--game-center` run. Without it in source control, any clean or teammate/CI regen loses the entitlement path.
 
 ## App Sandbox and Game Mode are separate
 

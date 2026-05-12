@@ -118,78 +118,26 @@ The xcconfig at `Intermediate/ProjectFiles/XcconfigsMac/<project>.xcconfig` does
   -game
 ```
 
-## Game Center entitlement missing from IPA or Mac app
+## iOS Game Center entitlement missing from the IPA
 
-Both platforms require a committed entitlements file. After the first `--game-center` run, commit:
-- `Build/Mac/Resources/<Project>.entitlements`
-- `Build/IOS/Resources/<Project>.entitlements`
+After the first `--game-center` run, commit `Build/IOS/Resources/<Project>.entitlements`. Without it, the entitlement silently drops from the IPA on a clean checkout.
 
-**Mac:** Every `GenerateProjectFiles.sh` run overwrites the xcconfig. The script writes the entitlements path to **both** `PremadeMacEntitlements` and `ShippingSpecificMacEntitlements` under `[/Script/MacTargetPlatform.XcodeProjectSettings]` — UE's `BaseEngine.ini` defaults the Shipping key to `Sandbox.NoNet.entitlements` and prefers it over `PremadeMacEntitlements` for Shipping configs, so setting only one leaves Shipping pointed at the engine default (no Game Center). If either ini key points to a file that doesn't exist on disk, `GenerateProjectFiles` silently skips `CODE_SIGN_ENTITLEMENTS` for that config. Verify:
+`bEnableGameCenterSupport=True` in `DefaultEngine.ini` tells UBT to write `com.apple.developer.game-center` to `Intermediate/IOS/<Target>.entitlements`, but that intermediate file is **not** picked up by `xcodebuild` under `CODE_SIGN_STYLE=Automatic`. ship.sh passes `CODE_SIGN_ENTITLEMENTS=<path>` as a build setting override pointing to the committed `Build/IOS/Resources/<Project>.entitlements`. If that file is missing, the override points at nothing and Apple's automatic signing drops the entitlement.
 
-```bash
-grep -E "CODE_SIGN_ENTITLEMENTS" \
-  Intermediate/ProjectFiles/XcconfigsMac/*Shipping*.xcconfig
-grep -E "PremadeMacEntitlements|ShippingSpecificMacEntitlements" Config/DefaultEngine.ini
-```
-
-Note: ship.sh's Mac codesign step also injects `com.apple.developer.game-center` independently into the final signing plist, so ship.sh-produced Mac builds get the entitlement even if the xcconfig path is broken. But without the matching xcconfig entry, the archive step won't auto-create a provisioning profile that authorizes the entitlement, so the final app fails AMFI at launch — see "Mac app exits immediately at launch / 'cannot be opened' with Game Center enabled" below.
-
-**iOS:** `bEnableGameCenterSupport=True` tells UBT to write the entitlement to `Intermediate/IOS/<Target>.entitlements`, but that file is in `Intermediate/` and is not picked up by `xcodebuild` under `CODE_SIGN_STYLE=Automatic`. ship.sh passes `CODE_SIGN_ENTITLEMENTS=<path>` as a build setting override pointing to `Build/IOS/Resources/<Project>.entitlements`. If that file doesn't exist (e.g. after a clean on a machine that never committed it), the entitlement is silently dropped.
-
-Verify the iOS entitlements file exists and contains the key:
+Verify the file exists and contains the key:
 
 ```bash
 /usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" \
   "Build/IOS/Resources/$(basename *.uproject .uproject).entitlements"
 ```
 
-Should print `true`. If the file is missing, run `./ship.sh --game-center` once and commit both `.entitlements` files.
+Should print `true`. If the file is missing, run `./ship.sh --game-center --ios-only` (or any run with `ENABLE_IOS=1` and `--game-center`) once and commit the seeded file.
 
-## `xcodebuild -exportArchive` fails with "doesn't include the Game Center capability"
+## I want Game Center working on the Mac build too
 
-```
-error: exportArchive Provisioning profile "..." doesn't include the Game Center capability.
-error: exportArchive Provisioning profile "..." doesn't include the com.apple.developer.game-center entitlement.
-```
+Not possible through ship.sh's Direct Distribution pipeline. Game Center on macOS is structurally a Mac App Store feature — the entitlement is "restricted" and AMFI requires authorization via an embedded MAS provisioning profile, which only exists for App Store distribution. Developer-ID-signed Mac apps with `com.apple.developer.game-center` are killed at launch by the kernel with `Error -413 "No matching profile found"` even after successful notarization and stapling. See [gotchas](gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only) for the full mechanism.
 
-Expected. Apple does not encode `com.apple.developer.game-center` into Developer ID provisioning profile binaries, regardless of what the dev portal's "Enabled Capabilities" panel shows. See [gotchas](gotchas.md#comappledevelopergame-center-is-a-restricted-entitlement--but-the-mac-developer-id-story-is-notarization-not-profile) for the full mechanism.
-
-If you're seeing this error from `./ship.sh`, check that `ENABLE_GAME_CENTER=1` is set on the run — when it is, the script bypasses `xcodebuild -exportArchive` entirely and copies the `.app` straight out of the `.xcarchive`. Re-running with the flag set should skip the export step. Verify:
-
-```bash
-grep -E "Copy \\.app from archive \\(bypassing" Saved/Logs/build_*.log | head -2
-```
-
-If you see that line, the bypass is active and `xcodebuild -exportArchive` is not being called for the Mac export.
-
-## Mac app exits immediately at launch (Game Center enabled), pre-notarization test
-
-Symptoms: the exported `.app` is signed (`codesign --verify --deep --strict` passes) but trying to launch it from Finder or the terminal exits the process instantly. `log show --last 2m --predicate 'eventMessage CONTAINS "<bundle id>"'` shows:
-
-```
-amfid: ... Error -413 "No matching profile found"
-  unsatisfiedEntitlements: com.apple.developer.game-center
-kernel: AMFI: Code has restricted entitlements, but the validation of
-its code signature failed.
-```
-
-This is **expected before notarization** for Mac Developer ID builds with `com.apple.developer.game-center`. The Mac Direct Distribution path authorizes restricted entitlements at runtime via the **notarization ticket**, not via an embedded provisioning profile — and the ticket only exists after `notarytool submit` succeeds and `stapler staple` writes it into the bundle.
-
-To unblock launch testing:
-
-1. Confirm `ENABLE_GAME_CENTER=1` is set on the run.
-2. Run `./ship.sh` with `NOTARIZE=yes` (or the `--notarize` flag).
-3. Wait for `notarytool wait` to return `status: Accepted`.
-4. Confirm the staple succeeded with `xcrun stapler validate "<App>.app"`.
-5. Launch the stapled `.app`. AMFI will now accept it because the embedded ticket vouches for the restricted entitlement.
-
-If `notarytool` rejects the submission, run:
-
-```bash
-xcrun notarytool log <submission-id> --keychain-profile "<your-notary-profile>"
-```
-
-A rejection citing Game Center usually means **the App ID in App Store Connect doesn't have Game Center enabled** — confirm at https://developer.apple.com/account/resources/identifiers/list → your bundle ID → Capabilities. The script doesn't manage this; it's a one-time portal step.
+To ship a Mac App Store build with Game Center, use Xcode Organizer's `Distribute App → App Store Connect` (the App Sandbox entitlement is required for that pipeline; Steam entitlements are forbidden). Automating the MAS Mac path inside ship.sh is a future-PR item.
 
 ## Getting more detail
 

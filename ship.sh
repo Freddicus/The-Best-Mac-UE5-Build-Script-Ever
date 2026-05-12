@@ -841,7 +841,7 @@ print_config() {
   fi
   echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, leaves DefaultEngine.ini VersionInfo untouched>}" >&3
   echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, leaves Info.Template.plist GameMode keys untouched>}" >&3
-  echo "ENABLE_GAME_CENTER: ${ENABLE_GAME_CENTER:-<unset, leaves Game Center entitlements alone>} (1=add, 0=remove com.apple.developer.game-center)" >&3
+  echo "ENABLE_GAME_CENTER: ${ENABLE_GAME_CENTER:-<unset, leaves iOS Game Center entitlements alone>} (iOS only; 1=add, 0=remove com.apple.developer.game-center)" >&3
   echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, leaves DefaultEngine.ini AppCategory untouched>}" >&3
   local _cfbv_now _cfbv_next
   _cfbv_now="${CFBUNDLE_VERSION:-0}"
@@ -1073,42 +1073,6 @@ set_engine_ini_value() {
   fi
 }
 
-remove_engine_ini_key() {
-  # Idempotent removal of a key from a section in DefaultEngine.ini.
-  # No-op when the key is absent. Does not remove the section header itself.
-  local section="$1" key="$2"
-  local ini_file="$REPO_ROOT/Config/DefaultEngine.ini"
-  [[ -f "$ini_file" ]] || return 0
-
-  local current_value
-  current_value="$(/usr/bin/awk -v section="$section" -v key="$key" '
-    $0 == section { in_sect = 1; next }
-    /^\[/ { in_sect = 0; next }
-    in_sect && $0 ~ "^[[:space:]]*"key"[[:space:]]*=" {
-      sub(/^[^=]*=[[:space:]]*/, "")
-      print
-      exit
-    }
-  ' "$ini_file")"
-
-  if [[ -z "$current_value" ]]; then
-    info "DefaultEngine.ini: $key not in $section — nothing to remove"
-    return 0
-  fi
-
-  local tmp_ini
-  tmp_ini="$(/usr/bin/mktemp "${TMPDIR:-/tmp}DefaultEngine_ini_XXXXXX")"
-  /usr/bin/awk -v section="$section" -v key="$key" '
-    BEGIN { in_sect = 0 }
-    $0 == section { in_sect = 1; print; next }
-    /^\[/ { in_sect = 0; print; next }
-    in_sect && $0 ~ "^[[:space:]]*"key"[[:space:]]*=" { next }
-    { print }
-  ' "$ini_file" > "$tmp_ini"
-  /bin/mv "$tmp_ini" "$ini_file"
-  good "Removed from $ini_file: [$section] $key"
-}
-
 ensure_marketing_version_in_engine_ini() {
   # Write MARKETING_VERSION (CFBundleShortVersionString) to its canonical
   # locations. UE has separate ini sections for Mac and iOS runtime settings
@@ -1153,40 +1117,38 @@ ensure_app_category_in_engine_ini() {
 }
 
 ensure_game_center_entitlements() {
-  # Manage com.apple.developer.game-center for Mac and/or iOS.
-  # Unset = no opinion; leave whatever is on disk alone.
-  # 1 = add the entitlement; 0 = remove it.
+  # Manage com.apple.developer.game-center for iOS.
+  # Unset = no opinion; 1 = add the entitlement; 0 = remove it.
   #
-  # Mac (add): seeds Build/Mac/Resources/<Project>.entitlements and registers it
-  # in DefaultEngine.ini via BOTH `PremadeMacEntitlements` and
-  # `ShippingSpecificMacEntitlements`. UE's BaseEngine.ini defaults the latter
-  # to Sandbox.NoNet.entitlements for Shipping configs and prefers it over
-  # `PremadeMacEntitlements`, so setting only the Premade key leaves Shipping
-  # pointed at the engine default (no Game Center). GenerateProjectFiles then
-  # bakes CODE_SIGN_ENTITLEMENTS into the xcconfig for every config, and
-  # automatic signing during `xcodebuild archive` provisions an embedded
-  # provisioning profile that authorizes the entitlement. The codesign step
-  # also injects the key independently into the script-generated signing plist.
-  # Mac (remove): removes the key from the .entitlements file and clears both
-  # `PremadeMacEntitlements` and `ShippingSpecificMacEntitlements` from
-  # DefaultEngine.ini so UE falls back to its engine defaults.
+  # iOS only: macOS Game Center requires Mac App Store distribution (Apple
+  # Distribution cert + MAS provisioning profile + app sandbox), which is not
+  # what ship.sh produces. Developer ID / Direct Distribution Mac apps cannot
+  # carry com.apple.developer.game-center at all — AMFI rejects the entitlement
+  # at exec time regardless of notarization, because Apple does not encode the
+  # entitlement into Developer ID provisioning profile binaries. See
+  # docs/gotchas.md "Game Center is a Mac App Store feature."
   #
-  # iOS (add): seeds Build/IOS/Resources/<Project>.entitlements (parallel to the Mac
-  # approach) and passes CODE_SIGN_ENTITLEMENTS directly to xcodebuild. Also writes
-  # bEnableGameCenterSupport=True for the UAT cook step.
+  # iOS (add): seeds Build/IOS/Resources/<Project>.entitlements and passes
+  # CODE_SIGN_ENTITLEMENTS=<path> directly to xcodebuild archive (UBT's
+  # `bEnableGameCenterSupport=True` only writes to Intermediate/IOS, which
+  # xcodebuild ignores under automatic signing). Also writes
+  # bEnableGameCenterSupport=True to DefaultEngine.ini for the UAT cook step.
   # iOS (remove): removes the key from the .entitlements file, writes False.
   [[ -n "${ENABLE_GAME_CENTER:-}" ]] || return 0
 
+  if [[ "${ENABLE_IOS:-0}" != "1" ]]; then
+    warn "ENABLE_GAME_CENTER is set but ENABLE_IOS=0 — Game Center automation is iOS-only in ship.sh (Mac Game Center requires App Store distribution; not supported here). Skipping."
+    return 0
+  fi
+
   local project_name="${UPROJECT_NAME%.uproject}"
-  local mac_ent_rel="Build/Mac/Resources/${project_name}.entitlements"
-  local mac_ent="$REPO_ROOT/$mac_ent_rel"
+  local ios_ent_rel="Build/IOS/Resources/${project_name}.entitlements"
+  local ios_ent="$REPO_ROOT/$ios_ent_rel"
 
   if [[ "$ENABLE_GAME_CENTER" == "1" ]]; then
-    # --- Add ---
-    if [[ "${IOS_ONLY:-0}" != "1" ]]; then
-      /bin/mkdir -p "$(/usr/bin/dirname "$mac_ent")"
-      if [[ ! -f "$mac_ent" ]]; then
-        cat > "$mac_ent" <<'PLIST'
+    /bin/mkdir -p "$(/usr/bin/dirname "$ios_ent")"
+    if [[ ! -f "$ios_ent" ]]; then
+      cat > "$ios_ent" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1196,112 +1158,42 @@ ensure_game_center_entitlements() {
 </dict>
 </plist>
 PLIST
-        /bin/chmod 644 "$mac_ent"
-        good "Seeded $mac_ent (commit it — UE's PremadeMacEntitlements registers this with the Xcode project)"
-      else
-        local _gc_val
-        _gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$mac_ent" 2>/dev/null || true)"
-        if [[ "$_gc_val" != "true" ]]; then
-          if [[ -n "$_gc_val" ]]; then
-            /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$mac_ent"
-          else
-            /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$mac_ent"
-          fi
-          good "Updated $mac_ent → com.apple.developer.game-center=true"
+      /bin/chmod 644 "$ios_ent"
+      good "Seeded $ios_ent (commit it — passed as CODE_SIGN_ENTITLEMENTS to xcodebuild)"
+    else
+      local _ios_gc_val
+      _ios_gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ios_ent" 2>/dev/null || true)"
+      if [[ "$_ios_gc_val" != "true" ]]; then
+        if [[ -n "$_ios_gc_val" ]]; then
+          /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$ios_ent"
         else
-          info "Mac entitlements already have Game Center: $mac_ent"
+          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$ios_ent"
         fi
-      fi
-      set_engine_ini_value \
-        "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
-        "PremadeMacEntitlements" \
-        "(FilePath=\"/Game/$mac_ent_rel\")"
-      # UE's BaseEngine.ini defaults ShippingSpecificMacEntitlements to
-      # Sandbox.NoNet.entitlements and prefers it over PremadeMacEntitlements
-      # for Shipping configs. Point it at the same seeded file so Shipping
-      # archives pick up Game Center too.
-      set_engine_ini_value \
-        "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
-        "ShippingSpecificMacEntitlements" \
-        "(FilePath=\"/Game/$mac_ent_rel\")"
-    fi
-
-    if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
-      local ios_ent_rel="Build/IOS/Resources/${project_name}.entitlements"
-      local ios_ent="$REPO_ROOT/$ios_ent_rel"
-      /bin/mkdir -p "$(/usr/bin/dirname "$ios_ent")"
-      if [[ ! -f "$ios_ent" ]]; then
-        cat > "$ios_ent" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>com.apple.developer.game-center</key>
-	<true/>
-</dict>
-</plist>
-PLIST
-        /bin/chmod 644 "$ios_ent"
-        good "Seeded $ios_ent (commit it — passed as CODE_SIGN_ENTITLEMENTS to xcodebuild)"
+        good "Updated $ios_ent → com.apple.developer.game-center=true"
       else
-        local _ios_gc_val
-        _ios_gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ios_ent" 2>/dev/null || true)"
-        if [[ "$_ios_gc_val" != "true" ]]; then
-          if [[ -n "$_ios_gc_val" ]]; then
-            /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$ios_ent"
-          else
-            /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$ios_ent"
-          fi
-          good "Updated $ios_ent → com.apple.developer.game-center=true"
-        else
-          info "iOS entitlements already have Game Center: $ios_ent"
-        fi
+        info "iOS entitlements already have Game Center: $ios_ent"
       fi
-      set_engine_ini_value \
-        "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
-        "bEnableGameCenterSupport" \
-        "True"
     fi
+    set_engine_ini_value \
+      "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
+      "bEnableGameCenterSupport" \
+      "True"
 
   else
-    # --- Remove (ENABLE_GAME_CENTER=0) ---
-    if [[ "${IOS_ONLY:-0}" != "1" ]]; then
-      if [[ -f "$mac_ent" ]]; then
-        local _gc_val
-        _gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$mac_ent" 2>/dev/null || true)"
-        if [[ -n "$_gc_val" ]]; then
-          /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.game-center" "$mac_ent"
-          good "Removed com.apple.developer.game-center from $mac_ent"
-        else
-          info "Game Center key not present in $mac_ent — nothing to remove"
-        fi
+    if [[ -f "$ios_ent" ]]; then
+      local _ios_gc_val
+      _ios_gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ios_ent" 2>/dev/null || true)"
+      if [[ -n "$_ios_gc_val" ]]; then
+        /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.game-center" "$ios_ent"
+        good "Removed com.apple.developer.game-center from $ios_ent"
+      else
+        info "Game Center key not present in $ios_ent — nothing to remove"
       fi
-      remove_engine_ini_key \
-        "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
-        "PremadeMacEntitlements"
-      remove_engine_ini_key \
-        "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
-        "ShippingSpecificMacEntitlements"
     fi
-
-    if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
-      local ios_ent_rel="Build/IOS/Resources/${project_name}.entitlements"
-      local ios_ent="$REPO_ROOT/$ios_ent_rel"
-      if [[ -f "$ios_ent" ]]; then
-        local _ios_gc_val
-        _ios_gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ios_ent" 2>/dev/null || true)"
-        if [[ -n "$_ios_gc_val" ]]; then
-          /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.game-center" "$ios_ent"
-          good "Removed com.apple.developer.game-center from $ios_ent"
-        else
-          info "Game Center key not present in $ios_ent — nothing to remove"
-        fi
-      fi
-      set_engine_ini_value \
-        "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
-        "bEnableGameCenterSupport" \
-        "False"
-    fi
+    set_engine_ini_value \
+      "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
+      "bEnableGameCenterSupport" \
+      "False"
   fi
 }
 
@@ -2491,14 +2383,18 @@ Options (highest priority):
   --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
   --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
   --game-mode / --no-game-mode       (stamp LSSupportsGameMode + GCSupportsGameMode in xcconfig, default: YES)
-  --game-center / --no-game-center   add com.apple.developer.game-center entitlement:
-                                     Mac — seeds Build/Mac/Resources/<project>.entitlements,
-                                       sets PremadeMacEntitlements in DefaultEngine.ini
-                                       (Xcode project + ship.sh codesign both get it);
-                                     iOS — writes bEnableGameCenterSupport=True to
-                                       DefaultEngine.ini (UBT injects the entitlement
-                                       into Intermediate/IOS/<target>.entitlements)
-                                     (default: off)
+  --game-center / --no-game-center   iOS-only: seed Build/IOS/Resources/<project>.entitlements
+                                     with com.apple.developer.game-center, write
+                                     bEnableGameCenterSupport=True to DefaultEngine.ini,
+                                     and pass CODE_SIGN_ENTITLEMENTS=<path> to the iOS
+                                     xcodebuild archive (UBT's intermediate entitlements
+                                     file is ignored under automatic signing). No-op for
+                                     Mac — Game Center on Mac requires App Store
+                                     distribution, which ship.sh doesn't produce
+                                     (Direct Distribution / Developer ID Mac apps
+                                     cannot carry com.apple.developer.game-center;
+                                     AMFI rejects the entitlement at launch).
+                                     Default: unset (leaves things alone).
   --app-category STRING              (INFOPLIST_KEY_LSApplicationCategoryType, e.g. public.app-category.games)
   --set-cfbundle-version STRING      set CFBundleVersion to STRING for this build
                                      AND persist it to .env as the new baseline.
@@ -3119,20 +3015,12 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   _xcb_settings=()
   [[ -n "${CFBUNDLE_VERSION:-}" ]] && _xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
 
-  # -allowProvisioningUpdates lets xcodebuild auto-fetch or auto-create the
-  # provisioning profile required by the entitlements baked into the xcconfig.
-  # This is the CLI equivalent of being logged into your team in Xcode's GUI.
-  # Required when the entitlements include restricted/provisioned keys like
-  # com.apple.developer.game-center — without the flag, automatic signing
-  # cannot reach Apple to mint a matching profile and the archive's app ends
-  # up with no embedded.provisionprofile, which AMFI then rejects at launch.
   echo "== Archive (NO CLEAN) with Automatic signing ==" >&3
   xcodebuild \
     -workspace "$WORKSPACE" \
     -scheme "$SCHEME" \
     -configuration "$XCODE_CONFIG" \
     -archivePath "$ARCHIVE_PATH" \
-    -allowProvisioningUpdates \
     archive \
     CODE_SIGN_STYLE=Automatic \
     DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
@@ -3140,47 +3028,13 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     OTHER_CODE_SIGN_FLAGS="--timestamp" \
     "${_xcb_settings[@]}"
 
-  if [[ "${ENABLE_GAME_CENTER:-0}" == "1" ]]; then
-    # Bypass `xcodebuild -exportArchive` when the binary declares restricted
-    # entitlements like com.apple.developer.game-center. Apple's portal does
-    # not encode `com.apple.developer.game-center` into Developer ID
-    # provisioning profile binaries (even when the App ID has Game Center
-    # enabled and the portal UI claims the profile does), and `-exportArchive`
-    # pre-validates restricted entitlements against the named profile and
-    # fails with "Provisioning profile ... doesn't include the Game Center
-    # capability" regardless of -allowProvisioningUpdates or signingStyle.
-    #
-    # On macOS Direct Distribution, restricted entitlements are authorized at
-    # runtime by the notarization ticket, not by an embedded profile. Pull
-    # the archive's .app out directly, drop its development provisioning
-    # profile (it's bound to the Apple Development cert and incompatible with
-    # the upcoming Developer ID re-sign), let the existing per-component
-    # re-sign apply the Developer ID signature + final entitlements, and
-    # notarize+staple as usual — the stapled ticket is what makes AMFI accept
-    # the launched app on clean machines.
-    echo "== Copy .app from archive (bypassing xcodebuild -exportArchive; ENABLE_GAME_CENTER=1) ==" >&3
-    /bin/rm -rf "$EXPORT_DIR"
-    /bin/mkdir -p "$EXPORT_DIR"
-    _archived_app="$(/usr/bin/find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit 2>/dev/null || true)"
-    [[ -n "$_archived_app" ]] || die "No .app found under $ARCHIVE_PATH/Products/Applications — archive layout unexpected."
-    /usr/bin/ditto "$_archived_app" "$EXPORT_DIR/$(/usr/bin/basename "$_archived_app")"
-    _embedded_in_archive_copy="$EXPORT_DIR/$(/usr/bin/basename "$_archived_app")/Contents/embedded.provisionprofile"
-    if [[ -f "$_embedded_in_archive_copy" ]]; then
-      /bin/rm -f "$_embedded_in_archive_copy"
-      info "Removed development embedded.provisionprofile from archive copy (incompatible with Developer ID re-sign)"
-    fi
-  else
-    echo "== Export signed app for Developer ID ==" >&3
-    # ExportOptions.plist controls how Xcode exports the archive.
-    # -allowProvisioningUpdates lets xcodebuild auto-mint the Developer ID
-    # Direct Distribution profile under method=developer-id. The script
-    # auto-detects a suitable plist in repo root when EXPORT_PLIST is unset.
-    xcodebuild -exportArchive \
-      -archivePath "$ARCHIVE_PATH" \
-      -exportPath "$EXPORT_DIR" \
-      -exportOptionsPlist "$EXPORT_PLIST" \
-      -allowProvisioningUpdates
-  fi
+  echo "== Export signed app for Developer ID ==" >&3
+  # ExportOptions.plist controls how Xcode exports the archive.
+  # This script expects you to provide one (and can auto-detect a suitable plist in repo root).
+  xcodebuild -exportArchive \
+    -archivePath "$ARCHIVE_PATH" \
+    -exportPath "$EXPORT_DIR" \
+    -exportOptionsPlist "$EXPORT_PLIST"
 else
   info "USE_XCODE_EXPORT=0 — skipping Xcode archive/export"
 fi
@@ -3260,7 +3114,6 @@ if is_placeholder "${ENTITLEMENTS_FILE:-}"; then
 else
   _ENTITLEMENTS_TMP=""
   info "Using user-provided ENTITLEMENTS_FILE: $ENTITLEMENTS_FILE"
-  [[ "${ENABLE_GAME_CENTER:-0}" == "1" ]] && warn "ENABLE_GAME_CENTER=1 but ENTITLEMENTS_FILE is user-provided — com.apple.developer.game-center was NOT injected. Add it to your entitlements file or unset ENTITLEMENTS_FILE to let the script manage it."
 fi
 
 if [[ -n "$_ENTITLEMENTS_TMP" ]]; then
@@ -3287,10 +3140,6 @@ PLIST
 <dict/>
 </plist>
 PLIST
-  fi
-  if [[ "${ENABLE_GAME_CENTER:-0}" == "1" ]]; then
-    /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$ENTITLEMENTS_FILE"
-    info "Game Center entitlement added to Mac signing plist"
   fi
 fi
 
