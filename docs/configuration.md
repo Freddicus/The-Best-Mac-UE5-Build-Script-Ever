@@ -4,6 +4,48 @@ Configuration priority (highest to lowest): **CLI flags > `.env` > auto-detect >
 
 The script auto-detects most things when run from your project root. In practice, you only need to set signing credentials and a notary profile. Everything else has a sensible default or can be found automatically.
 
+## Distribution channels
+
+Two variables decide which pipeline runs for each platform. Every downstream decision (entitlements, signing cert, ExportOptions method, upload tooling) keys off them.
+
+| Variable | Values | Default | Meaning |
+|---|---|---|---|
+| `MAC_DISTRIBUTION` | `developer-id`, `app-store`, `off` | `developer-id` | macOS channel |
+| `IOS_DISTRIBUTION` | `off`, `app-store` | `off` | iOS channel |
+
+### MAC_DISTRIBUTION
+
+- **`developer-id`** *(default)* — Direct Distribution. Developer ID Application signing, hardened runtime, notarized + stapled. Steam allowed here (and only here). **Game Center is not available** — AMFI rejects `com.apple.developer.game-center` on Developer-ID-signed Mac apps at exec, regardless of notarization. See [gotchas.md](gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only).
+- **`app-store`** — Mac App Store. Apple Distribution signing, App Sandbox (UE's `ShippingSpecificMacEntitlements` default already wires this), Game Center allowed, Steam forbidden, uploaded via `xcrun altool` to App Store Connect. The pipeline itself is **on the roadmap and currently rejected** with a clear pointer to [issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27). For now, use Xcode Organizer's `Distribute App → App Store Connect`.
+- **`off`** — Skip Mac entirely (iOS-only run). Equivalent to the legacy `IOS_ONLY=1`. Does not require `SIGN_IDENTITY`.
+
+### IOS_DISTRIBUTION
+
+- **`off`** *(default)* — Skip iOS.
+- **`app-store`** — Run the iOS pipeline (UAT → archive → IPA → optional ASC validate/upload). iOS has no other distribution channel in the US, so this is the only non-off value. Equivalent to the legacy `ENABLE_IOS=1`.
+
+### Legacy flag mapping
+
+The legacy `ENABLE_IOS` and `IOS_ONLY` variables (and the `--ios`, `--no-ios`, `--ios-only` CLI flags) remain fully supported and resolve into the dispatcher automatically:
+
+| Legacy | Resolves to |
+|---|---|
+| `ENABLE_IOS=1` | `IOS_DISTRIBUTION=app-store` |
+| `IOS_ONLY=1` | `MAC_DISTRIBUTION=off` + `IOS_DISTRIBUTION=app-store` |
+
+Explicit CLI dispatcher flags (`--mac-distribution`, `--ios-distribution`) override the legacy flags when both are present.
+
+### Compatibility matrix
+
+The script enforces these rules up-front and fails with a clear message if violated:
+
+| Combination | Rule | Why |
+|---|---|---|
+| `MAC_DISTRIBUTION=off` + `IOS_DISTRIBUTION=off` | rejected | Nothing to build. |
+| `MAC_DISTRIBUTION=app-store` + `ENABLE_STEAM=1` | rejected | Mac App Store review forbids `com.apple.security.cs.disable-library-validation` and `com.apple.security.cs.allow-dyld-environment-variables` outright. |
+| `MAC_DISTRIBUTION=developer-id` + `ENABLE_GAME_CENTER=1` for Mac (no iOS) | rejected | AMFI rejects `com.apple.developer.game-center` on Developer-ID-signed Mac apps at exec. Game Center on Mac structurally requires Mac App Store distribution. |
+| `MAC_DISTRIBUTION=app-store` | rejected (today) | Pipeline not yet wired — tracked at [issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27). Use Xcode Organizer in the meantime. |
+
 ## .env file
 
 Copy `.env.example` to `.env` next to `ship.sh`. It's sourced as shell code — only use a `.env` you trust.

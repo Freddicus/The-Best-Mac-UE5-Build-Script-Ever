@@ -35,6 +35,15 @@ The script prompts for build type (Shipping / Development) and whether to notari
 
 Run `./ship.sh --help` for all CLI flags, or `./ship.sh --print-config` to validate your configuration without building.
 
+### Distribution channels
+
+Two dispatcher variables decide which pipeline runs for each platform:
+
+- `MAC_DISTRIBUTION` ∈ `developer-id` *(default)* | `app-store` | `off`
+- `IOS_DISTRIBUTION` ∈ `off` *(default)* | `app-store`
+
+The default — `developer-id` for Mac, iOS off — matches everything the script has done since day one. `app-store` for Mac is recognized but the pipeline is on the roadmap ([issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27)); for now use Xcode Organizer's `Distribute App → App Store Connect`. Game Center is structurally a Mac-App-Store feature — see [gotchas](docs/gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only). See [configuration.md → Distribution channels](docs/configuration.md#distribution-channels) for the full rules and the compatibility matrix.
+
 ### Targeting iOS too
 
 The iOS pipeline is opt-in. To run it alongside Mac:
@@ -48,6 +57,8 @@ Or to skip Mac and build only iOS (no `SIGN_IDENTITY` required):
 ```bash
 ./ship.sh --ios-only
 ```
+
+Both legacy flags are aliases for the dispatcher (`--ios` ⇔ `--ios-distribution app-store`; `--ios-only` ⇔ `--mac-distribution off --ios-distribution app-store`) — pick whichever reads better.
 
 For App Store Connect upload, copy `iOS-ExportOptions.plist.example` to `iOS-ExportOptions.plist`, set `IOS_ASC_API_KEY_ID/ISSUER/KEY_PATH` in `.env`, and pass `--ios-upload-ipa`. See [docs/configuration.md](docs/configuration.md#ios-pipeline-opt-in) for the full iOS section.
 

@@ -6,6 +6,43 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [unreleased] — Distribution dispatcher (`MAC_DISTRIBUTION` / `IOS_DISTRIBUTION`)
+
+Carves out the two macOS distribution paths (Direct Distribution vs Mac App Store) and the single iOS path into explicit dispatcher variables, so every downstream check (entitlements, signing cert, ExportOptions method, upload tooling) has one place to consult. Foundational change with no new build behavior — `MAC_DISTRIBUTION=developer-id` (default) runs the existing pipeline unchanged.
+
+### Added
+- **`MAC_DISTRIBUTION` dispatcher** ∈ `developer-id` *(default)* | `app-store` | `off`. The `developer-id` branch is the script's existing Direct Distribution pipeline (Developer ID Application, hardened runtime, notarize + staple, Steam allowed). `app-store` is recognized — validates compatibility with other flags — but the pipeline itself is on the roadmap and currently fails fast with a clear pointer to [issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27); use Xcode Organizer's `Distribute App → App Store Connect` in the meantime. `off` skips Mac entirely (iOS-only run).
+- **`IOS_DISTRIBUTION` dispatcher** ∈ `off` *(default)* | `app-store`. iOS has no other distribution channel in the US, so this is a single-valued dispatcher today.
+- **CLI flags** `--mac-distribution VALUE` and `--ios-distribution VALUE`.
+- **`resolve_distribution_flags`** and **`validate_distribution_compatibility`** — run once after CLI parse. The resolver reconciles legacy `ENABLE_IOS` / `IOS_ONLY` flags with the new dispatcher (CLI dispatcher wins, otherwise legacy flags promote into the dispatcher, finally the dispatcher is projected back onto the legacy names so existing condition-checks keep working without a sweeping rewrite). The validator enforces the compatibility matrix below.
+- **`ROADMAP_ISSUE_URL`** script constant pointing at issue #27 — referenced from the `die` messages so the user always knows where the roadmap lives.
+
+### Compatibility matrix (enforced up-front)
+
+| Combination | Behavior | Reason |
+|---|---|---|
+| `MAC_DISTRIBUTION=off` + `IOS_DISTRIBUTION=off` | rejected | Nothing to build. |
+| `MAC_DISTRIBUTION=app-store` + `ENABLE_STEAM=1` | rejected | Mac App Store review forbids `com.apple.security.cs.disable-library-validation` and `com.apple.security.cs.allow-dyld-environment-variables`. |
+| `MAC_DISTRIBUTION=developer-id` + `ENABLE_GAME_CENTER=1` for Mac (no iOS) | rejected | AMFI rejects `com.apple.developer.game-center` on Developer-ID-signed Mac apps at exec, regardless of notarization. |
+| `MAC_DISTRIBUTION=app-store` | rejected (today) | Pipeline not yet wired — tracked at [issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27). |
+
+### Legacy compatibility (no breaking changes)
+
+- `ENABLE_IOS=1` ⇔ `IOS_DISTRIBUTION=app-store`
+- `IOS_ONLY=1` ⇔ `MAC_DISTRIBUTION=off` + `IOS_DISTRIBUTION=app-store`
+- `--ios`, `--no-ios`, `--ios-only` continue to work exactly as before. Existing `.env` files and CI configs work without changes.
+
+### Docs
+- New "Distribution channels" section near the top of `docs/configuration.md` documenting the dispatcher, the compatibility matrix, and the legacy-flag mapping.
+- `README.md` quick-start section gains a "Distribution channels" paragraph forward-referencing the new docs section.
+- `.env.example` adds commented-out `MAC_DISTRIBUTION` / `IOS_DISTRIBUTION` entries with the same documentation tone as the existing config blocks.
+
+### Roadmap (tracked in [issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27))
+- **PR-2**: Wire `MAC_DISTRIBUTION=app-store` end-to-end (Apple Distribution signing identity verification, MAS ExportOptions auto-generator, skip the manual nested-component codesign loop, skip the temp entitlements file, mirror the iOS Game Center seed for Mac, `xcrun altool -t macos` validate/upload).
+- **PR-3**: Add a `--preset NAME` layer for common configurations (`steam-mac`, `direct-mac`, `mas-mac`, `ios`, `mac+ios`, `mas+ios`).
+
+---
+
 ## [unreleased] — Add iOS pipeline; migrate Mac to xcodebuild build-setting overrides; canonical icon sync
 
 ### Removed
