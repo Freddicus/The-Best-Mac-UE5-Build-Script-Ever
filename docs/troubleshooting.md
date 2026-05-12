@@ -124,15 +124,15 @@ Both platforms require a committed entitlements file. After the first `--game-ce
 - `Build/Mac/Resources/<Project>.entitlements`
 - `Build/IOS/Resources/<Project>.entitlements`
 
-**Mac:** Every `GenerateProjectFiles.sh` run overwrites the xcconfig. If `PremadeMacEntitlements` in `DefaultEngine.ini` points to a file that doesn't exist on disk, `GenerateProjectFiles` silently skips `CODE_SIGN_ENTITLEMENTS`. Verify:
+**Mac:** Every `GenerateProjectFiles.sh` run overwrites the xcconfig. The script writes the entitlements path to **both** `PremadeMacEntitlements` and `ShippingSpecificMacEntitlements` under `[/Script/MacTargetPlatform.XcodeProjectSettings]` — UE's `BaseEngine.ini` defaults the Shipping key to `Sandbox.NoNet.entitlements` and prefers it over `PremadeMacEntitlements` for Shipping configs, so setting only one leaves Shipping pointed at the engine default (no Game Center). If either ini key points to a file that doesn't exist on disk, `GenerateProjectFiles` silently skips `CODE_SIGN_ENTITLEMENTS` for that config. Verify:
 
 ```bash
-grep CODE_SIGN_ENTITLEMENTS \
-  "Intermediate/ProjectFiles/XcconfigsMac/$(basename *.uproject .uproject).xcconfig"
-grep PremadeMacEntitlements Config/DefaultEngine.ini
+grep -E "CODE_SIGN_ENTITLEMENTS" \
+  Intermediate/ProjectFiles/XcconfigsMac/*Shipping*.xcconfig
+grep -E "PremadeMacEntitlements|ShippingSpecificMacEntitlements" Config/DefaultEngine.ini
 ```
 
-Note: ship.sh's Mac codesign step also injects `com.apple.developer.game-center` independently into the signing plist, so ship.sh-produced Mac builds are always correct even if the xcconfig path is broken. Xcode-direct Mac builds depend on the committed file.
+Note: ship.sh's Mac codesign step also injects `com.apple.developer.game-center` independently into the final signing plist, so ship.sh-produced Mac builds get the entitlement even if the xcconfig path is broken. But without the matching xcconfig entry, the archive step won't auto-create a provisioning profile that authorizes the entitlement, so the final app fails AMFI at launch — see "Mac app exits immediately at launch / 'cannot be opened' with Game Center enabled" below.
 
 **iOS:** `bEnableGameCenterSupport=True` tells UBT to write the entitlement to `Intermediate/IOS/<Target>.entitlements`, but that file is in `Intermediate/` and is not picked up by `xcodebuild` under `CODE_SIGN_STYLE=Automatic`. ship.sh passes `CODE_SIGN_ENTITLEMENTS=<path>` as a build setting override pointing to `Build/IOS/Resources/<Project>.entitlements`. If that file doesn't exist (e.g. after a clean on a machine that never committed it), the entitlement is silently dropped.
 
@@ -144,6 +144,41 @@ Verify the iOS entitlements file exists and contains the key:
 ```
 
 Should print `true`. If the file is missing, run `./ship.sh --game-center` once and commit both `.entitlements` files.
+
+## Mac app exits immediately at launch / "cannot be opened" with Game Center enabled
+
+Symptoms: the exported `.app` is signed (`codesign --verify --deep --strict` passes), notarized or not, but trying to launch it from Finder or the terminal exits the process instantly. `log show --last 2m --predicate 'eventMessage CONTAINS "<bundle id>"'` shows:
+
+```
+amfid: ... Error -413 "No matching profile found"
+  unsatisfiedEntitlements: com.apple.developer.game-center
+kernel: AMFI: Code has restricted entitlements, but the validation of
+its code signature failed.
+```
+
+`com.apple.developer.game-center` is a **restricted entitlement** — macOS AMFI requires an embedded provisioning profile inside the `.app` bundle that authorizes it. Without that profile, the kernel SIGKILLs the process at exec, regardless of how the app is signed.
+
+For the CLI flow to produce a launchable app, `xcodebuild archive` and `xcodebuild -exportArchive` both need `-allowProvisioningUpdates` (which is the CLI equivalent of being logged into your team in Xcode's GUI). The script passes the flag on both calls when `USE_XCODE_EXPORT=1`. Verify by checking the build log:
+
+```bash
+grep -E "xcodebuild .*-allowProvisioningUpdates" Saved/Logs/build_*.log | head -5
+```
+
+If the flag is absent on the Mac archive line, your `ship.sh` is out of date — pull `main`. If the flag is present but the export still produces an app without `Contents/embedded.provisionprofile`, your Apple team likely isn't authorized for Game Center on this bundle ID yet:
+
+1. Sign in at https://developer.apple.com/account
+2. Identifiers → select your bundle ID → ensure **Game Center** capability is checked
+3. Save, then re-run `./ship.sh --game-center`
+
+You can confirm the embedded profile is present after a build:
+
+```bash
+ls -la "Saved/Packages/Mac/<Project>-export/<App>.app/Contents/embedded.provisionprofile"
+security cms -D -i "Saved/Packages/Mac/<Project>-export/<App>.app/Contents/embedded.provisionprofile" \
+  | /usr/libexec/PlistBuddy -c "Print :Entitlements" /dev/stdin
+```
+
+The printed dict should include `com.apple.developer.game-center = true`.
 
 ## Getting more detail
 

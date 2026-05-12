@@ -97,17 +97,35 @@ The rejection reason is almost never surfaced in the CLI output itself.
 
 ## Game Center entitlements must be committed source files — intermediate-only paths don't reach signing
 
-**macOS:** There is no UBT ini boolean equivalent of `bEnableGameCenterSupport` for macOS. The only mechanism is `PremadeMacEntitlements` under `[/Script/MacTargetPlatform.XcodeProjectSettings]`: `GenerateProjectFiles` reads that key, resolves the file it points to, and writes `CODE_SIGN_ENTITLEMENTS = <path>` into the generated xcconfig. Nothing is ever auto-injected — the file must exist and be committed.
+**macOS:** There is no UBT ini boolean equivalent of `bEnableGameCenterSupport` for macOS. The mechanism is two ini keys under `[/Script/MacTargetPlatform.XcodeProjectSettings]`:
+
+- `PremadeMacEntitlements` — used for Debug/Development/DebugGame builds
+- `ShippingSpecificMacEntitlements` — used for **Shipping** builds; UE's `BaseEngine.ini` defaults this to `/Game/Build/Mac/Resources/Sandbox.NoNet.entitlements` and prefers it over `PremadeMacEntitlements`
+
+Setting only `PremadeMacEntitlements` leaves Shipping archives pointed at UE's stock `Sandbox.NoNet.entitlements` (no Game Center). The script sets **both** keys to the seeded `Build/Mac/Resources/<Project>.entitlements` so every config picks it up. `GenerateProjectFiles` then writes `CODE_SIGN_ENTITLEMENTS = <path>` into each per-config xcconfig.
 
 **iOS:** UBT reads `bEnableGameCenterSupport=True` from `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` and injects the entitlement into `Intermediate/IOS/<Target>.entitlements` during the build. However, this file is in `Intermediate/` and is not picked up by `xcodebuild` when using `CODE_SIGN_STYLE=Automatic` — xcodebuild defers to the provisioning portal, which only reflects what `CODE_SIGN_ENTITLEMENTS` explicitly declares. Without an explicit `CODE_SIGN_ENTITLEMENTS` build setting pointing to a real file, the Game Center entitlement is silently dropped from the IPA.
 
 The script solves both cases with committed source files:
-- Mac: seeds `Build/Mac/Resources/<Project>.entitlements` → registered via `PremadeMacEntitlements` in `DefaultEngine.ini` → `GenerateProjectFiles` bakes `CODE_SIGN_ENTITLEMENTS` into the xcconfig
+- Mac: seeds `Build/Mac/Resources/<Project>.entitlements` → both `PremadeMacEntitlements` and `ShippingSpecificMacEntitlements` in `DefaultEngine.ini` → `GenerateProjectFiles` bakes `CODE_SIGN_ENTITLEMENTS` into every config's xcconfig
 - iOS: seeds `Build/IOS/Resources/<Project>.entitlements` → passed as `CODE_SIGN_ENTITLEMENTS=<path>` directly to `xcodebuild archive` as a build setting override
 
 **Commit both files** after the first `--game-center` run. Without them in source control, any clean or teammate/CI regen loses the entitlement path.
 
-The script also independently injects `com.apple.developer.game-center` into its own Mac codesign step, so ship.sh-produced Mac builds are always correct. Xcode-direct Mac builds and all iOS builds depend on the committed files.
+## `com.apple.developer.game-center` is a restricted entitlement — AMFI kills your app without an embedded provisioning profile
+
+A Developer-ID-signed Mac app that declares `com.apple.developer.game-center` (or any other "provisioned" entitlement) **must** have a matching provisioning profile embedded at `Contents/embedded.provisionprofile`. The signature itself can be perfectly valid — `codesign --verify --deep --strict` passes, hardened runtime is on, the cert chain is fine — but at exec time the kernel's AMFI (Apple Mobile File Integrity) checks restricted entitlements against an embedded profile, and SIGKILLs the process if no profile authorizes them. The error in `log show` looks like:
+
+```
+amfid: ... not valid: Error -413 "No matching profile found"
+  unsatisfiedEntitlements: com.apple.developer.game-center
+kernel: AMFI: Code has restricted entitlements, but the validation of
+its code signature failed.
+```
+
+For the CLI pipeline to behave like Xcode's GUI, `xcodebuild archive` and `xcodebuild -exportArchive` both need `-allowProvisioningUpdates`. That flag is the CLI equivalent of being logged into your Apple team in Xcode — without it, automatic signing cannot reach Apple to mint the Developer ID Direct Distribution profile that authorizes the restricted entitlement. The script passes it on both calls when `USE_XCODE_EXPORT=1`.
+
+The post-export per-component re-sign in the script is fine: `codesign --force --sign --entitlements <file>` rewrites the signature and entitlements blob but does **not** touch `Contents/embedded.provisionprofile`, so the profile Xcode placed during export survives.
 
 ## App Sandbox and Game Mode are separate
 

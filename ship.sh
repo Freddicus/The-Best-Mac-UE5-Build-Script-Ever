@@ -1158,11 +1158,18 @@ ensure_game_center_entitlements() {
   # 1 = add the entitlement; 0 = remove it.
   #
   # Mac (add): seeds Build/Mac/Resources/<Project>.entitlements and registers it
-  # via PremadeMacEntitlements in DefaultEngine.ini so GenerateProjectFiles bakes
-  # CODE_SIGN_ENTITLEMENTS into the xcconfig. The codesign step also injects it
-  # independently into the script-generated signing plist.
-  # Mac (remove): removes the key from the .entitlements file and unregisters
-  # PremadeMacEntitlements from DefaultEngine.ini.
+  # in DefaultEngine.ini via BOTH `PremadeMacEntitlements` and
+  # `ShippingSpecificMacEntitlements`. UE's BaseEngine.ini defaults the latter
+  # to Sandbox.NoNet.entitlements for Shipping configs and prefers it over
+  # `PremadeMacEntitlements`, so setting only the Premade key leaves Shipping
+  # pointed at the engine default (no Game Center). GenerateProjectFiles then
+  # bakes CODE_SIGN_ENTITLEMENTS into the xcconfig for every config, and
+  # automatic signing during `xcodebuild archive` provisions an embedded
+  # provisioning profile that authorizes the entitlement. The codesign step
+  # also injects the key independently into the script-generated signing plist.
+  # Mac (remove): removes the key from the .entitlements file and clears both
+  # `PremadeMacEntitlements` and `ShippingSpecificMacEntitlements` from
+  # DefaultEngine.ini so UE falls back to its engine defaults.
   #
   # iOS (add): seeds Build/IOS/Resources/<Project>.entitlements (parallel to the Mac
   # approach) and passes CODE_SIGN_ENTITLEMENTS directly to xcodebuild. Also writes
@@ -1208,6 +1215,14 @@ PLIST
       set_engine_ini_value \
         "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
         "PremadeMacEntitlements" \
+        "(FilePath=\"/Game/$mac_ent_rel\")"
+      # UE's BaseEngine.ini defaults ShippingSpecificMacEntitlements to
+      # Sandbox.NoNet.entitlements and prefers it over PremadeMacEntitlements
+      # for Shipping configs. Point it at the same seeded file so Shipping
+      # archives pick up Game Center too.
+      set_engine_ini_value \
+        "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
+        "ShippingSpecificMacEntitlements" \
         "(FilePath=\"/Game/$mac_ent_rel\")"
     fi
 
@@ -1264,6 +1279,9 @@ PLIST
       remove_engine_ini_key \
         "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
         "PremadeMacEntitlements"
+      remove_engine_ini_key \
+        "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
+        "ShippingSpecificMacEntitlements"
     fi
 
     if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
@@ -3101,12 +3119,20 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   _xcb_settings=()
   [[ -n "${CFBUNDLE_VERSION:-}" ]] && _xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
 
+  # -allowProvisioningUpdates lets xcodebuild auto-fetch or auto-create the
+  # provisioning profile required by the entitlements baked into the xcconfig.
+  # This is the CLI equivalent of being logged into your team in Xcode's GUI.
+  # Required when the entitlements include restricted/provisioned keys like
+  # com.apple.developer.game-center — without the flag, automatic signing
+  # cannot reach Apple to mint a matching profile and the archive's app ends
+  # up with no embedded.provisionprofile, which AMFI then rejects at launch.
   echo "== Archive (NO CLEAN) with Automatic signing ==" >&3
   xcodebuild \
     -workspace "$WORKSPACE" \
     -scheme "$SCHEME" \
     -configuration "$XCODE_CONFIG" \
     -archivePath "$ARCHIVE_PATH" \
+    -allowProvisioningUpdates \
     archive \
     CODE_SIGN_STYLE=Automatic \
     DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
@@ -3115,12 +3141,16 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
     "${_xcb_settings[@]}"
 
   echo "== Export signed app for Developer ID ==" >&3
-  # ExportOptions.plist controls how Xcode exports the archive.
-  # This script expects you to provide one (and can auto-detect a suitable plist in repo root).
+  # ExportOptions.plist controls how Xcode exports the archive. -exportArchive
+  # also gets -allowProvisioningUpdates so it can auto-mint the Developer ID
+  # Direct Distribution profile that re-signs the app under method=developer-id.
+  # This script expects you to provide an ExportOptions.plist (and can
+  # auto-detect a suitable plist in repo root).
   xcodebuild -exportArchive \
     -archivePath "$ARCHIVE_PATH" \
     -exportPath "$EXPORT_DIR" \
-    -exportOptionsPlist "$EXPORT_PLIST"
+    -exportOptionsPlist "$EXPORT_PLIST" \
+    -allowProvisioningUpdates
 else
   info "USE_XCODE_EXPORT=0 — skipping Xcode archive/export"
 fi
