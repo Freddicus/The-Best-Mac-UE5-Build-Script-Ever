@@ -1167,7 +1167,7 @@ PLIST
     set_engine_ini_value \
       "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
       "PremadeMacEntitlements" \
-      "/Game/$mac_ent_rel"
+      "(FilePath=\"/Game/$mac_ent_rel\")"
   fi
 
   if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
