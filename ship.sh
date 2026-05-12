@@ -1123,52 +1123,106 @@ ensure_app_category_in_engine_ini() {
     "$APP_CATEGORY"
 }
 
-_ensure_game_center_entitlement_for_platform() {
-  # Per-platform worker for ensure_game_center_entitlements. $1 is the
-  # entitlements file path; $2 is "add" or "remove". Idempotent.
-  local ent_path="$1" action="$2"
+_seed_entitlements_file_if_missing() {
+  # Create a minimal entitlements plist at $1 if it doesn't exist. The body
+  # is an empty <dict/> so subsequent _set_entitlement_bool / PlistBuddy
+  # Add calls have a valid container to write into. Idempotent.
+  local ent_path="$1"
+  [[ -f "$ent_path" ]] && return 0
 
-  if [[ "$action" == "add" ]]; then
-    /bin/mkdir -p "$(/usr/bin/dirname "$ent_path")"
-    if [[ ! -f "$ent_path" ]]; then
-      cat > "$ent_path" <<'PLIST'
+  /bin/mkdir -p "$(/usr/bin/dirname "$ent_path")"
+  cat > "$ent_path" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict>
-	<key>com.apple.developer.game-center</key>
-	<true/>
-</dict>
+<dict/>
 </plist>
 PLIST
-      /bin/chmod 644 "$ent_path"
-      good "Seeded $ent_path (commit it — passed as CODE_SIGN_ENTITLEMENTS to xcodebuild)"
-    else
-      local _gc_val
-      _gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ent_path" 2>/dev/null || true)"
-      if [[ "$_gc_val" != "true" ]]; then
-        if [[ -n "$_gc_val" ]]; then
-          /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$ent_path"
-        else
-          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$ent_path"
-        fi
-        good "Updated $ent_path → com.apple.developer.game-center=true"
-      else
-        info "Entitlements already have Game Center: $ent_path"
-      fi
-    fi
-  else
-    if [[ -f "$ent_path" ]]; then
-      local _gc_val
-      _gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ent_path" 2>/dev/null || true)"
-      if [[ -n "$_gc_val" ]]; then
-        /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.game-center" "$ent_path"
-        good "Removed com.apple.developer.game-center from $ent_path"
-      else
-        info "Game Center key not present in $ent_path — nothing to remove"
-      fi
-    fi
+  /bin/chmod 644 "$ent_path"
+  good "Seeded empty entitlements file $ent_path (commit it — populated by subsequent helpers, passed as CODE_SIGN_ENTITLEMENTS to xcodebuild)"
+}
+
+_set_entitlement_bool() {
+  # Idempotent bool setter for a top-level entitlements key. Skips when the
+  # current value already matches. Adds the key if absent, Sets if present
+  # with a different value. The plist must already exist — call
+  # _seed_entitlements_file_if_missing first.
+  #   $1 = entitlements file path
+  #   $2 = key (e.g. com.apple.security.app-sandbox)
+  #   $3 = "true" or "false"
+  local ent_path="$1" key="$2" value="$3"
+  local current
+  current="$(/usr/libexec/PlistBuddy -c "Print :$key" "$ent_path" 2>/dev/null || true)"
+  if [[ "$current" == "$value" ]]; then
+    info "Entitlements file $ent_path already has $key=$value"
+    return 0
   fi
+  if [[ -n "$current" ]]; then
+    /usr/libexec/PlistBuddy -c "Set :$key $value" "$ent_path"
+  else
+    /usr/libexec/PlistBuddy -c "Add :$key bool $value" "$ent_path"
+  fi
+  good "Updated $ent_path → $key=$value"
+}
+
+_delete_entitlement_key_if_present() {
+  # Remove a key from an entitlements file if present. Idempotent: no-op
+  # when the file doesn't exist or the key isn't there.
+  local ent_path="$1" key="$2"
+  [[ -f "$ent_path" ]] || return 0
+  local current
+  current="$(/usr/libexec/PlistBuddy -c "Print :$key" "$ent_path" 2>/dev/null || true)"
+  if [[ -n "$current" ]]; then
+    /usr/libexec/PlistBuddy -c "Delete :$key" "$ent_path"
+    good "Removed $key from $ent_path"
+  else
+    info "$key not present in $ent_path — nothing to remove"
+  fi
+}
+
+_ensure_game_center_entitlement_for_platform() {
+  # Per-platform worker for ensure_game_center_entitlements. $1 is the
+  # entitlements file path; $2 is "add" or "remove". Idempotent. Composes
+  # on top of an existing entitlements file via _set_entitlement_bool —
+  # other keys (sandbox, network.client, etc.) are untouched.
+  local ent_path="$1" action="$2"
+
+  if [[ "$action" == "add" ]]; then
+    _seed_entitlements_file_if_missing "$ent_path"
+    _set_entitlement_bool "$ent_path" "com.apple.developer.game-center" "true"
+  else
+    _delete_entitlement_key_if_present "$ent_path" "com.apple.developer.game-center"
+  fi
+}
+
+mac_app_store_entitlements_path() {
+  # Single source of truth for the Mac App Store entitlements file path.
+  # Used by ensure_mac_app_store_entitlements (the seeder) and the MAS
+  # archive command (CODE_SIGN_ENTITLEMENTS). Lives in
+  # Build/Mac/Resources/<Project>.entitlements — UE's canonical location.
+  printf '%s' "$REPO_ROOT/Build/Mac/Resources/${UPROJECT_NAME%.uproject}.entitlements"
+}
+
+ensure_mac_app_store_entitlements() {
+  # Mac App Store baseline: com.apple.security.app-sandbox=true is REQUIRED.
+  # ASC rejects any MAS upload without it. UE ships
+  # Build/Mac/Resources/Sandbox.NoNet.entitlements as its stock template for
+  # Shipping (referenced via ShippingSpecificMacEntitlements in BaseEngine.ini)
+  # — but as soon as we pass CODE_SIGN_ENTITLEMENTS=<path> to xcodebuild
+  # archive (which we always do under MAC_DISTRIBUTION=app-store for Game
+  # Center + future extensions), that override shadows UE's path. So this
+  # helper owns the canonical MAS entitlements file at
+  # Build/Mac/Resources/<Project>.entitlements and seeds the sandbox key
+  # before any other entitlement helpers (Game Center, etc.) run.
+  #
+  # Idempotent. Composes cleanly with ensure_game_center_entitlements, which
+  # only touches the game-center / network.client keys via PlistBuddy.
+  [[ "${MAC_DISTRIBUTION:-developer-id}" == "app-store" ]] || return 0
+
+  local ent_path
+  ent_path="$(mac_app_store_entitlements_path)"
+  _seed_entitlements_file_if_missing "$ent_path"
+  _set_entitlement_bool "$ent_path" "com.apple.security.app-sandbox" "true"
 }
 
 ensure_game_center_entitlements() {
@@ -1178,9 +1232,13 @@ ensure_game_center_entitlements() {
   # Eligible channels:
   #   - iOS (IOS_DISTRIBUTION=app-store): seeds Build/IOS/Resources/<Project>.entitlements
   #     and writes bEnableGameCenterSupport under [/Script/IOSRuntimeSettings.IOSRuntimeSettings].
-  #   - Mac App Store (MAC_DISTRIBUTION=app-store): seeds
-  #     Build/Mac/Resources/<Project>.entitlements and writes bEnableGameCenterSupport
-  #     under [/Script/MacRuntimeSettings.MacRuntimeSettings].
+  #   - Mac App Store (MAC_DISTRIBUTION=app-store): updates
+  #     Build/Mac/Resources/<Project>.entitlements (already seeded with
+  #     sandbox by ensure_mac_app_store_entitlements), adds
+  #     com.apple.developer.game-center=true AND com.apple.security.network.client=true
+  #     (Game Center cannot reach Apple's servers without outbound network),
+  #     and writes bEnableGameCenterSupport under
+  #     [/Script/MacRuntimeSettings.MacRuntimeSettings].
   #
   # Not eligible: MAC_DISTRIBUTION=developer-id — AMFI rejects
   # com.apple.developer.game-center on Developer-ID-signed Mac apps at exec
@@ -1210,8 +1268,18 @@ ensure_game_center_entitlements() {
   fi
 
   if [[ "${MAC_DISTRIBUTION:-developer-id}" == "app-store" ]]; then
-    local mac_ent="$REPO_ROOT/Build/Mac/Resources/${project_name}.entitlements"
+    local mac_ent
+    mac_ent="$(mac_app_store_entitlements_path)"
     _ensure_game_center_entitlement_for_platform "$mac_ent" "$action"
+    if [[ "$action" == "add" ]]; then
+      # Game Center talks to Apple's servers — without
+      # com.apple.security.network.client the entitlement is technically
+      # present but the SDK's network calls fail silently from inside the
+      # sandbox. Auto-add. (User can remove from the file if they truly
+      # don't want it; our idempotent setter only fires when value differs.)
+      info "Enabling com.apple.security.network.client (required for Game Center to reach Apple servers from the sandbox)"
+      _set_entitlement_bool "$mac_ent" "com.apple.security.network.client" "true"
+    fi
     set_engine_ini_value \
       "[/Script/MacRuntimeSettings.MacRuntimeSettings]" \
       "bEnableGameCenterSupport" \
@@ -3451,6 +3519,7 @@ ensure_macos_canonical_appicon
 ensure_ios_canonical_appicon
 ensure_app_category_in_engine_ini
 ensure_marketing_version_in_engine_ini
+ensure_mac_app_store_entitlements
 ensure_game_center_entitlements
 regenerate_project_files
 
@@ -3932,12 +4001,13 @@ if [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
   # documented: command-line build settings beat xcconfig.
   _mas_xcb_settings=()
   [[ -n "${CFBUNDLE_VERSION:-}" ]] && _mas_xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
-  # Mac Game Center is allowed on this channel (the entitlement only flies
-  # under MAS provisioning). The .entitlements file was seeded by
-  # ensure_game_center_entitlements() pre-archive.
-  if [[ "${ENABLE_GAME_CENTER:-}" == "1" ]]; then
-    _mas_xcb_settings+=("CODE_SIGN_ENTITLEMENTS=$REPO_ROOT/Build/Mac/Resources/${UPROJECT_NAME%.uproject}.entitlements")
-  fi
+  # Always pass CODE_SIGN_ENTITLEMENTS for MAS. The file was seeded by
+  # ensure_mac_app_store_entitlements() (sandbox=true, MAS-mandatory) and
+  # extended by ensure_game_center_entitlements() when ENABLE_GAME_CENTER=1
+  # (adds Game Center + network.client). Without this override, xcodebuild
+  # would fall back to UE's xcconfig CODE_SIGN_ENTITLEMENTS path which the
+  # MAS-channel-specific keys never reach.
+  _mas_xcb_settings+=("CODE_SIGN_ENTITLEMENTS=$(mac_app_store_entitlements_path)")
 
   echo "== Mac App Store Archive (automatic provisioning) ==" >&3
   xcodebuild \
