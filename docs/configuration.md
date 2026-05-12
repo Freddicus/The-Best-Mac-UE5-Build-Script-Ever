@@ -95,14 +95,15 @@ CLI flags override `.env`. Both forms are equivalent — you can mix and match.
 The script does not require you to set up or maintain the Xcode workspace manually.
 
 **Auto-detection behavior:**
+- Workspace detection runs **after** `GenerateProjectFiles.sh`, so a first-time run always has a workspace to detect.
 - If exactly one `.xcworkspace` is found under `REPO_ROOT`, it's used automatically.
 - If multiple workspaces are found, you're prompted to choose (interactive runs only).
-- If no workspace is found, the script offers to run `GenerateProjectFiles.sh` to create one.
-- In non-interactive contexts (CI), the script fails with a clear error if it can't resolve the workspace uniquely — set `XCODE_WORKSPACE` explicitly.
+- If no workspace is found after generation, the script fails with a clear error — set `XCODE_WORKSPACE` explicitly or check that `UPROJECT_PATH` is valid.
+- In CI, set `XCODE_WORKSPACE` explicitly.
 
 ### Project files are regenerated every ship
 
-By default the script runs `GenerateProjectFiles.sh` **before every Xcode build**, regardless of whether the workspace already exists. This is not just for first-time setup.
+By default the script runs `GenerateProjectFiles.sh` **before every Xcode build**, regardless of whether the workspace already exists. On a first-time run this creates the workspace; on subsequent runs it keeps the pbxproj in sync with your `Build/{Platform}/Resources/` inputs.
 
 UBT bakes resolved absolute paths from `Build/{Platform}/Resources/` into `Intermediate/ProjectFilesMac/<Project> (Mac).xcodeproj/project.pbxproj` at *project-file-generation time*, not at xcodebuild time. The path priority list in `Engine/Source/Programs/UnrealBuildTool/ProjectFiles/Xcode/XcodeProject.cs::ProcessAssets` (modern Xcode mode) is walked once during regeneration; the resolved absolute paths are then frozen into the pbxproj.
 
@@ -111,7 +112,7 @@ Implications:
 - **Editing the contents** of an already-referenced file *does* flow through (Xcode reads it at build time).
 - Changes to `[/Script/MacTargetPlatform.XcodeProjectSettings] ExtraFolderToCopyToApp` and similar config-driven resource hooks also require a regen.
 
-The regen runs early in the build pipeline, before `update_xcconfig_versions` (which stamps the freshly-generated xcconfig). It's cheap (~few seconds) and idempotent. Disable it with `REGEN_PROJECT_FILES=0` or `--no-regen-project-files` if you have a specific reason — the most common is if you need a `--no-xcode-export` UAT-only build, where the regen is also skipped automatically.
+The regen runs before workspace detection and the Xcode archive step. It's cheap (~few seconds) and idempotent. Disable it with `REGEN_PROJECT_FILES=0` or `--no-regen-project-files` if you have a specific reason — the most common is a `--no-xcode-export` UAT-only build, where regen is also skipped automatically. If `REGEN_PROJECT_FILES=0` and no workspace is found, the script fails with a clear message.
 
 To generate or regenerate a workspace manually:
 
