@@ -3100,6 +3100,15 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   # leaves CFBUNDLE_VERSION empty when USE_UE_PACKAGE_VERSION_COUNTER=1).
   _xcb_settings=()
   [[ -n "${CFBUNDLE_VERSION:-}" ]] && _xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
+  # Suppress CODE_SIGN_ENTITLEMENTS from the xcconfig (set by PremadeMacEntitlements
+  # when ENABLE_GAME_CENTER=1). With CODE_SIGN_STYLE=Automatic, Xcode sees a
+  # provisioned entitlement like com.apple.developer.game-center and embeds a Mac
+  # development provisioning profile in the archive. That embedded.provisionprofile
+  # persists through export and conflicts with ship.sh's Developer ID re-sign, causing
+  # macOS to block the app at launch ("can't be opened"). ship.sh re-signs the
+  # exported app with its own full entitlements set, so CODE_SIGN_ENTITLEMENTS during
+  # archive is irrelevant and safe to suppress.
+  _xcb_settings+=("CODE_SIGN_ENTITLEMENTS=")
 
   echo "== Archive (NO CLEAN) with Automatic signing ==" >&3
   xcodebuild \
@@ -3140,6 +3149,17 @@ else
     /bin/ls -la "$BUILD_DIR" >&3 || true
     die "No .app found under build dir: $BUILD_DIR — UAT output layouts differ by project/settings. Try enabling Xcode export (USE_XCODE_EXPORT=1) or point the script at the correct output."
   fi
+fi
+
+# Belt-and-suspenders: remove any embedded.provisionprofile that Xcode may have
+# placed during archive (can happen when the xcconfig's CODE_SIGN_ENTITLEMENTS
+# references a provisioned entitlement and automatic provisioning creates a profile).
+# A Developer ID signed .app must NOT contain a provisioning profile — its presence
+# with a Developer ID signature causes macOS to block the app at launch.
+_embedded_profile="$APP_PATH/Contents/embedded.provisionprofile"
+if [[ -f "$_embedded_profile" ]]; then
+  /bin/rm -f "$_embedded_profile"
+  info "Removed embedded.provisionprofile from app bundle (not valid for Developer ID distribution)"
 fi
 
 if [[ "$ENABLE_STEAM" == "1" ]]; then
