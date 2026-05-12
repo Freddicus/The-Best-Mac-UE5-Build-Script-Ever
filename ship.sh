@@ -871,6 +871,7 @@ print_config() {
   fi
   echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, leaves DefaultEngine.ini VersionInfo untouched>}" >&3
   echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, leaves Info.Template.plist GameMode keys untouched>}" >&3
+  echo "ENABLE_GAME_CENTER: ${ENABLE_GAME_CENTER:-0} (1=add com.apple.developer.game-center to Mac codesign + iOS entitlements)" >&3
   echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, leaves DefaultEngine.ini AppCategory untouched>}" >&3
   local _cfbv_now _cfbv_next
   _cfbv_now="${CFBUNDLE_VERSION:-0}"
@@ -1143,6 +1144,68 @@ ensure_app_category_in_engine_ini() {
     "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
     "AppCategory" \
     "$APP_CATEGORY"
+}
+
+ensure_game_center_entitlements() {
+  # Wire up com.apple.developer.game-center for Mac and/or iOS when
+  # ENABLE_GAME_CENTER=1.
+  #
+  # Mac: seeds Build/Mac/Resources/<Project>.entitlements and registers it via
+  # PremadeMacEntitlements in DefaultEngine.ini so that GenerateProjectFiles
+  # bakes CODE_SIGN_ENTITLEMENTS into the xcconfig (Xcode-direct builds also
+  # get the entitlement). The ship.sh codesign step injects it independently
+  # into the generated temp entitlements plist below (see entitlements block).
+  #
+  # iOS: writes bEnableGameCenterSupport=True to DefaultEngine.ini so that UBT
+  # injects the entitlement into Intermediate/IOS/<Target>.entitlements during
+  # the xcodebuild archive.
+  [[ "${ENABLE_GAME_CENTER:-0}" == "1" ]] || return 0
+
+  local project_name="${UPROJECT_NAME%.uproject}"
+
+  if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+    local mac_ent_rel="Build/Mac/Resources/${project_name}.entitlements"
+    local mac_ent="$REPO_ROOT/$mac_ent_rel"
+    /bin/mkdir -p "$(/usr/bin/dirname "$mac_ent")"
+    if [[ ! -f "$mac_ent" ]]; then
+      cat > "$mac_ent" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.game-center</key>
+	<true/>
+</dict>
+</plist>
+PLIST
+      /bin/chmod 644 "$mac_ent"
+      good "Seeded $mac_ent (commit it — UE's PremadeMacEntitlements registers this with the Xcode project)"
+    else
+      local _gc_val
+      _gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$mac_ent" 2>/dev/null || true)"
+      if [[ "$_gc_val" != "true" ]]; then
+        if [[ -n "$_gc_val" ]]; then
+          /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$mac_ent"
+        else
+          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$mac_ent"
+        fi
+        good "Updated $mac_ent → com.apple.developer.game-center=true"
+      else
+        info "Mac entitlements already have Game Center: $mac_ent"
+      fi
+    fi
+    set_engine_ini_value \
+      "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
+      "PremadeMacEntitlements" \
+      "/Game/$mac_ent_rel"
+  fi
+
+  if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+    set_engine_ini_value \
+      "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
+      "bEnableGameCenterSupport" \
+      "True"
+  fi
 }
 
 seed_mac_info_template_plist() {
@@ -2229,6 +2292,7 @@ VERSION_STRING="${VERSION_STRING:-}"
 VERSION_CONTENT_DIR="${VERSION_CONTENT_DIR:-BuildInfo}"
 MARKETING_VERSION="${MARKETING_VERSION:-}"
 ENABLE_GAME_MODE="${ENABLE_GAME_MODE:-}"
+ENABLE_GAME_CENTER="${ENABLE_GAME_CENTER:-0}"
 APP_CATEGORY="${APP_CATEGORY:-}"
 CFBUNDLE_VERSION="${CFBUNDLE_VERSION:-}"
 
@@ -2347,6 +2411,14 @@ Options (highest priority):
   --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
   --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
   --game-mode / --no-game-mode       (stamp LSSupportsGameMode + GCSupportsGameMode in xcconfig, default: YES)
+  --game-center / --no-game-center   add com.apple.developer.game-center entitlement:
+                                     Mac — seeds Build/Mac/Resources/<project>.entitlements,
+                                       sets PremadeMacEntitlements in DefaultEngine.ini
+                                       (Xcode project + ship.sh codesign both get it);
+                                     iOS — writes bEnableGameCenterSupport=True to
+                                       DefaultEngine.ini (UBT injects the entitlement
+                                       into Intermediate/IOS/<target>.entitlements)
+                                     (default: off)
   --app-category STRING              (INFOPLIST_KEY_LSApplicationCategoryType, e.g. public.app-category.games)
   --set-cfbundle-version STRING      set CFBundleVersion to STRING for this build
                                      AND persist it to .env as the new baseline.
@@ -2453,6 +2525,8 @@ while [[ $# -gt 0 ]]; do
     --marketing-version)        MARKETING_VERSION="$2"; shift 2 ;;
     --game-mode)                ENABLE_GAME_MODE="1"; shift ;;
     --no-game-mode)             ENABLE_GAME_MODE="0"; shift ;;
+    --game-center)              ENABLE_GAME_CENTER="1"; shift ;;
+    --no-game-center)           ENABLE_GAME_CENTER="0"; shift ;;
     --app-category)             APP_CATEGORY="$2"; shift 2 ;;
     --set-cfbundle-version)     CFBUNDLE_VERSION="$2"; CLI_SET_CFBUNDLE_VERSION=1; shift 2 ;;
     --bump-major|--bump-minor|--bump-patch)
@@ -2913,6 +2987,7 @@ ensure_macos_canonical_appicon
 ensure_ios_canonical_appicon
 ensure_app_category_in_engine_ini
 ensure_marketing_version_in_engine_ini
+ensure_game_center_entitlements
 regenerate_project_files
 
 if [[ "${IOS_ONLY:-0}" != "1" ]]; then
@@ -3044,6 +3119,7 @@ if is_placeholder "${ENTITLEMENTS_FILE:-}"; then
 else
   _ENTITLEMENTS_TMP=""
   info "Using user-provided ENTITLEMENTS_FILE: $ENTITLEMENTS_FILE"
+  [[ "${ENABLE_GAME_CENTER:-0}" == "1" ]] && warn "ENABLE_GAME_CENTER=1 but ENTITLEMENTS_FILE is user-provided — com.apple.developer.game-center was NOT injected. Add it to your entitlements file or unset ENTITLEMENTS_FILE to let the script manage it."
 fi
 
 if [[ -n "$_ENTITLEMENTS_TMP" ]]; then
@@ -3070,6 +3146,10 @@ PLIST
 <dict/>
 </plist>
 PLIST
+  fi
+  if [[ "${ENABLE_GAME_CENTER:-0}" == "1" ]]; then
+    /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$ENTITLEMENTS_FILE"
+    info "Game Center entitlement added to Mac signing plist"
   fi
 fi
 

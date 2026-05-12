@@ -30,3 +30,15 @@ Some Steam features (overlay, client-injected libraries) require two non-standar
 These are **only added when `ENABLE_STEAM=1`**. They weaken your app's security posture by allowing unsigned libraries to be injected at launch — don't add them unless you need them.
 
 If you don't use Steam or don't need the overlay: keep `ENABLE_STEAM=0`.
+
+## Combining Steam and Game Center
+
+`ENABLE_STEAM=1` and `ENABLE_GAME_CENTER=1` can be set together. The script-generated codesign plist will contain all three keys:
+
+```xml
+<key>com.apple.security.cs.disable-library-validation</key><true/>
+<key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+<key>com.apple.developer.game-center</key><true/>
+```
+
+The Steam keys and the Game Center key serve unrelated purposes and do not conflict.

@@ -118,6 +118,25 @@ The xcconfig at `Intermediate/ProjectFiles/XcconfigsMac/<project>.xcconfig` does
   -game
 ```
 
+## Game Center entitlement disappears after project regeneration
+
+Every `GenerateProjectFiles.sh` run (including the automatic regen ship.sh does before each build) overwrites `Intermediate/ProjectFiles/XcconfigsMac/*.xcconfig`. If `PremadeMacEntitlements` in `DefaultEngine.ini` points to a file that doesn't exist on disk, `GenerateProjectFiles` silently skips `CODE_SIGN_ENTITLEMENTS` — and Xcode drops the entitlement.
+
+The fix is to commit `Build/Mac/Resources/<Project>.entitlements` to source control after the first `--game-center` run. Verify it landed in the xcconfig:
+
+```bash
+grep CODE_SIGN_ENTITLEMENTS \
+  "Intermediate/ProjectFiles/XcconfigsMac/$(basename *.uproject .uproject).xcconfig"
+```
+
+If that key is absent, either the file wasn't committed or the `PremadeMacEntitlements` value in `DefaultEngine.ini` doesn't match the actual path. Run `./ship.sh --print-config` and check the `DefaultEngine.ini` directly:
+
+```bash
+grep PremadeMacEntitlements Config/DefaultEngine.ini
+```
+
+Note: ship.sh's codesign step injects `com.apple.developer.game-center` independently into the signing plist regardless of the xcconfig state — so ship.sh-produced builds are always correct. Xcode-direct builds depend on the committed file.
+
 ## Getting more detail
 
 The full log is at `Logs/build_YYYY-MM-DD_HH-MM-SS.log`. All command output from UAT, `xcodebuild`, `codesign`, and `notarytool` goes there. The terminal only shows status lines.

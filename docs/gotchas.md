@@ -95,6 +95,16 @@ xcrun notarytool log <submission-id> --keychain-profile "MyNotaryProfile"
 
 The rejection reason is almost never surfaced in the CLI output itself.
 
+## macOS Game Center has no UBT ini boolean — the entitlements file must exist
+
+For iOS, UBT reads `bEnableGameCenterSupport=True` from `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` in `DefaultEngine.ini` and automatically injects `com.apple.developer.game-center` into `Intermediate/IOS/<Target>.entitlements` during the build. There is no equivalent for macOS anywhere in UBT or `XcodeProject.cs`.
+
+For macOS, the only mechanism is `PremadeMacEntitlements` under `[/Script/MacTargetPlatform.XcodeProjectSettings]`: `GenerateProjectFiles` reads that key, resolves the file it points to, and writes `CODE_SIGN_ENTITLEMENTS = <path>` into the generated xcconfig. Nothing is ever auto-injected — the file must exist and be committed.
+
+If you add `ENABLE_GAME_CENTER=1` to `.env`, the script seeds `Build/Mac/Resources/<Project>.entitlements` and writes the `PremadeMacEntitlements` key on first run. **Commit that `.entitlements` file** — without it in source control, any teammate or CI machine that regenerates project files won't have the file the xcconfig points to, and codesigning will silently drop the entitlement.
+
+The script also independently injects `com.apple.developer.game-center` into its own codesign step (the `codesign --entitlements` call that re-signs the exported `.app`), so the shipped binary always gets the entitlement from ship.sh even if the Xcode project path is broken. But Xcode-direct builds (without ship.sh) rely entirely on the committed file.
+
 ## App Sandbox and Game Mode are separate
 
 Enabling macOS Game Mode (`LSSupportsGameMode`) does not require the App Sandbox. Game Mode just tells macOS to deprioritize background processes while a controller is connected. You can and should enable it for any game — it has no security implications and no entitlement requirements.
