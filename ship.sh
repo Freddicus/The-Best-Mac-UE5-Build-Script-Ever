@@ -1164,9 +1164,10 @@ ensure_game_center_entitlements() {
   # Mac (remove): removes the key from the .entitlements file and unregisters
   # PremadeMacEntitlements from DefaultEngine.ini.
   #
-  # iOS (add): writes bEnableGameCenterSupport=True so UBT injects the entitlement
-  # into Intermediate/IOS/<Target>.entitlements during the xcodebuild archive.
-  # iOS (remove): writes bEnableGameCenterSupport=False.
+  # iOS (add): seeds Build/IOS/Resources/<Project>.entitlements (parallel to the Mac
+  # approach) and passes CODE_SIGN_ENTITLEMENTS directly to xcodebuild. Also writes
+  # bEnableGameCenterSupport=True for the UAT cook step.
+  # iOS (remove): removes the key from the .entitlements file, writes False.
   [[ -n "${ENABLE_GAME_CENTER:-}" ]] || return 0
 
   local project_name="${UPROJECT_NAME%.uproject}"
@@ -1211,6 +1212,36 @@ PLIST
     fi
 
     if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+      local ios_ent_rel="Build/IOS/Resources/${project_name}.entitlements"
+      local ios_ent="$REPO_ROOT/$ios_ent_rel"
+      /bin/mkdir -p "$(/usr/bin/dirname "$ios_ent")"
+      if [[ ! -f "$ios_ent" ]]; then
+        cat > "$ios_ent" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.game-center</key>
+	<true/>
+</dict>
+</plist>
+PLIST
+        /bin/chmod 644 "$ios_ent"
+        good "Seeded $ios_ent (commit it — passed as CODE_SIGN_ENTITLEMENTS to xcodebuild)"
+      else
+        local _ios_gc_val
+        _ios_gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ios_ent" 2>/dev/null || true)"
+        if [[ "$_ios_gc_val" != "true" ]]; then
+          if [[ -n "$_ios_gc_val" ]]; then
+            /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$ios_ent"
+          else
+            /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$ios_ent"
+          fi
+          good "Updated $ios_ent → com.apple.developer.game-center=true"
+        else
+          info "iOS entitlements already have Game Center: $ios_ent"
+        fi
+      fi
       set_engine_ini_value \
         "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
         "bEnableGameCenterSupport" \
@@ -1236,6 +1267,18 @@ PLIST
     fi
 
     if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+      local ios_ent_rel="Build/IOS/Resources/${project_name}.entitlements"
+      local ios_ent="$REPO_ROOT/$ios_ent_rel"
+      if [[ -f "$ios_ent" ]]; then
+        local _ios_gc_val
+        _ios_gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ios_ent" 2>/dev/null || true)"
+        if [[ -n "$_ios_gc_val" ]]; then
+          /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.game-center" "$ios_ent"
+          good "Removed com.apple.developer.game-center from $ios_ent"
+        else
+          info "Game Center key not present in $ios_ent — nothing to remove"
+        fi
+      fi
       set_engine_ini_value \
         "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
         "bEnableGameCenterSupport" \
@@ -3482,6 +3525,9 @@ if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
   # the same number.
   _ios_xcb_settings=()
   [[ -n "${CFBUNDLE_VERSION:-}" ]] && _ios_xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
+  if [[ "${ENABLE_GAME_CENTER:-}" == "1" ]]; then
+    _ios_xcb_settings+=("CODE_SIGN_ENTITLEMENTS=$REPO_ROOT/Build/IOS/Resources/${UPROJECT_NAME%.uproject}.entitlements")
+  fi
 
   echo "== iOS Archive ==" >&3
   xcodebuild \

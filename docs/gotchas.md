@@ -95,15 +95,19 @@ xcrun notarytool log <submission-id> --keychain-profile "MyNotaryProfile"
 
 The rejection reason is almost never surfaced in the CLI output itself.
 
-## macOS Game Center has no UBT ini boolean — the entitlements file must exist
+## Game Center entitlements must be committed source files — intermediate-only paths don't reach signing
 
-For iOS, UBT reads `bEnableGameCenterSupport=True` from `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` in `DefaultEngine.ini` and automatically injects `com.apple.developer.game-center` into `Intermediate/IOS/<Target>.entitlements` during the build. There is no equivalent for macOS anywhere in UBT or `XcodeProject.cs`.
+**macOS:** There is no UBT ini boolean equivalent of `bEnableGameCenterSupport` for macOS. The only mechanism is `PremadeMacEntitlements` under `[/Script/MacTargetPlatform.XcodeProjectSettings]`: `GenerateProjectFiles` reads that key, resolves the file it points to, and writes `CODE_SIGN_ENTITLEMENTS = <path>` into the generated xcconfig. Nothing is ever auto-injected — the file must exist and be committed.
 
-For macOS, the only mechanism is `PremadeMacEntitlements` under `[/Script/MacTargetPlatform.XcodeProjectSettings]`: `GenerateProjectFiles` reads that key, resolves the file it points to, and writes `CODE_SIGN_ENTITLEMENTS = <path>` into the generated xcconfig. Nothing is ever auto-injected — the file must exist and be committed.
+**iOS:** UBT reads `bEnableGameCenterSupport=True` from `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` and injects the entitlement into `Intermediate/IOS/<Target>.entitlements` during the build. However, this file is in `Intermediate/` and is not picked up by `xcodebuild` when using `CODE_SIGN_STYLE=Automatic` — xcodebuild defers to the provisioning portal, which only reflects what `CODE_SIGN_ENTITLEMENTS` explicitly declares. Without an explicit `CODE_SIGN_ENTITLEMENTS` build setting pointing to a real file, the Game Center entitlement is silently dropped from the IPA.
 
-If you add `ENABLE_GAME_CENTER=1` to `.env`, the script seeds `Build/Mac/Resources/<Project>.entitlements` and writes the `PremadeMacEntitlements` key on first run. **Commit that `.entitlements` file** — without it in source control, any teammate or CI machine that regenerates project files won't have the file the xcconfig points to, and codesigning will silently drop the entitlement.
+The script solves both cases with committed source files:
+- Mac: seeds `Build/Mac/Resources/<Project>.entitlements` → registered via `PremadeMacEntitlements` in `DefaultEngine.ini` → `GenerateProjectFiles` bakes `CODE_SIGN_ENTITLEMENTS` into the xcconfig
+- iOS: seeds `Build/IOS/Resources/<Project>.entitlements` → passed as `CODE_SIGN_ENTITLEMENTS=<path>` directly to `xcodebuild archive` as a build setting override
 
-The script also independently injects `com.apple.developer.game-center` into its own codesign step (the `codesign --entitlements` call that re-signs the exported `.app`), so the shipped binary always gets the entitlement from ship.sh even if the Xcode project path is broken. But Xcode-direct builds (without ship.sh) rely entirely on the committed file.
+**Commit both files** after the first `--game-center` run. Without them in source control, any clean or teammate/CI regen loses the entitlement path.
+
+The script also independently injects `com.apple.developer.game-center` into its own Mac codesign step, so ship.sh-produced Mac builds are always correct. Xcode-direct Mac builds and all iOS builds depend on the committed files.
 
 ## App Sandbox and Game Mode are separate
 

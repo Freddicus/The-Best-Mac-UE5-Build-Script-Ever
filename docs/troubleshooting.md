@@ -118,24 +118,32 @@ The xcconfig at `Intermediate/ProjectFiles/XcconfigsMac/<project>.xcconfig` does
   -game
 ```
 
-## Game Center entitlement disappears after project regeneration
+## Game Center entitlement missing from IPA or Mac app
 
-Every `GenerateProjectFiles.sh` run (including the automatic regen ship.sh does before each build) overwrites `Intermediate/ProjectFiles/XcconfigsMac/*.xcconfig`. If `PremadeMacEntitlements` in `DefaultEngine.ini` points to a file that doesn't exist on disk, `GenerateProjectFiles` silently skips `CODE_SIGN_ENTITLEMENTS` — and Xcode drops the entitlement.
+Both platforms require a committed entitlements file. After the first `--game-center` run, commit:
+- `Build/Mac/Resources/<Project>.entitlements`
+- `Build/IOS/Resources/<Project>.entitlements`
 
-The fix is to commit `Build/Mac/Resources/<Project>.entitlements` to source control after the first `--game-center` run. Verify it landed in the xcconfig:
+**Mac:** Every `GenerateProjectFiles.sh` run overwrites the xcconfig. If `PremadeMacEntitlements` in `DefaultEngine.ini` points to a file that doesn't exist on disk, `GenerateProjectFiles` silently skips `CODE_SIGN_ENTITLEMENTS`. Verify:
 
 ```bash
 grep CODE_SIGN_ENTITLEMENTS \
   "Intermediate/ProjectFiles/XcconfigsMac/$(basename *.uproject .uproject).xcconfig"
-```
-
-If that key is absent, either the file wasn't committed or the `PremadeMacEntitlements` value in `DefaultEngine.ini` doesn't match the actual path. Run `./ship.sh --print-config` and check the `DefaultEngine.ini` directly:
-
-```bash
 grep PremadeMacEntitlements Config/DefaultEngine.ini
 ```
 
-Note: ship.sh's codesign step injects `com.apple.developer.game-center` independently into the signing plist regardless of the xcconfig state — so ship.sh-produced builds are always correct. Xcode-direct builds depend on the committed file.
+Note: ship.sh's Mac codesign step also injects `com.apple.developer.game-center` independently into the signing plist, so ship.sh-produced Mac builds are always correct even if the xcconfig path is broken. Xcode-direct Mac builds depend on the committed file.
+
+**iOS:** `bEnableGameCenterSupport=True` tells UBT to write the entitlement to `Intermediate/IOS/<Target>.entitlements`, but that file is in `Intermediate/` and is not picked up by `xcodebuild` under `CODE_SIGN_STYLE=Automatic`. ship.sh passes `CODE_SIGN_ENTITLEMENTS=<path>` as a build setting override pointing to `Build/IOS/Resources/<Project>.entitlements`. If that file doesn't exist (e.g. after a clean on a machine that never committed it), the entitlement is silently dropped.
+
+Verify the iOS entitlements file exists and contains the key:
+
+```bash
+/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" \
+  "Build/IOS/Resources/$(basename *.uproject .uproject).entitlements"
+```
+
+Should print `true`. If the file is missing, run `./ship.sh --game-center` once and commit both `.entitlements` files.
 
 ## Getting more detail
 
