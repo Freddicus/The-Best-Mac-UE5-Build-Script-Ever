@@ -841,7 +841,7 @@ print_config() {
   fi
   echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, leaves DefaultEngine.ini VersionInfo untouched>}" >&3
   echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, leaves Info.Template.plist GameMode keys untouched>}" >&3
-  echo "ENABLE_GAME_CENTER: ${ENABLE_GAME_CENTER:-0} (1=add com.apple.developer.game-center to Mac codesign + iOS entitlements)" >&3
+  echo "ENABLE_GAME_CENTER: ${ENABLE_GAME_CENTER:-<unset, leaves Game Center entitlements alone>} (1=add, 0=remove com.apple.developer.game-center)" >&3
   echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, leaves DefaultEngine.ini AppCategory untouched>}" >&3
   local _cfbv_now _cfbv_next
   _cfbv_now="${CFBUNDLE_VERSION:-0}"
@@ -1073,6 +1073,42 @@ set_engine_ini_value() {
   fi
 }
 
+remove_engine_ini_key() {
+  # Idempotent removal of a key from a section in DefaultEngine.ini.
+  # No-op when the key is absent. Does not remove the section header itself.
+  local section="$1" key="$2"
+  local ini_file="$REPO_ROOT/Config/DefaultEngine.ini"
+  [[ -f "$ini_file" ]] || return 0
+
+  local current_value
+  current_value="$(/usr/bin/awk -v section="$section" -v key="$key" '
+    $0 == section { in_sect = 1; next }
+    /^\[/ { in_sect = 0; next }
+    in_sect && $0 ~ "^[[:space:]]*"key"[[:space:]]*=" {
+      sub(/^[^=]*=[[:space:]]*/, "")
+      print
+      exit
+    }
+  ' "$ini_file")"
+
+  if [[ -z "$current_value" ]]; then
+    info "DefaultEngine.ini: $key not in $section — nothing to remove"
+    return 0
+  fi
+
+  local tmp_ini
+  tmp_ini="$(/usr/bin/mktemp "${TMPDIR:-/tmp}DefaultEngine_ini_XXXXXX")"
+  /usr/bin/awk -v section="$section" -v key="$key" '
+    BEGIN { in_sect = 0 }
+    $0 == section { in_sect = 1; print; next }
+    /^\[/ { in_sect = 0; print; next }
+    in_sect && $0 ~ "^[[:space:]]*"key"[[:space:]]*=" { next }
+    { print }
+  ' "$ini_file" > "$tmp_ini"
+  /bin/mv "$tmp_ini" "$ini_file"
+  good "Removed from $ini_file: [$section] $key"
+}
+
 ensure_marketing_version_in_engine_ini() {
   # Write MARKETING_VERSION (CFBundleShortVersionString) to its canonical
   # locations. UE has separate ini sections for Mac and iOS runtime settings
@@ -1117,28 +1153,32 @@ ensure_app_category_in_engine_ini() {
 }
 
 ensure_game_center_entitlements() {
-  # Wire up com.apple.developer.game-center for Mac and/or iOS when
-  # ENABLE_GAME_CENTER=1.
+  # Manage com.apple.developer.game-center for Mac and/or iOS.
+  # Unset = no opinion; leave whatever is on disk alone.
+  # 1 = add the entitlement; 0 = remove it.
   #
-  # Mac: seeds Build/Mac/Resources/<Project>.entitlements and registers it via
-  # PremadeMacEntitlements in DefaultEngine.ini so that GenerateProjectFiles
-  # bakes CODE_SIGN_ENTITLEMENTS into the xcconfig (Xcode-direct builds also
-  # get the entitlement). The ship.sh codesign step injects it independently
-  # into the generated temp entitlements plist below (see entitlements block).
+  # Mac (add): seeds Build/Mac/Resources/<Project>.entitlements and registers it
+  # via PremadeMacEntitlements in DefaultEngine.ini so GenerateProjectFiles bakes
+  # CODE_SIGN_ENTITLEMENTS into the xcconfig. The codesign step also injects it
+  # independently into the script-generated signing plist.
+  # Mac (remove): removes the key from the .entitlements file and unregisters
+  # PremadeMacEntitlements from DefaultEngine.ini.
   #
-  # iOS: writes bEnableGameCenterSupport=True to DefaultEngine.ini so that UBT
-  # injects the entitlement into Intermediate/IOS/<Target>.entitlements during
-  # the xcodebuild archive.
-  [[ "${ENABLE_GAME_CENTER:-0}" == "1" ]] || return 0
+  # iOS (add): writes bEnableGameCenterSupport=True so UBT injects the entitlement
+  # into Intermediate/IOS/<Target>.entitlements during the xcodebuild archive.
+  # iOS (remove): writes bEnableGameCenterSupport=False.
+  [[ -n "${ENABLE_GAME_CENTER:-}" ]] || return 0
 
   local project_name="${UPROJECT_NAME%.uproject}"
+  local mac_ent_rel="Build/Mac/Resources/${project_name}.entitlements"
+  local mac_ent="$REPO_ROOT/$mac_ent_rel"
 
-  if [[ "${IOS_ONLY:-0}" != "1" ]]; then
-    local mac_ent_rel="Build/Mac/Resources/${project_name}.entitlements"
-    local mac_ent="$REPO_ROOT/$mac_ent_rel"
-    /bin/mkdir -p "$(/usr/bin/dirname "$mac_ent")"
-    if [[ ! -f "$mac_ent" ]]; then
-      cat > "$mac_ent" <<'PLIST'
+  if [[ "$ENABLE_GAME_CENTER" == "1" ]]; then
+    # --- Add ---
+    if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+      /bin/mkdir -p "$(/usr/bin/dirname "$mac_ent")"
+      if [[ ! -f "$mac_ent" ]]; then
+        cat > "$mac_ent" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1148,33 +1188,59 @@ ensure_game_center_entitlements() {
 </dict>
 </plist>
 PLIST
-      /bin/chmod 644 "$mac_ent"
-      good "Seeded $mac_ent (commit it — UE's PremadeMacEntitlements registers this with the Xcode project)"
-    else
-      local _gc_val
-      _gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$mac_ent" 2>/dev/null || true)"
-      if [[ "$_gc_val" != "true" ]]; then
-        if [[ -n "$_gc_val" ]]; then
-          /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$mac_ent"
-        else
-          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$mac_ent"
-        fi
-        good "Updated $mac_ent → com.apple.developer.game-center=true"
+        /bin/chmod 644 "$mac_ent"
+        good "Seeded $mac_ent (commit it — UE's PremadeMacEntitlements registers this with the Xcode project)"
       else
-        info "Mac entitlements already have Game Center: $mac_ent"
+        local _gc_val
+        _gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$mac_ent" 2>/dev/null || true)"
+        if [[ "$_gc_val" != "true" ]]; then
+          if [[ -n "$_gc_val" ]]; then
+            /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$mac_ent"
+          else
+            /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$mac_ent"
+          fi
+          good "Updated $mac_ent → com.apple.developer.game-center=true"
+        else
+          info "Mac entitlements already have Game Center: $mac_ent"
+        fi
       fi
+      set_engine_ini_value \
+        "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
+        "PremadeMacEntitlements" \
+        "(FilePath=\"/Game/$mac_ent_rel\")"
     fi
-    set_engine_ini_value \
-      "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
-      "PremadeMacEntitlements" \
-      "(FilePath=\"/Game/$mac_ent_rel\")"
-  fi
 
-  if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
-    set_engine_ini_value \
-      "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
-      "bEnableGameCenterSupport" \
-      "True"
+    if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+      set_engine_ini_value \
+        "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
+        "bEnableGameCenterSupport" \
+        "True"
+    fi
+
+  else
+    # --- Remove (ENABLE_GAME_CENTER=0) ---
+    if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+      if [[ -f "$mac_ent" ]]; then
+        local _gc_val
+        _gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$mac_ent" 2>/dev/null || true)"
+        if [[ -n "$_gc_val" ]]; then
+          /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.game-center" "$mac_ent"
+          good "Removed com.apple.developer.game-center from $mac_ent"
+        else
+          info "Game Center key not present in $mac_ent — nothing to remove"
+        fi
+      fi
+      remove_engine_ini_key \
+        "[/Script/MacTargetPlatform.XcodeProjectSettings]" \
+        "PremadeMacEntitlements"
+    fi
+
+    if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
+      set_engine_ini_value \
+        "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
+        "bEnableGameCenterSupport" \
+        "False"
+    fi
   fi
 }
 
@@ -2245,7 +2311,7 @@ VERSION_STRING="${VERSION_STRING:-}"
 VERSION_CONTENT_DIR="${VERSION_CONTENT_DIR:-BuildInfo}"
 MARKETING_VERSION="${MARKETING_VERSION:-}"
 ENABLE_GAME_MODE="${ENABLE_GAME_MODE:-}"
-ENABLE_GAME_CENTER="${ENABLE_GAME_CENTER:-0}"
+ENABLE_GAME_CENTER="${ENABLE_GAME_CENTER:-}"
 APP_CATEGORY="${APP_CATEGORY:-}"
 CFBUNDLE_VERSION="${CFBUNDLE_VERSION:-}"
 
