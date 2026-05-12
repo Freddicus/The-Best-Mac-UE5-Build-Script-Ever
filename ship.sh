@@ -1797,7 +1797,73 @@ autodetect_mas_export_plist_if_needed() {
     return 0
   fi
 
+  # No conventional plist on disk — offer to generate one interactively.
+  # Falls through to a warn if the user is in a non-TTY context or declines.
+  if maybe_generate_mas_export_plist_interactively; then
+    return 0
+  fi
+
   warn "No MAS-ExportOptions.plist found. Copy MAS-ExportOptions.plist.example to MAS-ExportOptions.plist and edit, or pass --mas-export-plist PATH."
+}
+
+maybe_generate_mas_export_plist_interactively() {
+  # Offer to generate a minimal MAS-ExportOptions.plist suitable for Mac App
+  # Store exports. Only runs in interactive terminals. Mirrors
+  # maybe_generate_export_plist_interactively (Developer ID) but writes the
+  # MAS template content. When DEVELOPMENT_TEAM is unset, writes the
+  # YOUR_TEAM_ID placeholder + warns — the pre-flight teamID validator catches
+  # a forgotten edit before the multi-hour build.
+  if [[ ! -t 0 ]]; then
+    return 1
+  fi
+
+  local out
+  out="$REPO_ROOT/MAS-ExportOptions.plist"
+
+  echo "No MAS-ExportOptions.plist was detected." >&3
+  echo "I can generate a minimal one for Mac App Store exports." >&3
+  if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
+    echo "Team ID: $DEVELOPMENT_TEAM" >&3
+  else
+    echo "Team ID: (not set — will write YOUR_TEAM_ID placeholder; edit the file before shipping)" >&3
+  fi
+
+  local ans
+  read -r -p "Generate MAS-ExportOptions.plist at '$out'? (Y/n) " ans
+  if [[ "${ans:-Y}" =~ ^[Nn]$ ]]; then
+    return 1
+  fi
+
+  if [[ -f "$out" ]]; then
+    local ow
+    read -r -p "File already exists. Overwrite? (y/N) " ow
+    if [[ ! "${ow:-N}" =~ ^[Yy]$ ]]; then
+      return 1
+    fi
+  fi
+
+  local team_id="${DEVELOPMENT_TEAM:-YOUR_TEAM_ID}"
+
+  info "Generating MAS-ExportOptions.plist: $out"
+  /bin/cat > "$out" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key><string>app-store-connect</string>
+  <key>teamID</key><string>$team_id</string>
+  <key>signingStyle</key><string>automatic</string>
+  <key>compileBitcode</key><false/>
+</dict>
+</plist>
+PLIST
+
+  if [[ "$team_id" == "YOUR_TEAM_ID" ]]; then
+    warn "Generated $out with placeholder teamID 'YOUR_TEAM_ID' — edit it (or set DEVELOPMENT_TEAM and pre-flight will catch the mismatch before the next build)."
+  fi
+
+  MAS_EXPORT_PLIST="$out"
+  return 0
 }
 
 autodetect_ios_export_plist_if_needed() {
@@ -1843,7 +1909,74 @@ autodetect_ios_export_plist_if_needed() {
     return 0
   fi
 
+  # No conventional plist and no content-scan match — offer to generate one
+  # interactively. Falls through to the warn below if non-TTY or declined.
+  if maybe_generate_ios_export_plist_interactively; then
+    return 0
+  fi
+
   warn "No iOS ExportOptions.plist found. Copy iOS-ExportOptions.plist.example to iOS-ExportOptions.plist and edit, or pass --ios-export-plist PATH."
+}
+
+maybe_generate_ios_export_plist_interactively() {
+  # Offer to generate a minimal iOS-ExportOptions.plist suitable for App
+  # Store / TestFlight exports. Only runs in interactive terminals. Mirrors
+  # maybe_generate_mas_export_plist_interactively. YOUR_TEAM_ID placeholder
+  # is written when DEVELOPMENT_TEAM is unset; pre-flight teamID checks for
+  # the iOS plist are looser today (xcodebuild surfaces the error at archive
+  # time), but the placeholder makes the forgotten edit visible to anyone
+  # reading the file.
+  if [[ ! -t 0 ]]; then
+    return 1
+  fi
+
+  local out
+  out="$REPO_ROOT/iOS-ExportOptions.plist"
+
+  echo "No iOS-ExportOptions.plist was detected." >&3
+  echo "I can generate a minimal one for iOS App Store / TestFlight exports." >&3
+  if [[ -n "${DEVELOPMENT_TEAM:-}" ]]; then
+    echo "Team ID: $DEVELOPMENT_TEAM" >&3
+  else
+    echo "Team ID: (not set — will write YOUR_TEAM_ID placeholder; edit the file before shipping)" >&3
+  fi
+
+  local ans
+  read -r -p "Generate iOS-ExportOptions.plist at '$out'? (Y/n) " ans
+  if [[ "${ans:-Y}" =~ ^[Nn]$ ]]; then
+    return 1
+  fi
+
+  if [[ -f "$out" ]]; then
+    local ow
+    read -r -p "File already exists. Overwrite? (y/N) " ow
+    if [[ ! "${ow:-N}" =~ ^[Yy]$ ]]; then
+      return 1
+    fi
+  fi
+
+  local team_id="${DEVELOPMENT_TEAM:-YOUR_TEAM_ID}"
+
+  info "Generating iOS-ExportOptions.plist: $out"
+  /bin/cat > "$out" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key><string>app-store-connect</string>
+  <key>teamID</key><string>$team_id</string>
+  <key>signingStyle</key><string>automatic</string>
+  <key>compileBitcode</key><false/>
+</dict>
+</plist>
+PLIST
+
+  if [[ "$team_id" == "YOUR_TEAM_ID" ]]; then
+    warn "Generated $out with placeholder teamID 'YOUR_TEAM_ID' — edit it before running the iOS archive (xcodebuild will reject the placeholder at archive time)."
+  fi
+
+  IOS_EXPORT_PLIST="$out"
+  return 0
 }
 
 _extract_ue_filepath() {
