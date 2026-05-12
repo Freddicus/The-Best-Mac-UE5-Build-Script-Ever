@@ -61,6 +61,7 @@ The script locates your project automatically when run from the project root. Se
 | `MARKETING_VERSION` | If set, the script writes `VersionInfo=` to `Config/DefaultEngine.ini` under `[/Script/MacRuntimeSettings.MacRuntimeSettings]` (UE's canonical `CFBundleShortVersionString` source). Unset = leave `DefaultEngine.ini` alone. See [versioning.md](versioning.md#marketing_version). |
 | `APP_CATEGORY` | If set, the script writes `AppCategory=` to `Config/DefaultEngine.ini` under `[/Script/MacTargetPlatform.XcodeProjectSettings]`. UE's `BaseEngine.ini` already defaults to `public.app-category.games` — only override when you need a different value. |
 | `ENABLE_GAME_MODE` | `1` = set `LSSupportsGameMode` + `GCSupportsGameMode` to `true` in your `Build/Mac/Resources/Info.Template.plist`. `0` = set to `false`. Unset = leave the plist's GameMode keys alone (your plist is sovereign). |
+| `ENABLE_GAME_CENTER` | `1` = add `com.apple.developer.game-center` entitlement to both the Mac codesign step and the iOS build. Mac: seeds `Build/Mac/Resources/<Project>.entitlements` and writes `PremadeMacEntitlements=` to `DefaultEngine.ini` under `[/Script/MacTargetPlatform.XcodeProjectSettings]` so `GenerateProjectFiles` bakes `CODE_SIGN_ENTITLEMENTS` into the xcconfig (Xcode-direct builds also get it). iOS: writes `bEnableGameCenterSupport=True` to `DefaultEngine.ini` under `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` so UBT injects the entitlement into `Intermediate/IOS/<Target>.entitlements`. Default: `0`. **Commit the seeded `.entitlements` file** so it survives project regeneration. |
 | `CFBUNDLE_VERSION` | Source of truth for the auto-bumped integer build counter. The script reads this on every run, pre-increments by 1, ships the new value as `CFBundleVersion`, and persists the new value back to `.env` on a successful build. Empty/missing = `0`, so the first build ships `1`. Use `--set-cfbundle-version N` to set a new baseline (persists `N`; next build resumes from `N`). See [versioning.md](versioning.md#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical) for the two paths. |
 | `CLEAN_BUILD_DIR` | `1` = wipe `BUILD_DIR_REL` before building. Default: `0`. |
 | `DRY_RUN` | `1` = print the plan and exit without building. |
@@ -78,6 +79,7 @@ Run `./ship.sh --help` for the full list. Common flags:
 ./ship.sh --marketing-version 1.2.0
 ./ship.sh --game-mode          # enable Game Mode in Info.plist
 ./ship.sh --no-game-mode       # disable Game Mode in Info.plist
+./ship.sh --game-center        # add Game Center entitlement (Mac + iOS)
 ./ship.sh --app-category public.app-category.games
 ./ship.sh --build-dir Output/Mac           # override BUILD_DIR_REL
 ./ship.sh --no-regen-project-files         # skip the GenerateProjectFiles step
