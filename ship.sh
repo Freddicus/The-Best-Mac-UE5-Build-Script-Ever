@@ -790,6 +790,8 @@ check_apple_sdk_json_compat() {
 
 print_config() {
   echo "== Resolved configuration ==" >&3
+  echo "MAC_DISTRIBUTION:  $MAC_DISTRIBUTION (developer-id | app-store | off)" >&3
+  echo "IOS_DISTRIBUTION:  $IOS_DISTRIBUTION (off | app-store)" >&3
   echo "REPO_ROOT:         $REPO_ROOT" >&3
   echo "UPROJECT_PATH:     $UPROJECT_PATH" >&3
   echo "UE_ROOT:           $UE_ROOT" >&3
@@ -2232,7 +2234,48 @@ STEAM_DYLIB_SRC="${STEAM_DYLIB_SRC:-}"
 
 MACOS_APPICON_SET_NAME="${MACOS_APPICON_SET_NAME:-}"
 
-# iOS pipeline (opt-in). Default off; set ENABLE_IOS=1 / pass --ios to enable.
+# -----------------------------------------------------------------------------
+# Distribution dispatcher (the central per-platform branch selector)
+#
+# These two variables decide WHICH pipeline runs for each platform. Every
+# downstream platform-specific check (entitlements, signing, ExportOptions
+# method, upload tooling) should consult them rather than reading the legacy
+# ENABLE_IOS / IOS_ONLY flags. Legacy flags remain supported and are resolved
+# into these dispatchers below — see resolve_distribution_flags().
+#
+#   MAC_DISTRIBUTION=
+#     developer-id   (default) Direct Distribution: Developer ID Application
+#                    signing, hardened runtime, notarized + stapled. Steam is
+#                    allowed here (and only here). Game Center is NOT
+#                    available on this channel — AMFI rejects
+#                    com.apple.developer.game-center on Developer-ID-signed
+#                    Mac apps at exec, regardless of notarization.
+#     app-store      Mac App Store: Apple Distribution signing, App Sandbox,
+#                    Game Center allowed, Steam forbidden, uploaded via
+#                    `xcrun altool` to App Store Connect. Pipeline is on the
+#                    roadmap — currently rejected with guidance.
+#     off            Skip Mac entirely (iOS-only run).
+#
+#   IOS_DISTRIBUTION=
+#     off            (default) Skip iOS.
+#     app-store      Run the iOS pipeline (UAT → archive → IPA → optional ASC
+#                    validate/upload). iOS has no other distribution channel
+#                    in the US, so this is the only non-off value.
+#
+# Compatibility matrix is enforced in validate_distribution_compatibility():
+#   - MAC_DISTRIBUTION=off requires IOS_DISTRIBUTION=app-store
+#   - MAC_DISTRIBUTION=app-store + ENABLE_STEAM=1 → rejected (MAS forbids the
+#     Steam entitlements outright)
+#   - MAC_DISTRIBUTION=developer-id + ENABLE_GAME_CENTER=1 and no iOS pass →
+#     rejected (Mac Game Center is structurally a MAS feature; see docs/gotchas.md)
+# -----------------------------------------------------------------------------
+MAC_DISTRIBUTION="${MAC_DISTRIBUTION:-developer-id}"
+IOS_DISTRIBUTION="${IOS_DISTRIBUTION:-off}"
+
+# Legacy flags. Kept for back-compat with existing .env files and CI configs;
+# resolve_distribution_flags() reconciles them with MAC_DISTRIBUTION /
+# IOS_DISTRIBUTION after CLI parsing. New code should consult the dispatcher
+# variables directly.
 ENABLE_IOS="${ENABLE_IOS:-0}"
 IOS_ONLY="${IOS_ONLY:-0}"
 IOS_WORKSPACE="${IOS_WORKSPACE:-}"
@@ -2340,10 +2383,33 @@ Options (highest priority):
                                      name to "AppIcon"). Auto-detects the
                                      first appiconset in the catalog if unset.
 
+  --mac-distribution VALUE           macOS distribution channel:
+                                       developer-id (default) — Direct
+                                         Distribution (Developer ID, hardened
+                                         runtime, notarized + stapled). Steam
+                                         allowed; Game Center not available
+                                         (AMFI rejects it on this channel).
+                                       app-store — Mac App Store (Apple
+                                         Distribution + App Sandbox + ASC
+                                         upload, Game Center allowed, Steam
+                                         forbidden). Pipeline is on the
+                                         roadmap; currently fails fast with
+                                         guidance.
+                                       off — skip Mac entirely (iOS-only run).
+  --ios-distribution VALUE           iOS distribution channel:
+                                       off (default) — skip iOS.
+                                       app-store — run the iOS pipeline
+                                         (UAT → archive → IPA → optional ASC
+                                         upload). No other channel exists for
+                                         iOS in the US.
+
   --ios / --no-ios                   enable iOS pass after the Mac pipeline
-                                     (default: off)
+                                     (legacy alias for --ios-distribution
+                                     app-store; default: off)
   --ios-only                         skip Mac entirely and run only iOS;
-                                     does not require SIGN_IDENTITY
+                                     legacy alias for "--mac-distribution off
+                                     --ios-distribution app-store". Does not
+                                     require SIGN_IDENTITY.
   --ios-workspace FILE_OR_PATH       (e.g. "MyGame (iOS).xcworkspace")
   --ios-scheme NAME                  iOS Xcode scheme (auto-detected if unset)
   --ios-export-plist PATH            iOS-ExportOptions.plist path
@@ -2467,6 +2533,9 @@ while [[ $# -gt 0 ]]; do
 
     --macos-appicon-set-name) MACOS_APPICON_SET_NAME="$2"; shift 2 ;;
 
+    --mac-distribution)       MAC_DISTRIBUTION="$2"; CLI_SET_MAC_DISTRIBUTION=1; shift 2 ;;
+    --ios-distribution)       IOS_DISTRIBUTION="$2"; CLI_SET_IOS_DISTRIBUTION=1; shift 2 ;;
+
     --ios)                    ENABLE_IOS="1"; shift ;;
     --no-ios)                 ENABLE_IOS="0"; shift ;;
     --ios-only)               IOS_ONLY="1"; ENABLE_IOS="1"; shift ;;
@@ -2518,6 +2587,92 @@ while [[ $# -gt 0 ]]; do
     *) die "Unknown option: $1 (use --help)" ;;
   esac
 done
+
+# -----------------------------------------------------------------------------
+# Distribution dispatcher resolution
+#
+# Reconcile legacy ENABLE_IOS / IOS_ONLY with the new MAC_DISTRIBUTION /
+# IOS_DISTRIBUTION variables. The dispatcher is the source of truth for every
+# downstream decision; the legacy flags are kept in sync for back-compat with
+# the existing condition-checks scattered through the pipeline.
+#
+# Precedence (highest to lowest):
+#   1. CLI flags (--mac-distribution / --ios-distribution) — explicit user intent
+#   2. Legacy flags (IOS_ONLY=1, ENABLE_IOS=1) — promote to the dispatcher
+#   3. Defaults (developer-id / off)
+#
+# After this function runs, MAC_DISTRIBUTION and IOS_DISTRIBUTION are
+# authoritative, and ENABLE_IOS / IOS_ONLY are derived from them so existing
+# checks (e.g. `if [[ "$IOS_ONLY" == "1" ]]`) still resolve correctly.
+# -----------------------------------------------------------------------------
+resolve_distribution_flags() {
+  # Step 1: Promote legacy flags into the dispatcher, but only when the CLI
+  # didn't explicitly set the dispatcher (CLI wins outright).
+  if [[ "${CLI_SET_MAC_DISTRIBUTION:-0}" != "1" && "${IOS_ONLY:-0}" == "1" ]]; then
+    MAC_DISTRIBUTION="off"
+  fi
+  if [[ "${CLI_SET_IOS_DISTRIBUTION:-0}" != "1" ]]; then
+    if [[ "${IOS_ONLY:-0}" == "1" || "${ENABLE_IOS:-0}" == "1" ]]; then
+      IOS_DISTRIBUTION="app-store"
+    fi
+  fi
+
+  # Step 2: Project the dispatcher back onto the legacy flags so existing
+  # conditional checks ($IOS_ONLY, $ENABLE_IOS) keep working unchanged.
+  if [[ "$MAC_DISTRIBUTION" == "off" ]]; then
+    IOS_ONLY="1"
+  else
+    IOS_ONLY="0"
+  fi
+  if [[ "$IOS_DISTRIBUTION" == "app-store" ]]; then
+    ENABLE_IOS="1"
+  else
+    ENABLE_IOS="0"
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Distribution compatibility validator
+#
+# Enforces the rules from the dispatcher comment block. Each rule corresponds
+# to a hard incompatibility that would otherwise produce a broken build or a
+# binary the OS will refuse to run. See docs/configuration.md "Distribution
+# channels" and docs/gotchas.md for the underlying reasoning.
+# -----------------------------------------------------------------------------
+ROADMAP_ISSUE_URL="https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27"
+
+validate_distribution_compatibility() {
+  case "$MAC_DISTRIBUTION" in
+    developer-id|app-store|off) ;;
+    *) die "MAC_DISTRIBUTION must be one of: developer-id, app-store, off (got: '$MAC_DISTRIBUTION')" ;;
+  esac
+  case "$IOS_DISTRIBUTION" in
+    off|app-store) ;;
+    *) die "IOS_DISTRIBUTION must be one of: off, app-store (got: '$IOS_DISTRIBUTION')" ;;
+  esac
+
+  if [[ "$MAC_DISTRIBUTION" == "off" && "$IOS_DISTRIBUTION" == "off" ]]; then
+    die "Nothing to build: MAC_DISTRIBUTION=off and IOS_DISTRIBUTION=off. Set MAC_DISTRIBUTION (developer-id) or IOS_DISTRIBUTION (app-store), or use --ios / --ios-only."
+  fi
+
+  if [[ "$MAC_DISTRIBUTION" == "app-store" && "${ENABLE_STEAM:-0}" == "1" ]]; then
+    die "MAC_DISTRIBUTION=app-store is incompatible with ENABLE_STEAM=1. The Steam entitlements (com.apple.security.cs.disable-library-validation and com.apple.security.cs.allow-dyld-environment-variables) are forbidden by Mac App Store review. Pick one: a Direct Distribution build with Steam (MAC_DISTRIBUTION=developer-id, the default), or a Mac App Store build without Steam."
+  fi
+
+  if [[ "$MAC_DISTRIBUTION" == "developer-id" && "${ENABLE_GAME_CENTER:-}" == "1" && "$IOS_DISTRIBUTION" != "app-store" ]]; then
+    die "MAC_DISTRIBUTION=developer-id is incompatible with ENABLE_GAME_CENTER=1. Mac Game Center is structurally a Mac App Store feature — AMFI rejects com.apple.developer.game-center on Developer-ID-signed Mac apps at exec, regardless of notarization. For Mac Game Center, you'll need MAC_DISTRIBUTION=app-store (on the roadmap: $ROADMAP_ISSUE_URL). For iOS Game Center on this run, also pass --ios."
+  fi
+
+  # MAC_DISTRIBUTION=app-store is recognized but the pipeline isn't wired yet.
+  # Fail fast with guidance rather than letting a half-implemented branch run.
+  if [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
+    die "MAC_DISTRIBUTION=app-store is on the roadmap but not yet implemented in ship.sh. Tracked at: $ROADMAP_ISSUE_URL
+For now, the workaround is to use Xcode Organizer → Distribute App → App Store Connect to submit a Mac App Store build. The Direct Distribution (Developer ID) path is fully supported via MAC_DISTRIBUTION=developer-id (default)."
+  fi
+}
+
+resolve_distribution_flags
+validate_distribution_compatibility
 
 # If REPO_ROOT is still a placeholder/empty, assume this script lives in the project root.
 if is_placeholder "${REPO_ROOT:-}"; then
