@@ -2445,9 +2445,11 @@ MACOS_APPICON_SET_NAME="${MACOS_APPICON_SET_NAME:-}"
 #                    Game Center allowed, Steam forbidden. Mirrors the iOS
 #                    pipeline: xcodebuild archive + export under automatic
 #                    provisioning, then `xcrun altool -t macos` to validate /
-#                    upload the exported .app to App Store Connect. No ZIP,
-#                    no DMG, no notarize, no staple — ASC review is the
-#                    equivalent gate.
+#                    upload the exported .pkg installer to App Store
+#                    Connect. (Xcode's app-store-connect export on macOS
+#                    produces a signed .pkg installer — not a .app bundle —
+#                    that wraps the signed app.) No ZIP, no DMG, no
+#                    notarize, no staple — ASC review is the equivalent gate.
 #     off            Skip Mac entirely (iOS-only run).
 #
 #   IOS_DISTRIBUTION=
@@ -2480,7 +2482,7 @@ IOS_MARKETING_VERSION="${IOS_MARKETING_VERSION:-}"
 
 # App Store Connect API credentials (xcrun altool — NOT notarytool; different
 # tools, different services). altool talks to ASC's submission/validation
-# API and is the documented path for both IPA and .app (Mac App Store) uploads.
+# API and is the documented path for both IPA (iOS) and .pkg (Mac App Store) uploads.
 # It auths via an API key (.p8 file + key ID + issuer UUID), distinct from
 # the keychain profile notarytool uses for Mac Developer ID notarization.
 #
@@ -2649,12 +2651,15 @@ Options (highest priority):
   --mas-export-plist PATH            Mac App Store ExportOptions.plist path
                                      (auto-detected from
                                      "MAS-ExportOptions.plist" in repo root)
-  --mas-validate-app                 validate the exported .app via xcrun
-                                     altool --validate-app -t macos (Mac App
-                                     Store, uses MAC_DISTRIBUTION=app-store)
-  --mas-upload-app                   upload the exported .app via xcrun altool
-                                     --upload-app -t macos; implies
-                                     --mas-validate-app
+  --mas-validate-app                 validate the exported .pkg installer
+                                     via xcrun altool --validate-app -t macos
+                                     (Mac App Store, uses
+                                     MAC_DISTRIBUTION=app-store; Xcode's
+                                     app-store-connect export produces a
+                                     signed .pkg, not a .app)
+  --mas-upload-app                   upload the exported .pkg installer via
+                                     xcrun altool --upload-app -t macos;
+                                     implies --mas-validate-app
   --asc-api-key-id ID                App Store Connect API key ID (10-char,
                                      shared between iOS and Mac App Store
                                      uploads — one key per developer account)
@@ -2910,7 +2915,7 @@ validate_distribution_compatibility() {
 # ASC credential alias resolution
 #
 # A single Apple Developer account has one App Store Connect API key, used by
-# both iOS IPA uploads and Mac App Store .app uploads. The canonical variable
+# both iOS IPA uploads and Mac App Store .pkg uploads. The canonical variable
 # names are ASC_API_KEY_ID / ASC_API_ISSUER / ASC_API_KEY_PATH; the legacy
 # IOS_ASC_API_* names are still honored. Precedence:
 #
@@ -3947,47 +3952,50 @@ if [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
     DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
     "${_mas_xcb_settings[@]}"
 
-  echo "== Mac App Store Export (.app for App Store Connect) ==" >&3
+  echo "== Mac App Store Export (.pkg for App Store Connect) ==" >&3
+  # Xcode exports a signed .pkg installer (productbuild output) for the
+  # app-store-connect method on macOS — NOT a .app bundle. The .pkg wraps
+  # the signed .app and is the artifact altool uploads to ASC.
   xcodebuild -exportArchive \
     -archivePath "$MAS_ARCHIVE_PATH" \
     -exportPath "$MAS_EXPORT_DIR" \
     -exportOptionsPlist "$MAS_EXPORT_PLIST" \
     -allowProvisioningUpdates
 
-  MAS_APP_PATH="$(find_first_app_under "$MAS_EXPORT_DIR")"
-  if [[ -z "${MAS_APP_PATH:-}" ]]; then
+  MAS_PKG_PATH="$(/usr/bin/find "$MAS_EXPORT_DIR" -maxdepth 2 -type f -name '*.pkg' -print -quit 2>/dev/null || true)"
+  if [[ -z "${MAS_PKG_PATH:-}" ]]; then
     /bin/ls -la "$MAS_EXPORT_DIR" >&3 || true
-    die "No .app found under MAS export dir: $MAS_EXPORT_DIR"
+    die "No .pkg found under MAS export dir: $MAS_EXPORT_DIR. Mac App Store exports produce a signed installer package, not a .app bundle. Verify the MAS-ExportOptions.plist declares method=app-store-connect and that an 'Apple Distribution' or '3rd Party Mac Developer Installer' identity is in the keychain."
   fi
-  good "Mac App Store .app: $MAS_APP_PATH"
+  good "Mac App Store .pkg: $MAS_PKG_PATH"
 
-  # Quick verification — xcodebuild handled signing under automatic
-  # provisioning, but a one-line check before upload makes the failure mode
-  # legible if review rejects later.
-  echo "== Mac App Store signature verification ==" >&3
-  /usr/bin/codesign --verify --deep --strict --verbose=2 "$MAS_APP_PATH"
-  /usr/bin/codesign -dv --verbose=4 "$MAS_APP_PATH" 2>&1 | /usr/bin/grep -E "^(Authority=|TeamIdentifier=)" >&3 || true
+  # Quick verification — Xcode signed the pkg under automatic provisioning.
+  # pkgutil --check-signature confirms the installer signature is valid and
+  # surfaces the signing chain before upload, so a malformed pkg fails here
+  # instead of mid-altool with a less legible error.
+  echo "== Mac App Store installer signature verification ==" >&3
+  /usr/sbin/pkgutil --check-signature "$MAS_PKG_PATH" >&3 || die "pkgutil could not verify the .pkg signature: $MAS_PKG_PATH"
 
   if [[ "${MAS_ASC_VALIDATE:-0}" == "1" ]]; then
     echo "== Mac App Store Validate (App Store Connect) ==" >&3
     /usr/bin/xcrun altool --validate-app \
-      -f "$MAS_APP_PATH" \
+      -f "$MAS_PKG_PATH" \
       -t macos \
       --apiKey "$ASC_API_KEY_ID" \
       --apiIssuer "$ASC_API_ISSUER" \
       --private-key "$ASC_API_KEY_PATH"
-    good "Mac App Store .app passed App Store Connect validation."
+    good "Mac App Store .pkg passed App Store Connect validation."
   fi
 
   if [[ "${MAS_ASC_UPLOAD:-0}" == "1" ]]; then
     echo "== Mac App Store Upload (App Store Connect) ==" >&3
     /usr/bin/xcrun altool --upload-app \
-      -f "$MAS_APP_PATH" \
+      -f "$MAS_PKG_PATH" \
       -t macos \
       --apiKey "$ASC_API_KEY_ID" \
       --apiIssuer "$ASC_API_ISSUER" \
       --private-key "$ASC_API_KEY_PATH"
-    good "Mac App Store .app uploaded to App Store Connect."
+    good "Mac App Store .pkg uploaded to App Store Connect."
   fi
 fi
 
@@ -4100,7 +4108,7 @@ if [[ "$MAC_DISTRIBUTION" == "developer-id" ]]; then
   fi
 fi
 if [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
-  echo "MAS .app: ${MAS_APP_PATH:-<not produced>}" >&3
+  echo "MAS .pkg: ${MAS_PKG_PATH:-<not produced>}" >&3
 fi
 if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
   echo "IPA: ${IOS_IPA_PATH:-<not produced>}" >&3
