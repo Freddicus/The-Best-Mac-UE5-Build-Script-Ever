@@ -221,6 +221,26 @@ require_not_placeholder() {
   fi
 }
 
+_maybe_prompt_for_asc_upload() {
+  # Interactive "upload this artifact to App Store Connect?" prompt, shared
+  # by the iOS IPA and Mac App Store .pkg pipelines. Returns 0 if the user
+  # assents (TTY + y/Y), 1 otherwise. Skips silently on non-TTY (CI runs).
+  #
+  # Caller checks the explicit upload flag first — if the user passed
+  # --mas-upload-app / --ios-upload-ipa, no prompt fires (flag wins). The
+  # prompt is only an offer for the case where the user opted into
+  # validation but hadn't committed to upload yet.
+  #   $1 = artifact path (used only for the prompt label's extension)
+  local artifact="$1"
+  if [[ ! -t 0 ]]; then
+    return 1
+  fi
+  local ext="${artifact##*.}"
+  local ans
+  read -r -p "Upload this .${ext} to App Store Connect now? (y/N) " ans
+  [[ "${ans:-N}" =~ ^[Yy]$ ]]
+}
+
 # -----------------------------------------------------------------------------
 # Helpers for config discovery / printing
 # -----------------------------------------------------------------------------
@@ -4055,6 +4075,13 @@ if [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
       --apiIssuer "$ASC_API_ISSUER" \
       --private-key "$ASC_API_KEY_PATH"
     good "Mac App Store .pkg passed App Store Connect validation."
+
+    # Offer upload interactively when the user opted into validate but
+    # hadn't explicitly committed to upload. Flag-driven runs and CI
+    # (non-TTY) bypass this — the prompt is opt-in safety, not a gate.
+    if [[ "${MAS_ASC_UPLOAD:-0}" != "1" ]] && _maybe_prompt_for_asc_upload "$MAS_PKG_PATH"; then
+      MAS_ASC_UPLOAD=1
+    fi
   fi
 
   if [[ "${MAS_ASC_UPLOAD:-0}" == "1" ]]; then
@@ -4135,6 +4162,13 @@ if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
       --apiIssuer "$ASC_API_ISSUER" \
       --private-key "$ASC_API_KEY_PATH"
     good "iOS IPA passed App Store Connect validation."
+
+    # Offer upload interactively when the user opted into validate but
+    # hadn't explicitly committed to upload. Flag-driven runs and CI
+    # (non-TTY) bypass this — symmetric with the MAS path above.
+    if [[ "${IOS_ASC_UPLOAD:-0}" != "1" ]] && _maybe_prompt_for_asc_upload "$IOS_IPA_PATH"; then
+      IOS_ASC_UPLOAD=1
+    fi
   fi
 
   if [[ "${IOS_ASC_UPLOAD:-0}" == "1" ]]; then
