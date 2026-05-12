@@ -816,6 +816,11 @@ print_config() {
   echo "MACOS_APPICON_SET_NAME: ${MACOS_APPICON_SET_NAME:-<unset, mirror auto-detects first appiconset in Build/Mac/Resources/Assets.xcassets>}" >&3
   echo "ENABLE_IOS:        ${ENABLE_IOS:-0}" >&3
   echo "IOS_ONLY:          ${IOS_ONLY:-0}" >&3
+  if [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
+    echo "MAS_EXPORT_PLIST:  ${MAS_EXPORT_PLIST:-<unset>}" >&3
+    echo "MAS_ASC_VALIDATE:  ${MAS_ASC_VALIDATE:-0}" >&3
+    echo "MAS_ASC_UPLOAD:    ${MAS_ASC_UPLOAD:-0}" >&3
+  fi
   if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
     echo "IOS_WORKSPACE:     ${IOS_WORKSPACE:-<unset>}" >&3
     echo "IOS_SCHEME:        ${IOS_SCHEME:-<unset>}" >&3
@@ -824,11 +829,11 @@ print_config() {
     echo "IOS_MARKETING_VERSION: ${IOS_MARKETING_VERSION:-<unset, inherits MARKETING_VERSION>}" >&3
     echo "IOS_ASC_VALIDATE:  ${IOS_ASC_VALIDATE:-0}" >&3
     echo "IOS_ASC_UPLOAD:    ${IOS_ASC_UPLOAD:-0}" >&3
-    if [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]]; then
-      echo "IOS_ASC_API_KEY_ID: ${IOS_ASC_API_KEY_ID:-<unset>}" >&3
-      echo "IOS_ASC_API_ISSUER: ${IOS_ASC_API_ISSUER:-<unset>}" >&3
-      echo "IOS_ASC_API_KEY_PATH: ${IOS_ASC_API_KEY_PATH:-<unset>}" >&3
-    fi
+  fi
+  if [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" || "${MAS_ASC_VALIDATE:-0}" == "1" || "${MAS_ASC_UPLOAD:-0}" == "1" ]]; then
+    echo "ASC_API_KEY_ID:    ${ASC_API_KEY_ID:-<unset>} (shared by iOS + MAS uploads)" >&3
+    echo "ASC_API_ISSUER:    ${ASC_API_ISSUER:-<unset>}" >&3
+    echo "ASC_API_KEY_PATH:  ${ASC_API_KEY_PATH:-<unset>}" >&3
   fi
   echo "ENABLE_ZIP:        ${ENABLE_ZIP:-<unset>}" >&3
   echo "ENABLE_DMG:        $ENABLE_DMG" >&3
@@ -843,7 +848,7 @@ print_config() {
   fi
   echo "MARKETING_VERSION: ${MARKETING_VERSION:-<unset, leaves DefaultEngine.ini VersionInfo untouched>}" >&3
   echo "ENABLE_GAME_MODE:  ${ENABLE_GAME_MODE:-<unset, leaves Info.Template.plist GameMode keys untouched>}" >&3
-  echo "ENABLE_GAME_CENTER: ${ENABLE_GAME_CENTER:-<unset, leaves iOS Game Center entitlements alone>} (iOS only; 1=add, 0=remove com.apple.developer.game-center)" >&3
+  echo "ENABLE_GAME_CENTER: ${ENABLE_GAME_CENTER:-<unset, leaves Game Center entitlements alone>} (1=add, 0=remove com.apple.developer.game-center; eligible channels: IOS_DISTRIBUTION=app-store and MAC_DISTRIBUTION=app-store)" >&3
   echo "APP_CATEGORY:      ${APP_CATEGORY:-<unset, leaves DefaultEngine.ini AppCategory untouched>}" >&3
   local _cfbv_now _cfbv_next
   _cfbv_now="${CFBUNDLE_VERSION:-0}"
@@ -866,7 +871,7 @@ print_config() {
     echo "XCODE_CONFIG:      ${XCODE_CONFIG:-<unset>}" >&3
   fi
   echo "NOTARIZE_ENABLED:  ${NOTARIZE_ENABLED:-<unset>}" >&3
-  if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
+  if [[ "$USE_XCODE_EXPORT" == "1" && "$MAC_DISTRIBUTION" == "developer-id" ]]; then
     echo "EXPORT_PLIST:      ${EXPORT_PLIST:-<unset>}" >&3
   fi
 }
@@ -1118,39 +1123,15 @@ ensure_app_category_in_engine_ini() {
     "$APP_CATEGORY"
 }
 
-ensure_game_center_entitlements() {
-  # Manage com.apple.developer.game-center for iOS.
-  # Unset = no opinion; 1 = add the entitlement; 0 = remove it.
-  #
-  # iOS only: macOS Game Center requires Mac App Store distribution (Apple
-  # Distribution cert + MAS provisioning profile + app sandbox), which is not
-  # what ship.sh produces. Developer ID / Direct Distribution Mac apps cannot
-  # carry com.apple.developer.game-center at all — AMFI rejects the entitlement
-  # at exec time regardless of notarization, because Apple does not encode the
-  # entitlement into Developer ID provisioning profile binaries. See
-  # docs/gotchas.md "Game Center is a Mac App Store feature."
-  #
-  # iOS (add): seeds Build/IOS/Resources/<Project>.entitlements and passes
-  # CODE_SIGN_ENTITLEMENTS=<path> directly to xcodebuild archive (UBT's
-  # `bEnableGameCenterSupport=True` only writes to Intermediate/IOS, which
-  # xcodebuild ignores under automatic signing). Also writes
-  # bEnableGameCenterSupport=True to DefaultEngine.ini for the UAT cook step.
-  # iOS (remove): removes the key from the .entitlements file, writes False.
-  [[ -n "${ENABLE_GAME_CENTER:-}" ]] || return 0
+_ensure_game_center_entitlement_for_platform() {
+  # Per-platform worker for ensure_game_center_entitlements. $1 is the
+  # entitlements file path; $2 is "add" or "remove". Idempotent.
+  local ent_path="$1" action="$2"
 
-  if [[ "${ENABLE_IOS:-0}" != "1" ]]; then
-    warn "ENABLE_GAME_CENTER is set but ENABLE_IOS=0 — Game Center automation is iOS-only in ship.sh (Mac Game Center requires App Store distribution; not supported here). Skipping."
-    return 0
-  fi
-
-  local project_name="${UPROJECT_NAME%.uproject}"
-  local ios_ent_rel="Build/IOS/Resources/${project_name}.entitlements"
-  local ios_ent="$REPO_ROOT/$ios_ent_rel"
-
-  if [[ "$ENABLE_GAME_CENTER" == "1" ]]; then
-    /bin/mkdir -p "$(/usr/bin/dirname "$ios_ent")"
-    if [[ ! -f "$ios_ent" ]]; then
-      cat > "$ios_ent" <<'PLIST'
+  if [[ "$action" == "add" ]]; then
+    /bin/mkdir -p "$(/usr/bin/dirname "$ent_path")"
+    if [[ ! -f "$ent_path" ]]; then
+      cat > "$ent_path" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1160,42 +1141,86 @@ ensure_game_center_entitlements() {
 </dict>
 </plist>
 PLIST
-      /bin/chmod 644 "$ios_ent"
-      good "Seeded $ios_ent (commit it — passed as CODE_SIGN_ENTITLEMENTS to xcodebuild)"
+      /bin/chmod 644 "$ent_path"
+      good "Seeded $ent_path (commit it — passed as CODE_SIGN_ENTITLEMENTS to xcodebuild)"
     else
-      local _ios_gc_val
-      _ios_gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ios_ent" 2>/dev/null || true)"
-      if [[ "$_ios_gc_val" != "true" ]]; then
-        if [[ -n "$_ios_gc_val" ]]; then
-          /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$ios_ent"
+      local _gc_val
+      _gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ent_path" 2>/dev/null || true)"
+      if [[ "$_gc_val" != "true" ]]; then
+        if [[ -n "$_gc_val" ]]; then
+          /usr/libexec/PlistBuddy -c "Set :com.apple.developer.game-center true" "$ent_path"
         else
-          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$ios_ent"
+          /usr/libexec/PlistBuddy -c "Add :com.apple.developer.game-center bool true" "$ent_path"
         fi
-        good "Updated $ios_ent → com.apple.developer.game-center=true"
+        good "Updated $ent_path → com.apple.developer.game-center=true"
       else
-        info "iOS entitlements already have Game Center: $ios_ent"
+        info "Entitlements already have Game Center: $ent_path"
       fi
     fi
-    set_engine_ini_value \
-      "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
-      "bEnableGameCenterSupport" \
-      "True"
-
   else
-    if [[ -f "$ios_ent" ]]; then
-      local _ios_gc_val
-      _ios_gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ios_ent" 2>/dev/null || true)"
-      if [[ -n "$_ios_gc_val" ]]; then
-        /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.game-center" "$ios_ent"
-        good "Removed com.apple.developer.game-center from $ios_ent"
+    if [[ -f "$ent_path" ]]; then
+      local _gc_val
+      _gc_val="$(/usr/libexec/PlistBuddy -c "Print :com.apple.developer.game-center" "$ent_path" 2>/dev/null || true)"
+      if [[ -n "$_gc_val" ]]; then
+        /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.game-center" "$ent_path"
+        good "Removed com.apple.developer.game-center from $ent_path"
       else
-        info "Game Center key not present in $ios_ent — nothing to remove"
+        info "Game Center key not present in $ent_path — nothing to remove"
       fi
     fi
+  fi
+}
+
+ensure_game_center_entitlements() {
+  # Manage com.apple.developer.game-center for the eligible distribution
+  # channels. Unset = no opinion; 1 = add the entitlement; 0 = remove it.
+  #
+  # Eligible channels:
+  #   - iOS (IOS_DISTRIBUTION=app-store): seeds Build/IOS/Resources/<Project>.entitlements
+  #     and writes bEnableGameCenterSupport under [/Script/IOSRuntimeSettings.IOSRuntimeSettings].
+  #   - Mac App Store (MAC_DISTRIBUTION=app-store): seeds
+  #     Build/Mac/Resources/<Project>.entitlements and writes bEnableGameCenterSupport
+  #     under [/Script/MacRuntimeSettings.MacRuntimeSettings].
+  #
+  # Not eligible: MAC_DISTRIBUTION=developer-id — AMFI rejects
+  # com.apple.developer.game-center on Developer-ID-signed Mac apps at exec
+  # regardless of notarization, because Apple does not encode the entitlement
+  # into Developer ID provisioning profile binaries. validate_distribution_compatibility
+  # already fails fast on that combination, so we don't need to re-check here.
+  #
+  # In both eligible cases we pass CODE_SIGN_ENTITLEMENTS=<path> directly to
+  # xcodebuild archive — UBT's `bEnableGameCenterSupport=True` only writes to
+  # Intermediate/<Platform>, which xcodebuild ignores under automatic signing.
+  [[ -n "${ENABLE_GAME_CENTER:-}" ]] || return 0
+
+  local project_name="${UPROJECT_NAME%.uproject}"
+  local action="remove"
+  [[ "$ENABLE_GAME_CENTER" == "1" ]] && action="add"
+
+  local touched=0
+
+  if [[ "${IOS_DISTRIBUTION:-off}" == "app-store" ]]; then
+    local ios_ent="$REPO_ROOT/Build/IOS/Resources/${project_name}.entitlements"
+    _ensure_game_center_entitlement_for_platform "$ios_ent" "$action"
     set_engine_ini_value \
       "[/Script/IOSRuntimeSettings.IOSRuntimeSettings]" \
       "bEnableGameCenterSupport" \
-      "False"
+      "$([[ "$action" == "add" ]] && echo "True" || echo "False")"
+    touched=1
+  fi
+
+  if [[ "${MAC_DISTRIBUTION:-developer-id}" == "app-store" ]]; then
+    local mac_ent="$REPO_ROOT/Build/Mac/Resources/${project_name}.entitlements"
+    _ensure_game_center_entitlement_for_platform "$mac_ent" "$action"
+    set_engine_ini_value \
+      "[/Script/MacRuntimeSettings.MacRuntimeSettings]" \
+      "bEnableGameCenterSupport" \
+      "$([[ "$action" == "add" ]] && echo "True" || echo "False")"
+    touched=1
+  fi
+
+  if [[ "$touched" -eq 0 ]]; then
+    warn "ENABLE_GAME_CENTER=$ENABLE_GAME_CENTER but no eligible channel — set MAC_DISTRIBUTION=app-store and/or IOS_DISTRIBUTION=app-store (Game Center is a Mac App Store / iOS feature; AMFI rejects it on Developer-ID Mac builds). Skipping."
   fi
 }
 
@@ -1757,9 +1782,29 @@ autodetect_ios_scheme_if_needed() {
   fi
 }
 
+autodetect_mas_export_plist_if_needed() {
+  # Auto-detect MAS-ExportOptions.plist by conventional name in repo root.
+  # MAS uses method=app-store-connect, same as iOS — so a content-based scan
+  # would tie iOS and Mac App Store plists; require the conventional filename
+  # ("MAS-ExportOptions.plist") to disambiguate.
+  [[ "${MAC_DISTRIBUTION:-developer-id}" == "app-store" ]] || return 0
+  is_placeholder "${MAS_EXPORT_PLIST:-}" || return 0
+
+  local conventional="$REPO_ROOT/MAS-ExportOptions.plist"
+  if [[ -f "$conventional" ]]; then
+    MAS_EXPORT_PLIST="$conventional"
+    info "Auto-detected MAS ExportOptions.plist (by name): $MAS_EXPORT_PLIST"
+    return 0
+  fi
+
+  warn "No MAS-ExportOptions.plist found. Copy MAS-ExportOptions.plist.example to MAS-ExportOptions.plist and edit, or pass --mas-export-plist PATH."
+}
+
 autodetect_ios_export_plist_if_needed() {
   # Mirror autodetect_export_plist_if_needed for iOS. Skip Mac-only methods
-  # (developer-id, mac-application) when scanning by content.
+  # (developer-id, mac-application) when scanning by content. Also skip files
+  # already claimed by MAS_EXPORT_PLIST to avoid binding the same plist to
+  # both platforms.
   [[ "${ENABLE_IOS:-0}" == "1" ]] || return 0
   is_placeholder "${IOS_EXPORT_PLIST:-}" || return 0
 
@@ -1773,6 +1818,11 @@ autodetect_ios_export_plist_if_needed() {
   local matches=() p flat
   while IFS= read -r p; do
     [[ -n "$p" ]] || continue
+    # Skip any plist already claimed by MAS_EXPORT_PLIST so the MAS plist isn't
+    # accidentally bound to iOS (both use method=app-store-connect).
+    if [[ -n "${MAS_EXPORT_PLIST:-}" && "$p" == "$MAS_EXPORT_PLIST" ]]; then
+      continue
+    fi
     flat="$(/bin/cat "$p" 2>/dev/null | /usr/bin/tr -d '[:space:]')"
     if echo "$flat" | /usr/bin/grep -qiE '<key>method</key><string>(developer-id|mac-application)</string>'; then
       continue
@@ -1816,9 +1866,9 @@ _extract_ue_filepath() {
   printf '%s' "$v"
 }
 
-autodetect_ios_asc_credentials_if_needed() {
-  # Read App Store Connect API credentials from Config/DefaultEngine.ini
-  # if Xcode previously configured them there. The fields Xcode writes are
+autodetect_asc_credentials_if_needed() {
+  # Read App Store Connect API credentials from Config/DefaultEngine.ini if
+  # Xcode previously configured them there. The fields Xcode writes are
   # AppStoreConnectKeyID, AppStoreConnectIssuerID, AppStoreConnectKeyPath
   # under [/Script/IOSRuntimeSettings.IOSRuntimeSettings] or its enclosing
   # section. We read them with the existing simple read_ini_value helper —
@@ -1827,32 +1877,40 @@ autodetect_ios_asc_credentials_if_needed() {
   # AppStoreConnectKeyPath is serialized as an FFilePath struct:
   #   AppStoreConnectKeyPath=(FilePath="/Users/.../AuthKey_XXXX.p8")
   # so we run it through _extract_ue_filepath to get the plain path.
-  [[ "${ENABLE_IOS:-0}" == "1" ]] || return 0
-  [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]] || return 0
+  #
+  # Fires when either the iOS or Mac App Store upload/validate toggle is set
+  # — the same ASC API key serves both platforms.
+  local needs_creds=0
+  [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]] && needs_creds=1
+  [[ "${MAS_ASC_VALIDATE:-0}" == "1" || "${MAS_ASC_UPLOAD:-0}" == "1" ]] && needs_creds=1
+  [[ "$needs_creds" -eq 1 ]] || return 0
 
   local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
   [[ -f "$engine_ini" ]] || return 0
 
   local v
-  if is_placeholder "${IOS_ASC_API_KEY_ID:-}"; then
+  if is_placeholder "${ASC_API_KEY_ID:-}"; then
     v="$(read_ini_value "$engine_ini" "AppStoreConnectKeyID")"
     if [[ -n "$v" ]]; then
+      ASC_API_KEY_ID="$v"
       IOS_ASC_API_KEY_ID="$v"
-      info "Auto-detected IOS_ASC_API_KEY_ID from DefaultEngine.ini: $IOS_ASC_API_KEY_ID"
+      info "Auto-detected ASC_API_KEY_ID from DefaultEngine.ini: $ASC_API_KEY_ID"
     fi
   fi
-  if is_placeholder "${IOS_ASC_API_ISSUER:-}"; then
+  if is_placeholder "${ASC_API_ISSUER:-}"; then
     v="$(read_ini_value "$engine_ini" "AppStoreConnectIssuerID")"
     if [[ -n "$v" ]]; then
+      ASC_API_ISSUER="$v"
       IOS_ASC_API_ISSUER="$v"
-      info "Auto-detected IOS_ASC_API_ISSUER from DefaultEngine.ini"
+      info "Auto-detected ASC_API_ISSUER from DefaultEngine.ini"
     fi
   fi
-  if is_placeholder "${IOS_ASC_API_KEY_PATH:-}"; then
+  if is_placeholder "${ASC_API_KEY_PATH:-}"; then
     v="$(read_ini_value "$engine_ini" "AppStoreConnectKeyPath")"
     if [[ -n "$v" ]]; then
-      IOS_ASC_API_KEY_PATH="$(_extract_ue_filepath "$v")"
-      info "Auto-detected IOS_ASC_API_KEY_PATH from DefaultEngine.ini: $IOS_ASC_API_KEY_PATH"
+      ASC_API_KEY_PATH="$(_extract_ue_filepath "$v")"
+      IOS_ASC_API_KEY_PATH="$ASC_API_KEY_PATH"
+      info "Auto-detected ASC_API_KEY_PATH from DefaultEngine.ini: $ASC_API_KEY_PATH"
     fi
   fi
 }
@@ -2251,9 +2309,12 @@ MACOS_APPICON_SET_NAME="${MACOS_APPICON_SET_NAME:-}"
 #                    com.apple.developer.game-center on Developer-ID-signed
 #                    Mac apps at exec, regardless of notarization.
 #     app-store      Mac App Store: Apple Distribution signing, App Sandbox,
-#                    Game Center allowed, Steam forbidden, uploaded via
-#                    `xcrun altool` to App Store Connect. Pipeline is on the
-#                    roadmap — currently rejected with guidance.
+#                    Game Center allowed, Steam forbidden. Mirrors the iOS
+#                    pipeline: xcodebuild archive + export under automatic
+#                    provisioning, then `xcrun altool -t macos` to validate /
+#                    upload the exported .app to App Store Connect. No ZIP,
+#                    no DMG, no notarize, no staple — ASC review is the
+#                    equivalent gate.
 #     off            Skip Mac entirely (iOS-only run).
 #
 #   IOS_DISTRIBUTION=
@@ -2284,16 +2345,39 @@ IOS_EXPORT_PLIST="${IOS_EXPORT_PLIST:-}"
 IOS_APPICON_SET_NAME="${IOS_APPICON_SET_NAME:-}"
 IOS_MARKETING_VERSION="${IOS_MARKETING_VERSION:-}"
 
-# iOS App Store Connect upload (xcrun altool — NOT notarytool; different
+# App Store Connect API credentials (xcrun altool — NOT notarytool; different
 # tools, different services). altool talks to ASC's submission/validation
-# API and is the documented path for IPA uploads. It auths via an API key
-# (.p8 file + key ID + issuer UUID), distinct from the keychain profile
-# notarytool uses for Mac notarization.
+# API and is the documented path for both IPA and .app (Mac App Store) uploads.
+# It auths via an API key (.p8 file + key ID + issuer UUID), distinct from
+# the keychain profile notarytool uses for Mac Developer ID notarization.
+#
+# A single Apple Developer account uses one ASC API key for both iOS and Mac
+# uploads — ASC_API_KEY_ID/ISSUER/PATH are the canonical names, shared across
+# the iOS and Mac App Store pipelines. The legacy IOS_ASC_API_* aliases are
+# still honored (see resolve_asc_credential_aliases() below) so existing
+# .env / CI configs keep working.
+ASC_API_KEY_ID="${ASC_API_KEY_ID:-}"
+ASC_API_ISSUER="${ASC_API_ISSUER:-}"
+ASC_API_KEY_PATH="${ASC_API_KEY_PATH:-}"
+
+# Per-platform validate/upload toggles. The validate/upload action runs only
+# when the platform's toggle is on (MAS_ASC_* for Mac App Store, IOS_ASC_*
+# for iOS); both consume the shared ASC_API_* creds.
 IOS_ASC_VALIDATE="${IOS_ASC_VALIDATE:-0}"
 IOS_ASC_UPLOAD="${IOS_ASC_UPLOAD:-0}"
+MAS_ASC_VALIDATE="${MAS_ASC_VALIDATE:-0}"
+MAS_ASC_UPLOAD="${MAS_ASC_UPLOAD:-0}"
+
+# Legacy iOS-prefixed ASC credential variables. Kept for back-compat; resolved
+# into ASC_API_* by resolve_asc_credential_aliases() after CLI parsing.
 IOS_ASC_API_KEY_ID="${IOS_ASC_API_KEY_ID:-}"
 IOS_ASC_API_ISSUER="${IOS_ASC_API_ISSUER:-}"
 IOS_ASC_API_KEY_PATH="${IOS_ASC_API_KEY_PATH:-}"
+
+# Mac App Store ExportOptions.plist path (separate from EXPORT_PLIST which is
+# Developer ID-only — the two have different `method` values and Apple rejects
+# the wrong one at export time).
+MAS_EXPORT_PLIST="${MAS_EXPORT_PLIST:-}"
 
 ENABLE_ZIP="${ENABLE_ZIP:-}"
 ENABLE_DMG="${ENABLE_DMG:-0}"
@@ -2392,9 +2476,11 @@ Options (highest priority):
                                        app-store — Mac App Store (Apple
                                          Distribution + App Sandbox + ASC
                                          upload, Game Center allowed, Steam
-                                         forbidden). Pipeline is on the
-                                         roadmap; currently fails fast with
-                                         guidance.
+                                         forbidden). Mirrors iOS: xcodebuild
+                                         archive + export under automatic
+                                         provisioning, then xcrun altool
+                                         -t macos to validate/upload. No
+                                         notarize/staple/ZIP/DMG.
                                        off — skip Mac entirely (iOS-only run).
   --ios-distribution VALUE           iOS distribution channel:
                                        off (default) — skip iOS.
@@ -2421,18 +2507,33 @@ Options (highest priority):
                                      (when not set, MARKETING_VERSION applies
                                      to both platforms)
   --ios-validate-ipa                 validate the IPA via xcrun altool
-                                     --validate-app (App Store Connect; NOT
-                                     notarytool — different tool, different
+                                     --validate-app -t ios (App Store Connect;
+                                     NOT notarytool — different tool, different
                                      service)
   --ios-upload-ipa                   upload the IPA via xcrun altool
-                                     --upload-app; implies --ios-validate-ipa
-  --ios-asc-api-key-id ID            App Store Connect API key ID (10-char)
-  --ios-asc-api-issuer UUID          ASC API issuer UUID
-  --ios-asc-api-key-path PATH        path to the .p8 API key file
+                                     --upload-app -t ios; implies
+                                     --ios-validate-ipa
+  --mas-export-plist PATH            Mac App Store ExportOptions.plist path
+                                     (auto-detected from
+                                     "MAS-ExportOptions.plist" in repo root)
+  --mas-validate-app                 validate the exported .app via xcrun
+                                     altool --validate-app -t macos (Mac App
+                                     Store, uses MAC_DISTRIBUTION=app-store)
+  --mas-upload-app                   upload the exported .app via xcrun altool
+                                     --upload-app -t macos; implies
+                                     --mas-validate-app
+  --asc-api-key-id ID                App Store Connect API key ID (10-char,
+                                     shared between iOS and Mac App Store
+                                     uploads — one key per developer account)
+  --asc-api-issuer UUID              ASC API issuer UUID
+  --asc-api-key-path PATH            path to the .p8 API key file
                                      (auto-detected from
                                      Config/DefaultEngine.ini's
                                      AppStoreConnectKeyID/IssuerID/KeyPath
                                      fields if Xcode wrote them)
+  --ios-asc-api-key-id ID            (legacy alias for --asc-api-key-id)
+  --ios-asc-api-issuer UUID          (legacy alias for --asc-api-issuer)
+  --ios-asc-api-key-path PATH        (legacy alias for --asc-api-key-path)
 
   --zip / --no-zip
   --dmg / --no-dmg
@@ -2449,18 +2550,19 @@ Options (highest priority):
   --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
   --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
   --game-mode / --no-game-mode       (stamp LSSupportsGameMode + GCSupportsGameMode in xcconfig, default: YES)
-  --game-center / --no-game-center   iOS-only: seed Build/IOS/Resources/<project>.entitlements
+  --game-center / --no-game-center   Seed Build/<Platform>/Resources/<project>.entitlements
                                      with com.apple.developer.game-center, write
                                      bEnableGameCenterSupport=True to DefaultEngine.ini,
-                                     and pass CODE_SIGN_ENTITLEMENTS=<path> to the iOS
-                                     xcodebuild archive (UBT's intermediate entitlements
-                                     file is ignored under automatic signing). No-op for
-                                     Mac — Game Center on Mac requires App Store
-                                     distribution, which ship.sh doesn't produce
-                                     (Direct Distribution / Developer ID Mac apps
-                                     cannot carry com.apple.developer.game-center;
-                                     AMFI rejects the entitlement at launch).
-                                     Default: unset (leaves things alone).
+                                     and pass CODE_SIGN_ENTITLEMENTS=<path> to xcodebuild
+                                     archive (UBT's intermediate entitlements file is
+                                     ignored under automatic signing). Eligible
+                                     channels: iOS (IOS_DISTRIBUTION=app-store) and Mac
+                                     App Store (MAC_DISTRIBUTION=app-store). Not
+                                     available for MAC_DISTRIBUTION=developer-id —
+                                     AMFI rejects com.apple.developer.game-center on
+                                     Developer-ID-signed Mac apps at exec, regardless
+                                     of notarization. Default: unset (leaves things
+                                     alone).
   --app-category STRING              (INFOPLIST_KEY_LSApplicationCategoryType, e.g. public.app-category.games)
   --set-cfbundle-version STRING      set CFBundleVersion to STRING for this build
                                      AND persist it to .env as the new baseline.
@@ -2546,6 +2648,15 @@ while [[ $# -gt 0 ]]; do
     --ios-marketing-version)  IOS_MARKETING_VERSION="$2"; shift 2 ;;
     --ios-validate-ipa)       IOS_ASC_VALIDATE="1"; shift ;;
     --ios-upload-ipa)         IOS_ASC_UPLOAD="1"; IOS_ASC_VALIDATE="1"; shift ;;
+    --mas-export-plist)       MAS_EXPORT_PLIST="$2"; shift 2 ;;
+    --mas-validate-app)       MAS_ASC_VALIDATE="1"; shift ;;
+    --mas-upload-app)         MAS_ASC_UPLOAD="1"; MAS_ASC_VALIDATE="1"; shift ;;
+    # Generic ASC credentials (shared by iOS + Mac App Store uploads).
+    --asc-api-key-id)         ASC_API_KEY_ID="$2"; shift 2 ;;
+    --asc-api-issuer)         ASC_API_ISSUER="$2"; shift 2 ;;
+    --asc-api-key-path)       ASC_API_KEY_PATH="$2"; shift 2 ;;
+    # Legacy iOS-prefixed ASC credential flags (still honored; resolved into
+    # ASC_API_* by resolve_asc_credential_aliases()).
     --ios-asc-api-key-id)     IOS_ASC_API_KEY_ID="$2"; shift 2 ;;
     --ios-asc-api-issuer)     IOS_ASC_API_ISSUER="$2"; shift 2 ;;
     --ios-asc-api-key-path)   IOS_ASC_API_KEY_PATH="$2"; shift 2 ;;
@@ -2639,8 +2750,6 @@ resolve_distribution_flags() {
 # binary the OS will refuse to run. See docs/configuration.md "Distribution
 # channels" and docs/gotchas.md for the underlying reasoning.
 # -----------------------------------------------------------------------------
-ROADMAP_ISSUE_URL="https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27"
-
 validate_distribution_compatibility() {
   case "$MAC_DISTRIBUTION" in
     developer-id|app-store|off) ;;
@@ -2660,19 +2769,44 @@ validate_distribution_compatibility() {
   fi
 
   if [[ "$MAC_DISTRIBUTION" == "developer-id" && "${ENABLE_GAME_CENTER:-}" == "1" && "$IOS_DISTRIBUTION" != "app-store" ]]; then
-    die "MAC_DISTRIBUTION=developer-id is incompatible with ENABLE_GAME_CENTER=1. Mac Game Center is structurally a Mac App Store feature — AMFI rejects com.apple.developer.game-center on Developer-ID-signed Mac apps at exec, regardless of notarization. For Mac Game Center, you'll need MAC_DISTRIBUTION=app-store (on the roadmap: $ROADMAP_ISSUE_URL). For iOS Game Center on this run, also pass --ios."
+    die "MAC_DISTRIBUTION=developer-id is incompatible with ENABLE_GAME_CENTER=1. Mac Game Center is structurally a Mac App Store feature — AMFI rejects com.apple.developer.game-center on Developer-ID-signed Mac apps at exec, regardless of notarization. For Mac Game Center, use MAC_DISTRIBUTION=app-store. For iOS Game Center on this run, also pass --ios."
   fi
+}
 
-  # MAC_DISTRIBUTION=app-store is recognized but the pipeline isn't wired yet.
-  # Fail fast with guidance rather than letting a half-implemented branch run.
-  if [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
-    die "MAC_DISTRIBUTION=app-store is on the roadmap but not yet implemented in ship.sh. Tracked at: $ROADMAP_ISSUE_URL
-For now, the workaround is to use Xcode Organizer → Distribute App → App Store Connect to submit a Mac App Store build. The Direct Distribution (Developer ID) path is fully supported via MAC_DISTRIBUTION=developer-id (default)."
+# -----------------------------------------------------------------------------
+# ASC credential alias resolution
+#
+# A single Apple Developer account has one App Store Connect API key, used by
+# both iOS IPA uploads and Mac App Store .app uploads. The canonical variable
+# names are ASC_API_KEY_ID / ASC_API_ISSUER / ASC_API_KEY_PATH; the legacy
+# IOS_ASC_API_* names are still honored. Precedence:
+#
+#   1. ASC_API_* if set (either env/.env or --asc-api-* CLI flag)
+#   2. IOS_ASC_API_* (legacy) as a fallback
+#
+# After this runs, ASC_API_* is authoritative everywhere; the IOS_ASC_API_*
+# variables are kept in sync for any code still reading them and for the
+# print_config view.
+# -----------------------------------------------------------------------------
+resolve_asc_credential_aliases() {
+  if is_placeholder "${ASC_API_KEY_ID:-}" && ! is_placeholder "${IOS_ASC_API_KEY_ID:-}"; then
+    ASC_API_KEY_ID="$IOS_ASC_API_KEY_ID"
   fi
+  if is_placeholder "${ASC_API_ISSUER:-}" && ! is_placeholder "${IOS_ASC_API_ISSUER:-}"; then
+    ASC_API_ISSUER="$IOS_ASC_API_ISSUER"
+  fi
+  if is_placeholder "${ASC_API_KEY_PATH:-}" && ! is_placeholder "${IOS_ASC_API_KEY_PATH:-}"; then
+    ASC_API_KEY_PATH="$IOS_ASC_API_KEY_PATH"
+  fi
+  # Project back so legacy reads stay consistent.
+  IOS_ASC_API_KEY_ID="$ASC_API_KEY_ID"
+  IOS_ASC_API_ISSUER="$ASC_API_ISSUER"
+  IOS_ASC_API_KEY_PATH="$ASC_API_KEY_PATH"
 }
 
 resolve_distribution_flags
 validate_distribution_compatibility
+resolve_asc_credential_aliases
 
 # If REPO_ROOT is still a placeholder/empty, assume this script lives in the project root.
 if is_placeholder "${REPO_ROOT:-}"; then
@@ -2742,7 +2876,8 @@ autodetect_names_if_needed
 autodetect_workspace_guess_if_needed
 autodetect_export_plist_if_needed
 autodetect_ios_export_plist_if_needed
-autodetect_ios_asc_credentials_if_needed
+autodetect_mas_export_plist_if_needed
+autodetect_asc_credentials_if_needed
 autodetect_steam_if_needed
 autodetect_steam_dylib_src_from_engine_if_needed
 
@@ -2792,21 +2927,26 @@ require_not_placeholder "UPROJECT_NAME" "$UPROJECT_NAME" "Example: MyGame.uproje
 require_not_placeholder "UPROJECT_PATH" "$UPROJECT_PATH" "Example: /path/to/MyGame.uproject"
 require_not_placeholder "UE_ROOT" "$UE_ROOT" "Example: /Users/Shared/Epic Games/UE_5.7"
 require_not_placeholder "DEVELOPMENT_TEAM" "$DEVELOPMENT_TEAM" "Example: ABCDE12345"
-# SIGN_IDENTITY is Mac-specific (Developer ID Application). iOS uses
-# automatic provisioning via xcodebuild, so don't require it for IOS_ONLY runs.
-if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+# SIGN_IDENTITY is required only for the Developer ID channel — that's the
+# only path that signs per-component with codesign --sign. App Store
+# (Mac + iOS) uses xcodebuild + automatic provisioning, which selects the
+# identity via the team ID.
+if [[ "$MAC_DISTRIBUTION" == "developer-id" ]]; then
   require_not_placeholder "SIGN_IDENTITY" "$SIGN_IDENTITY" "Example: Developer ID Application: Your Company (ABCDE12345)"
 fi
 require_not_placeholder "SHORT_NAME" "$SHORT_NAME" "Example: MG"
 require_not_placeholder "LONG_NAME" "$LONG_NAME" "Example: MyGame"
 
 # Xcode inputs are only required if you use the Xcode archive/export steps.
-# When IOS_ONLY=1, Mac is skipped entirely so SIGN_IDENTITY / EXPORT_PLIST /
-# XCODE_WORKSPACE are not required either.
-# Workspace + scheme detection and validation are deferred to after
-# GenerateProjectFiles runs (see post-regen block below).
-if [[ "$USE_XCODE_EXPORT" == "1" && "${IOS_ONLY:-0}" != "1" ]]; then
+# Each Mac channel has its own ExportOptions.plist (different `method` values —
+# Apple rejects the wrong one at export). Workspace + scheme detection and
+# validation are deferred to after GenerateProjectFiles runs (see post-regen
+# block below).
+if [[ "$USE_XCODE_EXPORT" == "1" && "$MAC_DISTRIBUTION" == "developer-id" ]]; then
   require_not_placeholder "EXPORT_PLIST" "$EXPORT_PLIST" "Point at an ExportOptions.plist compatible with Developer ID exports"
+fi
+if [[ "$USE_XCODE_EXPORT" == "1" && "$MAC_DISTRIBUTION" == "app-store" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
+  require_not_placeholder "MAS_EXPORT_PLIST" "${MAS_EXPORT_PLIST:-}" "Copy MAS-ExportOptions.plist.example to MAS-ExportOptions.plist and edit"
 fi
 
 # iOS export plist validated early (doesn't depend on workspace generation).
@@ -2865,6 +3005,12 @@ if [[ -n "${NOTARIZE:-}" ]]; then
     *) die "NOTARIZE must be 'yes' or 'no'" ;;
   esac
   unset _no_lower
+elif [[ "$MAC_DISTRIBUTION" != "developer-id" ]]; then
+  # Notarization is only meaningful for the Developer ID channel — the Mac
+  # App Store + iOS paths gate on App Store review, not notarytool. Default
+  # off and skip the prompt to keep MAS runs non-interactive.
+  NOTARIZE_ENABLED=0
+  NOTARIZE="no"
 else
   read -r -p "Notarize + staple this build? (Y/n) " NOTARIZE_ANSWER
   if [[ "${NOTARIZE_ANSWER:-Y}" =~ ^[Nn]$ ]]; then
@@ -2930,10 +3076,15 @@ echo "Log file: $LOG_FILE" >&3
 trap on_error_exit ERR
 trap 'restore_content_version_file' EXIT
 
-# Build outputs (Mac)
+# Build outputs (Mac, Developer ID)
 ARCHIVE_PATH="$BUILD_DIR/${SHORT_NAME}.xcarchive"
 EXPORT_DIR="$BUILD_DIR/${SHORT_NAME}-export"
 ZIP_PATH="$BUILD_DIR/${LONG_NAME}.zip"
+
+# Build outputs (Mac, App Store) — separate paths so alternating channels
+# don't overwrite each other's artifacts.
+MAS_ARCHIVE_PATH="$BUILD_DIR/${SHORT_NAME}-mas.xcarchive"
+MAS_EXPORT_DIR="$BUILD_DIR/${SHORT_NAME}-mas-export"
 
 # Build outputs (iOS) — parallel of Mac, but under Saved/Packages/IOS/.
 # UAT writes to UAT_ARCHIVE_DIR/<TargetPlatform>/, which for iOS is
@@ -2967,15 +3118,28 @@ command -v codesign  >/dev/null 2>&1 || die "codesign not found (unexpected on m
 
 # Verify the Mac signing identity exists in the keychain before the multi-hour
 # build. A typo or expired cert will fail here rather than after UAT finishes
-# cooking. iOS doesn't use SIGN_IDENTITY (xcodebuild + automatic provisioning
-# handles signing via the team ID), so skip this check on IOS_ONLY runs.
-if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+# cooking.
+#   - developer-id: explicit Developer ID Application identity (SIGN_IDENTITY)
+#     is required because we sign per-component with codesign --sign.
+#   - app-store: xcodebuild + automatic provisioning picks the identity, so
+#     we don't pin SIGN_IDENTITY — but we still verify an "Apple Distribution"
+#     (preferred) or "3rd Party Mac Developer Application" (legacy) identity
+#     is present, otherwise xcodebuild archive will fail mid-build.
+#   - off (IOS_ONLY): no Mac identity needed.
+if [[ "$MAC_DISTRIBUTION" == "developer-id" ]]; then
   if ! /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep -qF "$SIGN_IDENTITY"; then
     echo "Available Developer ID codesigning identities:" >&3
     /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep "Developer ID" >&3 || echo "  (none found)" >&3
     die "SIGN_IDENTITY not found in keychain: $SIGN_IDENTITY"
   fi
   good "Signing identity found in keychain."
+elif [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
+  if ! /usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/grep -qE "(Apple Distribution|3rd Party Mac Developer Application)"; then
+    echo "Available codesigning identities:" >&3
+    /usr/bin/security find-identity -v -p codesigning 2>/dev/null >&3 || echo "  (none found)" >&3
+    die "No Mac App Store signing identity in keychain. MAC_DISTRIBUTION=app-store requires either 'Apple Distribution' (preferred) or '3rd Party Mac Developer Application' (legacy). Create one via Xcode → Settings → Accounts → Manage Certificates, or developer.apple.com → Certificates."
+  fi
+  good "Mac App Store signing identity found in keychain (Apple Distribution / 3rd Party Mac Developer Application)."
 fi
 
 # Xcode steps are optional
@@ -2998,9 +3162,28 @@ if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
   good "Notary profile '$NOTARY_PROFILE' is accessible."
 fi
 
-# Mac ExportOptions.plist must exist if we're exporting Mac (i.e. not IOS_ONLY).
-if [[ "$USE_XCODE_EXPORT" == "1" && "${IOS_ONLY:-0}" != "1" ]]; then
+# Mac Developer ID ExportOptions.plist must exist.
+if [[ "$USE_XCODE_EXPORT" == "1" && "$MAC_DISTRIBUTION" == "developer-id" ]]; then
   [[ -f "$EXPORT_PLIST" ]] || die "ExportOptions.plist not found: $EXPORT_PLIST"
+fi
+
+# Mac App Store ExportOptions.plist must exist + sanity-check its contents.
+# Apple rejects mismatched method/teamID at export time, so validating now
+# turns a multi-hour wasted build into a one-line error.
+if [[ "$USE_XCODE_EXPORT" == "1" && "$MAC_DISTRIBUTION" == "app-store" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
+  [[ -f "${MAS_EXPORT_PLIST:-}" ]] || die "MAS-ExportOptions.plist not found: ${MAS_EXPORT_PLIST:-<unset>}"
+  _mas_plist_flat="$(/bin/cat "$MAS_EXPORT_PLIST" 2>/dev/null | /usr/bin/tr -d '[:space:]')"
+  if ! echo "$_mas_plist_flat" | /usr/bin/grep -qE '<key>method</key><string>app-store-connect</string>'; then
+    die "MAS-ExportOptions.plist ($MAS_EXPORT_PLIST) missing <key>method</key><string>app-store-connect</string>. Mac App Store exports require method=app-store-connect."
+  fi
+  if ! echo "$_mas_plist_flat" | /usr/bin/grep -qE '<key>signingStyle</key><string>automatic</string>'; then
+    die "MAS-ExportOptions.plist ($MAS_EXPORT_PLIST) missing <key>signingStyle</key><string>automatic</string>. Mac App Store path uses automatic provisioning (-allowProvisioningUpdates)."
+  fi
+  if ! echo "$_mas_plist_flat" | /usr/bin/grep -qE "<key>teamID</key><string>${DEVELOPMENT_TEAM}</string>"; then
+    die "MAS-ExportOptions.plist ($MAS_EXPORT_PLIST) teamID does not match DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM. Update the plist's <key>teamID</key><string>...</string> to '$DEVELOPMENT_TEAM'."
+  fi
+  unset _mas_plist_flat
+  good "MAS-ExportOptions.plist validates: method=app-store-connect, signingStyle=automatic, teamID=$DEVELOPMENT_TEAM."
 fi
 
 # iOS ExportOptions.plist must exist if we're exporting iOS.
@@ -3009,15 +3192,21 @@ if [[ "${ENABLE_IOS:-0}" == "1" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}
 fi
 
 # ASC creds: validate up-front so a typo in the API key path doesn't fail
-# after a multi-minute Mac build + iOS archive + IPA export.
-if [[ "${ENABLE_IOS:-0}" == "1" && "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
-  if [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]]; then
-    require_not_placeholder "IOS_ASC_API_KEY_ID"   "${IOS_ASC_API_KEY_ID:-}"   "10-char ASC API key ID; get from appstoreconnect.apple.com → Users and Access → Integrations → App Store Connect API"
-    require_not_placeholder "IOS_ASC_API_ISSUER"   "${IOS_ASC_API_ISSUER:-}"   "ASC API issuer UUID (same page as the key ID)"
-    require_not_placeholder "IOS_ASC_API_KEY_PATH" "${IOS_ASC_API_KEY_PATH:-}" "Path to the .p8 file you downloaded from ASC"
-    [[ -f "$IOS_ASC_API_KEY_PATH" ]] || die "ASC API key file not found: $IOS_ASC_API_KEY_PATH"
+# after a multi-minute Mac build + iOS archive + IPA export. Used by both
+# iOS (--ios-validate-ipa/--ios-upload-ipa) and Mac App Store
+# (--mas-validate-app/--mas-upload-app) — same API key, same .p8 file.
+if [[ "${PRINT_CONFIG:-0}" != "1" && "${DRY_RUN:-0}" != "1" ]]; then
+  _need_asc=0
+  [[ "${ENABLE_IOS:-0}" == "1" ]] && [[ "${IOS_ASC_VALIDATE:-0}" == "1" || "${IOS_ASC_UPLOAD:-0}" == "1" ]] && _need_asc=1
+  [[ "$MAC_DISTRIBUTION" == "app-store" ]] && [[ "${MAS_ASC_VALIDATE:-0}" == "1" || "${MAS_ASC_UPLOAD:-0}" == "1" ]] && _need_asc=1
+  if [[ "$_need_asc" -eq 1 ]]; then
+    require_not_placeholder "ASC_API_KEY_ID"   "${ASC_API_KEY_ID:-}"   "10-char ASC API key ID; get from appstoreconnect.apple.com → Users and Access → Integrations → App Store Connect API"
+    require_not_placeholder "ASC_API_ISSUER"   "${ASC_API_ISSUER:-}"   "ASC API issuer UUID (same page as the key ID)"
+    require_not_placeholder "ASC_API_KEY_PATH" "${ASC_API_KEY_PATH:-}" "Path to the .p8 file you downloaded from ASC"
+    [[ -f "$ASC_API_KEY_PATH" ]] || die "ASC API key file not found: $ASC_API_KEY_PATH"
     good "ASC API credentials accessible."
   fi
+  unset _need_asc
 fi
 
 if [[ "$ENABLE_DMG" == "1" ]]; then
@@ -3038,7 +3227,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
   if [[ "$USE_XCODE_EXPORT" == "1" && "$REGEN_PROJECT_FILES" == "1" ]]; then
     steps="$steps → GenerateProjectFiles"
   fi
-  if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+  if [[ "$MAC_DISTRIBUTION" == "developer-id" ]]; then
     steps="$steps → UAT BuildCookRun (Mac)"
     if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
       steps="$steps → Mac Xcode archive/export"
@@ -3058,18 +3247,26 @@ if [[ "$DRY_RUN" == "1" ]]; then
     if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
       steps="$steps → Mac notarize+staple"
     fi
+  elif [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
+    steps="$steps → UAT BuildCookRun (Mac) → MAS archive/export (automatic provisioning)"
+    if [[ "${MAS_ASC_VALIDATE:-0}" == "1" ]]; then
+      steps="$steps → MAS ASC validate (-t macos)"
+    fi
+    if [[ "${MAS_ASC_UPLOAD:-0}" == "1" ]]; then
+      steps="$steps → MAS ASC upload (-t macos)"
+    fi
   fi
   if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
     steps="$steps → UAT BuildCookRun (iOS) → iOS archive/export → IPA"
     if [[ "${IOS_ASC_VALIDATE:-0}" == "1" ]]; then
-      steps="$steps → ASC validate"
+      steps="$steps → iOS ASC validate (-t ios)"
     fi
     if [[ "${IOS_ASC_UPLOAD:-0}" == "1" ]]; then
-      steps="$steps → ASC upload"
+      steps="$steps → iOS ASC upload (-t ios)"
     fi
   fi
   if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
-    [[ "${IOS_ONLY:-0}" != "1" ]] && echo "Would wipe Mac build dir: $BUILD_DIR" >&3
+    [[ "$MAC_DISTRIBUTION" != "off" ]] && echo "Would wipe Mac build dir: $BUILD_DIR" >&3
     [[ "${ENABLE_IOS:-0}" == "1" ]] && echo "Would wipe iOS build dir: $IOS_BUILD_DIR" >&3
   fi
   echo "Would run: $steps" >&3
@@ -3082,8 +3279,15 @@ fi
 _resolve_cfbundle_version_for_build
 
 echo "== Prep output locations ==" >&3
-if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+if [[ "$MAC_DISTRIBUTION" == "developer-id" ]]; then
   rm -rf "$ARCHIVE_PATH" "$EXPORT_DIR" "$ZIP_PATH"
+  if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
+    warn "CLEAN_BUILD_DIR=1 — wiping entire build dir: $BUILD_DIR"
+    rm -rf "$BUILD_DIR"
+  fi
+  mkdir -p "$BUILD_DIR"
+elif [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
+  rm -rf "$MAS_ARCHIVE_PATH" "$MAS_EXPORT_DIR"
   if [[ "$CLEAN_BUILD_DIR" == "1" ]]; then
     warn "CLEAN_BUILD_DIR=1 — wiping entire build dir: $BUILD_DIR"
     rm -rf "$BUILD_DIR"
@@ -3155,9 +3359,21 @@ if [[ "${IOS_ONLY:-0}" != "1" ]]; then
   echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3
 fi
 
-# Mac post-UAT pipeline (Xcode archive/export → codesign → ZIP/DMG → notarize).
-# Skipped entirely when IOS_ONLY=1.
-if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+# Mac post-UAT pipeline. Two channels, picked by MAC_DISTRIBUTION:
+#
+#   developer-id : Xcode archive (manual entitlements) → per-component
+#                  codesign → optional ZIP/DMG → optional notarize + staple.
+#                  This is the direct-download path (most of ship.sh's
+#                  existing logic).
+#
+#   app-store    : Xcode archive (automatic provisioning,
+#                  -allowProvisioningUpdates) → exportArchive against
+#                  MAS-ExportOptions.plist → optional xcrun altool -t macos
+#                  validate/upload. No codesign loop, no notarize/staple,
+#                  no ZIP/DMG. ASC review is the equivalent gate.
+#
+# Skipped entirely when MAC_DISTRIBUTION=off (IOS_ONLY runs).
+if [[ "$MAC_DISTRIBUTION" == "developer-id" ]]; then
 
 if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
   # CFBundleVersion build-setting override. Apple-documented: command-line
@@ -3563,7 +3779,84 @@ else
   echo "== Notarization disabled (NOTARIZE=no) ==" >&3
 fi
 
-fi  # end if [[ "${IOS_ONLY:-0}" != "1" ]] — Mac post-UAT pipeline
+fi  # end if [[ "$MAC_DISTRIBUTION" == "developer-id" ]] — Mac Developer ID pipeline
+
+# ---------------------------------------------------------------------------
+# Mac App Store pipeline (Xcode archive/export under automatic provisioning,
+# optional xcrun altool -t macos validate/upload). Mirrors the iOS pipeline
+# below — same tooling, only the -t target differs. No codesign loop, no
+# entitlements temp file, no notarize/staple, no ZIP/DMG: ASC review is the
+# equivalent gate, and the script-generated entitlements (Steam-style) would
+# get an outright reject from MAS review.
+# ---------------------------------------------------------------------------
+if [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
+  # CFBundleVersion override mirrors the Developer ID branch — Apple
+  # documented: command-line build settings beat xcconfig.
+  _mas_xcb_settings=()
+  [[ -n "${CFBUNDLE_VERSION:-}" ]] && _mas_xcb_settings+=("CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION")
+  # Mac Game Center is allowed on this channel (the entitlement only flies
+  # under MAS provisioning). The .entitlements file was seeded by
+  # ensure_game_center_entitlements() pre-archive.
+  if [[ "${ENABLE_GAME_CENTER:-}" == "1" ]]; then
+    _mas_xcb_settings+=("CODE_SIGN_ENTITLEMENTS=$REPO_ROOT/Build/Mac/Resources/${UPROJECT_NAME%.uproject}.entitlements")
+  fi
+
+  echo "== Mac App Store Archive (automatic provisioning) ==" >&3
+  xcodebuild \
+    -workspace "$WORKSPACE" \
+    -scheme "$SCHEME" \
+    -configuration "$XCODE_CONFIG" \
+    -destination 'generic/platform=macOS' \
+    -archivePath "$MAS_ARCHIVE_PATH" \
+    -allowProvisioningUpdates \
+    archive \
+    CODE_SIGN_STYLE=Automatic \
+    DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+    "${_mas_xcb_settings[@]}"
+
+  echo "== Mac App Store Export (.app for App Store Connect) ==" >&3
+  xcodebuild -exportArchive \
+    -archivePath "$MAS_ARCHIVE_PATH" \
+    -exportPath "$MAS_EXPORT_DIR" \
+    -exportOptionsPlist "$MAS_EXPORT_PLIST" \
+    -allowProvisioningUpdates
+
+  MAS_APP_PATH="$(find_first_app_under "$MAS_EXPORT_DIR")"
+  if [[ -z "${MAS_APP_PATH:-}" ]]; then
+    /bin/ls -la "$MAS_EXPORT_DIR" >&3 || true
+    die "No .app found under MAS export dir: $MAS_EXPORT_DIR"
+  fi
+  good "Mac App Store .app: $MAS_APP_PATH"
+
+  # Quick verification — xcodebuild handled signing under automatic
+  # provisioning, but a one-line check before upload makes the failure mode
+  # legible if review rejects later.
+  echo "== Mac App Store signature verification ==" >&3
+  /usr/bin/codesign --verify --deep --strict --verbose=2 "$MAS_APP_PATH"
+  /usr/bin/codesign -dv --verbose=4 "$MAS_APP_PATH" 2>&1 | /usr/bin/grep -E "^(Authority=|TeamIdentifier=)" >&3 || true
+
+  if [[ "${MAS_ASC_VALIDATE:-0}" == "1" ]]; then
+    echo "== Mac App Store Validate (App Store Connect) ==" >&3
+    /usr/bin/xcrun altool --validate-app \
+      -f "$MAS_APP_PATH" \
+      -t macos \
+      --apiKey "$ASC_API_KEY_ID" \
+      --apiIssuer "$ASC_API_ISSUER" \
+      --private-key "$ASC_API_KEY_PATH"
+    good "Mac App Store .app passed App Store Connect validation."
+  fi
+
+  if [[ "${MAS_ASC_UPLOAD:-0}" == "1" ]]; then
+    echo "== Mac App Store Upload (App Store Connect) ==" >&3
+    /usr/bin/xcrun altool --upload-app \
+      -f "$MAS_APP_PATH" \
+      -t macos \
+      --apiKey "$ASC_API_KEY_ID" \
+      --apiIssuer "$ASC_API_ISSUER" \
+      --private-key "$ASC_API_KEY_PATH"
+    good "Mac App Store .app uploaded to App Store Connect."
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # iOS pipeline (UAT → archive → IPA → optional ASC validate/upload)
@@ -3627,9 +3920,9 @@ if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
     /usr/bin/xcrun altool --validate-app \
       -f "$IOS_IPA_PATH" \
       -t ios \
-      --apiKey "$IOS_ASC_API_KEY_ID" \
-      --apiIssuer "$IOS_ASC_API_ISSUER" \
-      --private-key "$IOS_ASC_API_KEY_PATH"
+      --apiKey "$ASC_API_KEY_ID" \
+      --apiIssuer "$ASC_API_ISSUER" \
+      --private-key "$ASC_API_KEY_PATH"
     good "iOS IPA passed App Store Connect validation."
   fi
 
@@ -3638,16 +3931,21 @@ if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
     /usr/bin/xcrun altool --upload-app \
       -f "$IOS_IPA_PATH" \
       -t ios \
-      --apiKey "$IOS_ASC_API_KEY_ID" \
-      --apiIssuer "$IOS_ASC_API_ISSUER" \
-      --private-key "$IOS_ASC_API_KEY_PATH"
+      --apiKey "$ASC_API_KEY_ID" \
+      --apiIssuer "$ASC_API_ISSUER" \
+      --private-key "$ASC_API_KEY_PATH"
     good "iOS IPA uploaded to App Store Connect."
   fi
 fi
 
 echo "REMINDER: Test your distribution path." >&3
-echo "  - If distributing via a launcher (Steam, Epic, etc.), test launching from that launcher." >&3
-echo "  - If distributing direct-download, test on a separate Mac (or a clean user account) with Gatekeeper enabled." >&3
+if [[ "$MAC_DISTRIBUTION" == "developer-id" ]]; then
+  echo "  - If distributing via a launcher (Steam, Epic, etc.), test launching from that launcher." >&3
+  echo "  - If distributing direct-download, test on a separate Mac (or a clean user account) with Gatekeeper enabled." >&3
+fi
+if [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
+  echo "  - For Mac App Store: TestFlight (Mac) delivers the uploaded build for QA; App Store review consumes the same upload." >&3
+fi
 if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
   echo "  - For iOS: TestFlight delivers the uploaded build for QA; App Store review consumes the same upload." >&3
 fi
@@ -3655,7 +3953,7 @@ fi
 write_bumped_version_to_env
 write_cfbundle_version_to_env
 echo "✅ Done" >&3
-if [[ "${IOS_ONLY:-0}" != "1" ]]; then
+if [[ "$MAC_DISTRIBUTION" == "developer-id" ]]; then
   echo "App: $APP_PATH" >&3
   if [[ "$ENABLE_ZIP" == "1" ]]; then
     echo "Zip: $ZIP_PATH" >&3
@@ -3668,9 +3966,14 @@ if [[ "${IOS_ONLY:-0}" != "1" ]]; then
     echo "DMG: (not created — ENABLE_DMG=0)" >&3
   fi
 fi
+if [[ "$MAC_DISTRIBUTION" == "app-store" ]]; then
+  echo "MAS .app: ${MAS_APP_PATH:-<not produced>}" >&3
+fi
 if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
   echo "IPA: ${IOS_IPA_PATH:-<not produced>}" >&3
 fi
 
-# Cleanup script-generated temp entitlements file only (user-provided files are never deleted).
+# Cleanup script-generated temp entitlements file only (user-provided files
+# are never deleted). MAS doesn't generate a temp entitlements file, so the
+# variable may be unset.
 /bin/rm -f "${_ENTITLEMENTS_TMP:-}" 2>/dev/null || true

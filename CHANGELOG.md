@@ -6,6 +6,48 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [unreleased] — Mac App Store pipeline (`MAC_DISTRIBUTION=app-store`)
+
+Wires the Mac App Store channel end-to-end on top of the dispatcher landed in the previous PR. `MAC_DISTRIBUTION=app-store` now runs a real build: xcodebuild archive under automatic provisioning → exportArchive against a MAS-specific ExportOptions.plist → optional `xcrun altool -t macos` validate/upload. Mirrors the existing iOS pipeline — same tooling, only the `-t macos` target and the export-plist `method=app-store-connect` differ. No ZIP, no DMG, no notarize/staple: App Store review is the equivalent gate. Resolves PR-2 of [issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27).
+
+### Added
+- **Mac App Store build pipeline** (`MAC_DISTRIBUTION=app-store`). The roadmap die that PR-1 left behind is removed; the dispatcher now drops into a parallel branch alongside the existing Developer ID branch. Pipeline: UAT `BuildCookRun -targetplatform=Mac` → `xcodebuild archive -destination 'generic/platform=macOS' -allowProvisioningUpdates CODE_SIGN_STYLE=Automatic` → `xcodebuild -exportArchive -exportOptionsPlist MAS-ExportOptions.plist -allowProvisioningUpdates`. Skips the per-component codesign loop, the script-generated temp entitlements file, the ZIP/DMG steps, and notarize+staple — none apply to MAS submissions. xcodebuild handles nested signing in one pass under automatic provisioning (same as iOS).
+- **`MAS_EXPORT_PLIST`** config variable + **`--mas-export-plist PATH`** CLI flag. Auto-detected by conventional name `MAS-ExportOptions.plist` in the repo root. Validated up-front: must declare `method=app-store-connect`, `signingStyle=automatic`, and a `teamID` matching `DEVELOPMENT_TEAM` — Apple rejects mismatches at export time, so catching them now turns a multi-hour wasted build into a one-line error.
+- **`MAS-ExportOptions.plist.example`** annotated template, parallel to the existing `ExportOptions.plist.example` (Developer ID) and `iOS-ExportOptions.plist.example`.
+- **`MAS_ASC_VALIDATE` / `MAS_ASC_UPLOAD`** plus **`--mas-validate-app` / `--mas-upload-app`** flags. Runs `xcrun altool --validate-app -t macos` / `--upload-app -t macos` against the exported `.app`, post-archive.
+- **`ASC_API_KEY_ID` / `ASC_API_ISSUER` / `ASC_API_KEY_PATH`** as the canonical, platform-neutral names for the App Store Connect API key (one Apple Developer account has one ASC API key, used by both iOS IPA uploads and Mac App Store `.app` uploads). New CLI flags `--asc-api-key-id`, `--asc-api-issuer`, `--asc-api-key-path`. The legacy `IOS_ASC_API_*` env vars and `--ios-asc-api-*` flags continue to work — resolved into `ASC_API_*` by `resolve_asc_credential_aliases()` immediately after CLI parse, then projected back so any existing reader keeps working.
+- **`autodetect_asc_credentials_if_needed`** (renamed from `autodetect_ios_asc_credentials_if_needed`) — now fires for either `IOS_ASC_VALIDATE/UPLOAD` or `MAS_ASC_VALIDATE/UPLOAD`. Same `Config/DefaultEngine.ini` source (`AppStoreConnectKeyID` / `AppStoreConnectIssuerID` / `AppStoreConnectKeyPath`), same `_extract_ue_filepath` handling for the FFilePath struct wrapper.
+- **Mac Game Center entitlement seeding** for `MAC_DISTRIBUTION=app-store`. `ensure_game_center_entitlements` now writes `Build/Mac/Resources/<Project>.entitlements` (parallel to the existing iOS path) and sets `bEnableGameCenterSupport=True` under `[/Script/MacRuntimeSettings.MacRuntimeSettings]`. `CODE_SIGN_ENTITLEMENTS=<path>` is passed to `xcodebuild archive` so UBT's intermediate entitlements file is bypassed (automatic provisioning ignores it). AMFI accepts `com.apple.developer.game-center` on this channel because the MAS provisioning profile encodes it. The function is refactored into a shared `_ensure_game_center_entitlement_for_platform` worker that both iOS and Mac branches dispatch into.
+- **Apple Distribution / 3rd Party Mac Developer Application keychain pre-flight**: under `MAC_DISTRIBUTION=app-store`, the keychain check switches from `Developer ID Application` to `Apple Distribution` (preferred) / `3rd Party Mac Developer Application` (legacy). Fails fast with the available identities listed if neither is present.
+- **Distinct MAS artifact paths**: `${SHORT_NAME}-mas.xcarchive` and `${SHORT_NAME}-mas-export/` under `Saved/Packages/Mac/`, alongside the Developer ID paths. Alternating channels for testing won't clobber each other's artifacts.
+
+### Changed
+- **`SIGN_IDENTITY` is required only for `MAC_DISTRIBUTION=developer-id`** (was: required for any non-`IOS_ONLY` run). MAS uses automatic provisioning, so `SIGN_IDENTITY` is not consulted on that channel.
+- **Notarize prompt skipped for non-Developer ID Mac channels.** Previously the interactive `Notarize + staple this build? (Y/n)` prompt fired regardless of `MAC_DISTRIBUTION`; it now defaults `NOTARIZE_ENABLED=0` non-interactively when `MAC_DISTRIBUTION != developer-id`. (Notarization only applies to direct-download Developer ID builds; MAS review is the equivalent gate.)
+- **`ensure_game_center_entitlements`** no longer warns "iOS-only" when `MAC_DISTRIBUTION=app-store` — the function now treats Mac App Store as a co-equal eligible channel and seeds the entitlements file + ini section for both platforms in a single pass. The "no eligible channel" warning still fires when `ENABLE_GAME_CENTER=1` but neither MAS nor iOS is active.
+- **`--game-center` help text** updated to describe both eligible channels (was: "iOS-only").
+- **iOS `altool` upload now reads `ASC_API_*`** (instead of `IOS_ASC_API_*`) — no behavior change because the legacy variables remain in sync, but consolidates the read site on the canonical names.
+
+### Compatibility matrix (updated)
+
+| Combination | Behavior | Reason |
+|---|---|---|
+| `MAC_DISTRIBUTION=off` + `IOS_DISTRIBUTION=off` | rejected | Nothing to build. |
+| `MAC_DISTRIBUTION=app-store` + `ENABLE_STEAM=1` | rejected | Mac App Store review forbids `com.apple.security.cs.disable-library-validation` and `com.apple.security.cs.allow-dyld-environment-variables`. |
+| `MAC_DISTRIBUTION=developer-id` + `ENABLE_GAME_CENTER=1` for Mac (no iOS) | rejected | AMFI rejects `com.apple.developer.game-center` on Developer-ID-signed Mac apps at exec, regardless of notarization. |
+| `MAC_DISTRIBUTION=app-store` + `ENABLE_GAME_CENTER=1` | **supported** | MAS provisioning profile encodes the entitlement; AMFI accepts it. |
+| `MAC_DISTRIBUTION=app-store` | **supported** (newly wired by this PR) | UAT → archive → exportArchive → optional `altool -t macos`. |
+
+### Legacy compatibility (no breaking changes)
+
+- `IOS_ASC_API_KEY_ID/ISSUER/KEY_PATH` env vars + `--ios-asc-api-*` flags continue to work — the resolver promotes them into `ASC_API_*` when the canonical names are unset.
+- `ENABLE_IOS` / `IOS_ONLY` and their CLI aliases keep working as projected onto the dispatcher (unchanged from PR-1).
+
+### Roadmap (still tracked in [issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27))
+- **PR-3**: `--preset NAME` layer for common configurations (`steam-mac`, `direct-mac`, `mas-mac`, `ios`, `mac+ios`, `mas+ios`). `steam-mac` → `MAC_DISTRIBUTION=developer-id` + `ENABLE_STEAM=1` + `ENABLE_ZIP=1` (Steam upload format) + `NOTARIZE=yes`. `direct-mac` → `MAC_DISTRIBUTION=developer-id` + `ENABLE_STEAM=0` + `ENABLE_DMG=1` + `NOTARIZE=yes`. `mas-mac` → `MAC_DISTRIBUTION=app-store`, `ENABLE_GAME_CENTER` optional.
+
+---
+
 ## [unreleased] — Distribution dispatcher (`MAC_DISTRIBUTION` / `IOS_DISTRIBUTION`)
 
 Carves out the two macOS distribution paths (Direct Distribution vs Mac App Store) and the single iOS path into explicit dispatcher variables, so every downstream check (entitlements, signing cert, ExportOptions method, upload tooling) has one place to consult. Foundational change with no new build behavior — `MAC_DISTRIBUTION=developer-id` (default) runs the existing pipeline unchanged.

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  MAS-ExportOptions.plist — Xcode Mac App Store export configuration
+  Used by: xcodebuild -exportArchive -exportOptionsPlist <this file>
+
+  Usage:
+    1. Copy this file to your repo root as "MAS-ExportOptions.plist"
+    2. Replace YOUR_TEAM_ID with your 10-character Apple Developer Team ID
+       (find it at: developer.apple.com → Account → Membership)
+    3. ship.sh auto-detects this file by name when
+       MAC_DISTRIBUTION=app-store, or override with
+       MAS_EXPORT_PLIST=/path/to/your-MAS-ExportOptions.plist (or
+       --mas-export-plist PATH).
+
+  NOTE: This is the Mac App Store export plist — NOT the Developer ID one.
+        MAS uses method=app-store-connect; Developer ID uses
+        method=developer-id. They are not interchangeable; keep them separate
+        files (ExportOptions.plist vs MAS-ExportOptions.plist). Apple will
+        reject the wrong one at export time.
+
+  For additional keys, see: man xcodebuild (search -exportOptionsPlist)
+-->
+<plist version="1.0">
+<dict>
+
+  <!-- Distribution method.
+       "app-store-connect" = submit to Mac App Store (replaces deprecated "app-store")
+       Note: Developer ID uses method=developer-id; do not use here. -->
+  <key>method</key>
+  <string>app-store-connect</string>
+
+  <!-- Your 10-character Apple Developer Team ID.
+       Example: ABCDE12345 -->
+  <key>teamID</key>
+  <string>YOUR_TEAM_ID</string>
+
+  <!-- Signing style.
+       "automatic"  = Xcode pulls the matching Apple Distribution cert and
+                      Mac App Store provisioning profile via the Developer
+                      account (requires -allowProvisioningUpdates, which
+                      ship.sh passes) — recommended.
+       "manual"     = pin a specific provisioning profile (add
+                      "provisioningProfiles" key) -->
+  <key>signingStyle</key>
+  <string>automatic</string>
+
+  <!-- Bitcode was deprecated in Xcode 14 and removed in Xcode 16.
+       Keep false — UE5 does not use bitcode. -->
+  <key>compileBitcode</key>
+  <false/>
+
+</dict>
+</plist>
