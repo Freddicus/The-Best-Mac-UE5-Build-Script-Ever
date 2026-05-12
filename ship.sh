@@ -2593,7 +2593,7 @@ UAT_ARCHIVE_DIR="$(/usr/bin/dirname "$BUILD_DIR")"
 
 # Normalize a few important paths to absolute paths when possible.
 # (This helps when the user passes relative paths via env/CLI.)
-if [[ -d "$WORKSPACE" ]]; then
+if [[ -d "${WORKSPACE:-}" ]]; then
   WORKSPACE="$(abspath_existing "$WORKSPACE")"
 fi
 if [[ -f "$EXPORT_PLIST" ]]; then
