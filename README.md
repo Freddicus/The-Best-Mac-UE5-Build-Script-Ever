@@ -42,7 +42,7 @@ Two dispatcher variables decide which pipeline runs for each platform:
 - `MAC_DISTRIBUTION` ∈ `developer-id` *(default)* | `app-store` | `off`
 - `IOS_DISTRIBUTION` ∈ `off` *(default)* | `app-store`
 
-The default — `developer-id` for Mac, iOS off — matches everything the script has done since day one. `app-store` for Mac is recognized but the pipeline is on the roadmap ([issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27)); for now use Xcode Organizer's `Distribute App → App Store Connect`. Game Center is structurally a Mac-App-Store feature — see [gotchas](docs/gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only). See [configuration.md → Distribution channels](docs/configuration.md#distribution-channels) for the full rules and the compatibility matrix.
+The default — `developer-id` for Mac, iOS off — matches everything the script has done since day one. `MAC_DISTRIBUTION=app-store` runs the Mac App Store pipeline (UAT → `xcodebuild archive` under automatic provisioning → `exportArchive` → optional `xcrun altool -t macos` validate/upload), which is also the only channel that supports Game Center on Mac — AMFI rejects the entitlement on Developer-ID-signed Mac apps regardless of notarization. See [configuration.md → Distribution channels](docs/configuration.md#distribution-channels) for the full rules and the compatibility matrix.
 
 ### Targeting iOS too
 
@@ -72,7 +72,7 @@ When you run `./ship.sh`, this is the execution order:
 4. **Canonical ini ensures** — writes `MARKETING_VERSION` (shared across Mac and iOS) and `APP_CATEGORY` (when set) to their canonical `Config/DefaultEngine.ini` sections. `ENABLE_GAME_MODE` (when set) updates the seeded `Info.Template.plist` via `PlistBuddy`. See [versioning.md](docs/versioning.md#infoplist-values-via-canonical-ue-overrides).
 5. **GenerateProjectFiles** *(if `USE_XCODE_EXPORT=1`)* — single regen produces both `<Project> (Mac).xcworkspace` and `<Project> (iOS).xcworkspace`. Disable with `--no-regen-project-files`.
 
-**Mac pipeline** *(skipped when `IOS_ONLY=1`)*:
+**Mac pipeline — `MAC_DISTRIBUTION=developer-id`** *(default, skipped when `MAC_DISTRIBUTION=off`)*:
 
 6. **Mac UAT BuildCookRun** — `-targetplatform=Mac`, output to `Saved/Packages/Mac/`.
 7. **Mac Xcode archive + export** — `xcodebuild archive` with `CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION` build-setting override (Apple-documented mechanism, takes precedence over xcconfig — no PlistBuddy fixups needed). Then `xcodebuild -exportArchive` produces signed `.app`.
@@ -81,7 +81,13 @@ When you run `./ship.sh`, this is the execution order:
 10. **ZIP / DMG** — packages the signed `.app` for distribution.
 11. **Notarization + stapling** — `xcrun notarytool` submits ZIP and DMG, waits, then `xcrun stapler` attaches tickets.
 
-**iOS pipeline** *(only when `ENABLE_IOS=1` or `--ios-only`)*:
+**Mac pipeline — `MAC_DISTRIBUTION=app-store`** *(Mac App Store)*:
+
+6. **Mac UAT BuildCookRun** — `-targetplatform=Mac`.
+7. **Mac Xcode archive + export** — `xcodebuild archive -allowProvisioningUpdates CODE_SIGN_STYLE=Automatic` then `xcodebuild -exportArchive` with a MAS export plist (`method=app-store-connect`). Produces a signed `.pkg` (productbuild installer), not a `.app`.
+8. **App Store Connect** *(optional)* — `xcrun altool --validate-app -t macos` and/or `--upload-app -t macos`. No notarize+staple, no ZIP, no DMG — App Store review is the equivalent gate.
+
+**iOS pipeline** *(only when `IOS_DISTRIBUTION=app-store`, e.g. `--ios` or `--ios-only`)*:
 
 12. **iOS UAT BuildCookRun** — `-targetplatform=IOS`, output to `Saved/Packages/IOS/`.
 13. **iOS Xcode archive + export** — `xcodebuild archive -destination 'generic/platform=iOS' -allowProvisioningUpdates` with the same `CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION` (shared bump across platforms). Then `xcodebuild -exportArchive` with the iOS `ExportOptions.plist` → `.ipa`. iOS doesn't need per-component codesign or notarization — `xcodebuild` handles iOS App Store signing in one pass via automatic provisioning.

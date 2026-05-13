@@ -135,9 +135,37 @@ Should print `true`. If the file is missing, run `./ship.sh --game-center --ios-
 
 ## I want Game Center working on the Mac build too
 
-Not possible through ship.sh's Direct Distribution pipeline. Game Center on macOS is structurally a Mac App Store feature — the entitlement is "restricted" and AMFI requires authorization via an embedded MAS provisioning profile, which only exists for App Store distribution. Developer-ID-signed Mac apps with `com.apple.developer.game-center` are killed at launch by the kernel with `Error -413 "No matching profile found"` even after successful notarization and stapling. See [gotchas](gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only) for the full mechanism.
+Switch the Mac channel to Mac App Store and re-run with `--game-center`:
 
-To ship a Mac App Store build with Game Center, use Xcode Organizer's `Distribute App → App Store Connect` (the App Sandbox entitlement is required for that pipeline; Steam entitlements are forbidden). Automating the MAS Mac path inside ship.sh is a future-PR item.
+```bash
+./ship.sh --mac-distribution app-store --game-center
+```
+
+Game Center on macOS is structurally a Mac App Store feature — the entitlement is "restricted" and AMFI requires authorization via an embedded MAS provisioning profile, which only exists for App Store distribution. Developer-ID-signed Mac apps with `com.apple.developer.game-center` are killed at launch by the kernel with `Error -413 "No matching profile found"` even after successful notarization and stapling — so ship.sh rejects `MAC_DISTRIBUTION=developer-id` + Game Center up-front. Under `MAC_DISTRIBUTION=app-store`, the entitlements file gets both `com.apple.developer.game-center=true` and `com.apple.security.network.client=true` (Game Center can't reach Apple's servers from inside the sandbox without the network client entitlement). Commit `Build/Mac/Resources/<Project>.entitlements` after the first run.
+
+## Apple_SDK.json compatibility check failed (Xcode is newer than UE supports)
+
+When you install a new Xcode point release that's outside the engine's `Apple_SDK.json` `MinVersion..MaxVersion` range — or has no entry in the `AppleVersionToLLVMVersions` mapping — the pre-flight check fails before the multi-hour build. The script offers to patch the file in place when stdin is a TTY, `xcrun swift --version` returns a usable Swift major.minor, and `python3` is available:
+
+```
+Auto-patch Apple_SDK.json using Apple's own LLVM version source
+(github.com/apple/llvm-project, branch swift/release/6.3)? [y/N]
+```
+
+Accept and the script fetches `cmake/Modules/LLVMVersion.cmake` (or `llvm/CMakeLists.txt` on Swift ≤6.0) from Apple's own llvm-project repo, assembles the `LLVM_VERSION_MAJOR.MINOR.PATCH` value, inserts a new `"<XcodeVersion>-<LLVMVersion>"` entry after the last entry in `AppleVersionToLLVMVersions`, and bumps `MaxVersion` if the new Xcode is higher than the current ceiling. Indent and `//N` comment keys are preserved exactly.
+
+If the offer doesn't appear or you decline it, edit `Apple_SDK.json` manually:
+
+```bash
+# Find Apple_SDK.json (default UE install path on Mac):
+ls "/Users/Shared/Epic Games/UE_5.x/Engine/Config/Apple/Apple_SDK.json"
+
+# Add an entry to AppleVersionToLLVMVersions, e.g. "26.5.0-21.1.6"
+# (Xcode version - upstream LLVM version, both in X.Y.Z form).
+# Update MinVersion/MaxVersion to include the new Xcode if needed.
+```
+
+The LLVM-version side of the pair comes from `apple/llvm-project`'s `cmake/Modules/LLVMVersion.cmake` on `swift/release/<Swift major.minor>` — same source the script uses.
 
 ## Getting more detail
 
