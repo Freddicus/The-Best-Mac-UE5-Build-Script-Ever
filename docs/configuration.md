@@ -15,8 +15,8 @@ Two variables decide which pipeline runs for each platform. Every downstream dec
 
 ### MAC_DISTRIBUTION
 
-- **`developer-id`** *(default)* — Direct Distribution. Developer ID Application signing, hardened runtime, notarized + stapled. Steam allowed here (and only here). **Game Center is not available** — AMFI rejects `com.apple.developer.game-center` on Developer-ID-signed Mac apps at exec, regardless of notarization. See [gotchas.md](gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only).
-- **`app-store`** — Mac App Store. Apple Distribution signing, App Sandbox (UE's `ShippingSpecificMacEntitlements` default already wires this), Game Center allowed, Steam forbidden, uploaded via `xcrun altool` to App Store Connect. The pipeline itself is **on the roadmap and currently rejected** with a clear pointer to [issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27). For now, use Xcode Organizer's `Distribute App → App Store Connect`.
+- **`developer-id`** *(default)* — Direct Distribution. Developer ID Application signing, hardened runtime, notarized + stapled. Steam allowed here (and only here). **Game Center is not available** — AMFI rejects `com.apple.developer.game-center` on Developer-ID-signed Mac apps at exec, regardless of notarization. See [gotchas.md](gotchas.md#game-center-on-mac-requires-mac_distributionapp-store).
+- **`app-store`** — Mac App Store. Apple Distribution / 3rd Party Mac Developer Application signing under automatic provisioning, App Sandbox required (enforced by ship.sh; see [the Fixed entry for 2026-05-12](../CHANGELOG.md#2026-05-12--mac-app-store-pipeline-mac_distributionapp-store-pr-29)), Game Center allowed, Steam forbidden. Pipeline: UAT `BuildCookRun -targetplatform=Mac` → `xcodebuild archive -allowProvisioningUpdates CODE_SIGN_STYLE=Automatic` → `xcodebuild -exportArchive` with a MAS export plist → optional `xcrun altool -t macos` validate/upload of the resulting `.pkg`. No ZIP, no DMG, no notarize+staple — App Store review is the equivalent gate.
 - **`off`** — Skip Mac entirely (iOS-only run). Equivalent to the legacy `IOS_ONLY=1`. Does not require `SIGN_IDENTITY`.
 
 ### IOS_DISTRIBUTION
@@ -44,7 +44,8 @@ The script enforces these rules up-front and fails with a clear message if viola
 | `MAC_DISTRIBUTION=off` + `IOS_DISTRIBUTION=off` | rejected | Nothing to build. |
 | `MAC_DISTRIBUTION=app-store` + `ENABLE_STEAM=1` | rejected | Mac App Store review forbids `com.apple.security.cs.disable-library-validation` and `com.apple.security.cs.allow-dyld-environment-variables` outright. |
 | `MAC_DISTRIBUTION=developer-id` + `ENABLE_GAME_CENTER=1` for Mac (no iOS) | rejected | AMFI rejects `com.apple.developer.game-center` on Developer-ID-signed Mac apps at exec. Game Center on Mac structurally requires Mac App Store distribution. |
-| `MAC_DISTRIBUTION=app-store` | rejected (today) | Pipeline not yet wired — tracked at [issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27). Use Xcode Organizer in the meantime. |
+| `MAC_DISTRIBUTION=app-store` + `ENABLE_GAME_CENTER=1` | **supported** | MAS provisioning profile encodes the entitlement; AMFI accepts it. Entitlements file also gets `com.apple.security.network.client=true` so Game Center can reach Apple's servers from inside the sandbox. |
+| `MAC_DISTRIBUTION=app-store` | **supported** (since 2026-05-12) | Full pipeline: archive → exportArchive → optional altool. Requires `MAS_EXPORT_PLIST` (auto-detected as `MAS-ExportOptions.plist`). |
 
 ## .env file
 
@@ -103,7 +104,7 @@ The script locates your project automatically when run from the project root. Se
 | `MARKETING_VERSION` | If set, the script writes `VersionInfo=` to `Config/DefaultEngine.ini` under `[/Script/MacRuntimeSettings.MacRuntimeSettings]` (UE's canonical `CFBundleShortVersionString` source). Unset = leave `DefaultEngine.ini` alone. See [versioning.md](versioning.md#marketing_version). |
 | `APP_CATEGORY` | If set, the script writes `AppCategory=` to `Config/DefaultEngine.ini` under `[/Script/MacTargetPlatform.XcodeProjectSettings]`. UE's `BaseEngine.ini` already defaults to `public.app-category.games` — only override when you need a different value. |
 | `ENABLE_GAME_MODE` | `1` = set `LSSupportsGameMode` + `GCSupportsGameMode` to `true` in your `Build/Mac/Resources/Info.Template.plist`. `0` = set to `false`. Unset = leave the plist's GameMode keys alone (your plist is sovereign). |
-| `ENABLE_GAME_CENTER` | **iOS only.** `1` = seed `Build/IOS/Resources/<Project>.entitlements` with `com.apple.developer.game-center`, write `bEnableGameCenterSupport=True` to `DefaultEngine.ini`, and pass `CODE_SIGN_ENTITLEMENTS=<path>` to the iOS `xcodebuild archive` (UBT's `Intermediate/IOS/<Target>.entitlements` file is ignored under automatic signing). `0` = remove the key from the entitlements file and write `bEnableGameCenterSupport=False`. Unset = no-op. **Commit the seeded `.entitlements` file** so it survives project regeneration. The bundle ID must have Game Center enabled in App Store Connect. Setting this without `ENABLE_IOS=1` is a no-op (with a warning) — Game Center on Mac requires App Store distribution, which ship.sh does not produce; see [gotchas](gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only). |
+| `ENABLE_GAME_CENTER` | **iOS App Store + Mac App Store.** `1` = seed `Build/IOS/Resources/<Project>.entitlements` and/or `Build/Mac/Resources/<Project>.entitlements` (whichever channel is active) with `com.apple.developer.game-center`, write `bEnableGameCenterSupport=True` to `DefaultEngine.ini` under both `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` and `[/Script/MacRuntimeSettings.MacRuntimeSettings]`, and pass `CODE_SIGN_ENTITLEMENTS=<path>` to each `xcodebuild archive`. On Mac App Store the entitlements file ALSO gets `com.apple.security.network.client=true` (Game Center cannot reach Apple's servers from inside the sandbox without it). `0` = remove the key and write `False`. Unset = no-op. **Commit the seeded `.entitlements` file(s)** so they survive project regeneration. The bundle ID must have Game Center enabled in App Store Connect. Setting this when neither iOS nor `MAC_DISTRIBUTION=app-store` is active is a no-op with a warning — Game Center is structurally a Mac-App-Store / iOS feature; AMFI rejects it on Developer-ID-signed Mac apps. See [gotchas](gotchas.md#game-center-on-mac-requires-mac_distributionapp-store). |
 | `CFBUNDLE_VERSION` | Source of truth for the auto-bumped integer build counter. The script reads this on every run, pre-increments by 1, ships the new value as `CFBundleVersion`, and persists the new value back to `.env` on a successful build. Empty/missing = `0`, so the first build ships `1`. Use `--set-cfbundle-version N` to set a new baseline (persists `N`; next build resumes from `N`). See [versioning.md](versioning.md#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical) for the two paths. |
 | `CLEAN_BUILD_DIR` | `1` = wipe `BUILD_DIR_REL` before building. Default: `0`. |
 | `DRY_RUN` | `1` = print the plan and exit without building. |
@@ -198,24 +199,38 @@ Set `ENABLE_IOS=1` in `.env` (or pass `--ios`) to run the iOS pipeline after the
 | `IOS_APPICON_SET_NAME` | Name of the `*.appiconset` inside `Build/IOS/Resources/Assets.xcassets/` to mirror to `AppIcon.appiconset` (UE's xcconfig hardcodes the name to `AppIcon`). Auto-detects the first appiconset in the catalog if unset. |
 | `IOS_MARKETING_VERSION` | iOS-only override for `CFBundleShortVersionString`. When unset, `MARKETING_VERSION` is shared across both platforms. See [versioning.md](versioning.md). |
 
-### iOS App Store Connect upload (xcrun altool — NOT notarytool)
+### Mac App Store config (`MAC_DISTRIBUTION=app-store`)
+
+| Variable | Description |
+|---|---|
+| `MAS_EXPORT_PLIST` | Path to `MAS-ExportOptions.plist`. Auto-detected by conventional name in the repo root. Must declare `method=app-store-connect`, `signingStyle=automatic`, and a `teamID` matching `DEVELOPMENT_TEAM` — validated up-front so a mismatch fails immediately instead of after a multi-hour build. Copy `MAS-ExportOptions.plist.example` to start. |
+| `MAS_ASC_VALIDATE` | `1` = run `xcrun altool --validate-app -t macos` on the exported `.pkg` after archive. |
+| `MAS_ASC_UPLOAD` | `1` = run `xcrun altool --upload-app -t macos` (implies validate). |
+
+Apple Distribution / 3rd Party Mac Developer Application identity must be present in the keychain (preferred / legacy fallback respectively); the script fails fast with the available identities listed if neither is found. `SIGN_IDENTITY` is **not** consulted on this channel — automatic provisioning resolves the cert.
+
+### App Store Connect upload (xcrun altool — NOT notarytool)
 
 `xcrun altool` and `xcrun notarytool` are different tools for different services. **They are not interchangeable.**
 
 | Tool | What it talks to | Used for | Credentials |
 |---|---|---|---|
 | `xcrun notarytool` | Apple notary service | macOS Developer ID notarization (Gatekeeper ticket) | Keychain profile (`xcrun notarytool store-credentials`) |
-| `xcrun altool` | App Store Connect submission API | iOS IPA validation/upload (TestFlight, App Store) | API key (`.p8` file + key ID + issuer UUID) |
+| `xcrun altool` | App Store Connect submission API | iOS IPA + Mac App Store `.pkg` validation/upload (TestFlight, App Store) | API key (`.p8` file + key ID + issuer UUID) |
 
-For iOS uploads, you provide an App Store Connect API key:
+One Apple Developer account has one ASC API key — the canonical variables below are platform-neutral and used by both the iOS IPA pipeline and the Mac App Store `.pkg` pipeline:
 
 | Variable | Description |
 |---|---|
-| `IOS_ASC_VALIDATE` | `1` = run `xcrun altool --validate-app` on the IPA after export. |
-| `IOS_ASC_UPLOAD` | `1` = run `xcrun altool --upload-app` (implies `IOS_ASC_VALIDATE=1`). |
-| `IOS_ASC_API_KEY_ID` | 10-character ASC API key ID. Auto-detected from `Config/DefaultEngine.ini`'s `AppStoreConnectKeyID` if Xcode wrote it. |
-| `IOS_ASC_API_ISSUER` | ASC API issuer UUID. Auto-detected from `AppStoreConnectIssuerID`. |
-| `IOS_ASC_API_KEY_PATH` | Path to the `.p8` file you downloaded from ASC. Auto-detected from `AppStoreConnectKeyPath`. |
+| `ASC_API_KEY_ID` | 10-character ASC API key ID. Auto-detected from `Config/DefaultEngine.ini`'s `AppStoreConnectKeyID` if Xcode wrote it. |
+| `ASC_API_ISSUER` | ASC API issuer UUID. Auto-detected from `AppStoreConnectIssuerID`. |
+| `ASC_API_KEY_PATH` | Path to the `.p8` file you downloaded from ASC. Auto-detected from `AppStoreConnectKeyPath`. |
+
+The legacy `IOS_ASC_API_KEY_ID` / `IOS_ASC_API_ISSUER` / `IOS_ASC_API_KEY_PATH` env vars + `--ios-asc-api-*` flags continue to work and resolve into the canonical names automatically.
+
+#### Interactive upload-after-validate prompt
+
+When `--ios-validate-ipa` or `--mas-validate-app` is set but the matching upload flag is not, and stdin is a TTY, ship.sh prompts `Upload this .ipa/.pkg to App Store Connect now? (y/N)` after validation succeeds. Flag-driven runs are unchanged (upload flag wins, no prompt); CI / non-TTY runs are unchanged (no prompt, upload only when the flag was passed).
 
 To create an API key: appstoreconnect.apple.com → **Users and Access → Integrations → App Store Connect API → Generate API Key**. Download the `.p8`, store it somewhere your build machine can read, and set the three values above (or let Xcode store them in `DefaultEngine.ini` and the script will pick them up).
 
@@ -237,13 +252,27 @@ For iOS-only (App Store Connect upload):
 
 ```bash
 DEVELOPMENT_TEAM="ABCDE12345"
-ENABLE_IOS="1"
-IOS_ONLY="1"
+IOS_DISTRIBUTION="app-store"
+MAC_DISTRIBUTION="off"
 IOS_EXPORT_PLIST="/path/to/iOS-ExportOptions.plist"
 IOS_SCHEME="MyGame"
 IOS_ASC_UPLOAD="1"
-IOS_ASC_API_KEY_ID="ABCD123456"
-IOS_ASC_API_ISSUER="00000000-0000-0000-0000-000000000000"
-IOS_ASC_API_KEY_PATH="/path/to/AuthKey_ABCD123456.p8"
+ASC_API_KEY_ID="ABCD123456"
+ASC_API_ISSUER="00000000-0000-0000-0000-000000000000"
+ASC_API_KEY_PATH="/path/to/AuthKey_ABCD123456.p8"
+BUILD_TYPE="shipping"
+```
+
+For Mac App Store-only:
+
+```bash
+DEVELOPMENT_TEAM="ABCDE12345"
+MAC_DISTRIBUTION="app-store"
+MAS_EXPORT_PLIST="/path/to/MAS-ExportOptions.plist"
+XCODE_SCHEME="MyGame"
+MAS_ASC_UPLOAD="1"
+ASC_API_KEY_ID="ABCD123456"
+ASC_API_ISSUER="00000000-0000-0000-0000-000000000000"
+ASC_API_KEY_PATH="/path/to/AuthKey_ABCD123456.p8"
 BUILD_TYPE="shipping"
 ```

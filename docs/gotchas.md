@@ -95,7 +95,7 @@ xcrun notarytool log <submission-id> --keychain-profile "MyNotaryProfile"
 
 The rejection reason is almost never surfaced in the CLI output itself.
 
-## Game Center is a Mac App Store feature — ship.sh handles iOS only
+## Game Center on Mac requires `MAC_DISTRIBUTION=app-store`
 
 There are two mutually exclusive macOS product builds:
 
@@ -111,7 +111,7 @@ There are two mutually exclusive macOS product builds:
 
 You cannot ship one binary that does both. The entitlement lists conflict; the certs conflict; the submission flows conflict.
 
-**ship.sh produces Direct Distribution Mac builds**, which means **Game Center on Mac is structurally unavailable** through this script. Empirical confirmation: a Developer-ID-signed Mac app with `com.apple.developer.game-center` in its entitlements, fully notarized and stapled (`Notarization Ticket=stapled`, `spctl` accepted as "source=Notarized Developer ID"), is still SIGKILLed at exec by AMFI:
+**ship.sh's default Mac channel is `MAC_DISTRIBUTION=developer-id`** (Direct Distribution), which is the channel where Game Center is structurally unavailable. Switch to `MAC_DISTRIBUTION=app-store` to get a Game-Center-capable Mac build. Empirical confirmation that Developer ID + Game Center cannot work: a Developer-ID-signed Mac app with `com.apple.developer.game-center` in its entitlements, fully notarized and stapled (`Notarization Ticket=stapled`, `spctl` accepted as "source=Notarized Developer ID"), is still SIGKILLed at exec by AMFI:
 
 ```
 amfid: ... Error -413 "No matching profile found"
@@ -131,15 +131,17 @@ error: exportArchive Provisioning profile "..." doesn't include the com.apple.de
 
 True regardless of `-allowProvisioningUpdates`, `signingStyle=automatic`/`manual`, or which profile is named in `ExportOptions.plist`. Xcode GUI's `Distribute App → Direct Distribution` *appears* to succeed only because `IDEDistribution` skips this pre-validation — but the resulting binary still fails AMFI at launch on macOS if game-center is in the entitlements.
 
-**For Mac Game Center, you need a Mac App Store build:** Apple Distribution signing, MAS provisioning profile (which does authorize game-center), App Sandbox entitlement, no Steam entitlements, uploaded via `altool` to App Store Connect for TestFlight/review. That pipeline is not in ship.sh today; do it via Xcode Organizer's `Distribute App → App Store Connect`.
+**For Mac Game Center, you need a Mac App Store build:** Apple Distribution signing, MAS provisioning profile (which does authorize game-center), App Sandbox entitlement, no Steam entitlements, uploaded via `altool -t macos` to App Store Connect for TestFlight/review. ship.sh runs this when `MAC_DISTRIBUTION=app-store` (`--mac-distribution app-store`) — same `--game-center` flag, different channel. The entitlements file also gets `com.apple.security.network.client=true`; without it, Game Center cannot reach Apple's servers from inside the sandbox (silent failure mode).
 
-## Game Center entitlement wiring (iOS path, which ship.sh handles)
+## Game Center entitlement wiring
 
-UBT reads `bEnableGameCenterSupport=True` from `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` and injects the entitlement into `Intermediate/IOS/<Target>.entitlements` during the build. However, this file is in `Intermediate/` and is **not picked up by `xcodebuild` under `CODE_SIGN_STYLE=Automatic`** — xcodebuild defers to the provisioning portal, which only reflects what `CODE_SIGN_ENTITLEMENTS` explicitly declares. Without an explicit `CODE_SIGN_ENTITLEMENTS` build setting pointing to a real file, the Game Center entitlement is silently dropped from the IPA.
+UBT reads `bEnableGameCenterSupport=True` from `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` (or `[/Script/MacRuntimeSettings.MacRuntimeSettings]` for MAS) and injects the entitlement into `Intermediate/<Platform>/<Target>.entitlements` during the build. However, this intermediate file is **not picked up by `xcodebuild` under `CODE_SIGN_STYLE=Automatic`** — xcodebuild defers to the provisioning portal, which only reflects what `CODE_SIGN_ENTITLEMENTS` explicitly declares. Without an explicit `CODE_SIGN_ENTITLEMENTS` build setting pointing to a real file, the Game Center entitlement is silently dropped from the IPA / MAS pkg.
 
-ship.sh solves this by seeding `Build/IOS/Resources/<Project>.entitlements` (a committed source file) and passing `CODE_SIGN_ENTITLEMENTS=<path>` directly to `xcodebuild archive` as a build setting override. It also writes `bEnableGameCenterSupport=True` to `DefaultEngine.ini` for the UAT cook step.
+ship.sh solves this by seeding a committed entitlements file under `Build/<Platform>/Resources/<Project>.entitlements` and passing `CODE_SIGN_ENTITLEMENTS=<path>` directly to `xcodebuild archive` as a build setting override. It also writes `bEnableGameCenterSupport=True` to `DefaultEngine.ini` for the UAT cook step (both `IOSRuntimeSettings` and `MacRuntimeSettings` sections).
 
-**Commit `Build/IOS/Resources/<Project>.entitlements`** after the first `--game-center` run. Without it in source control, any clean or teammate/CI regen loses the entitlement path.
+**Commit the seeded `.entitlements` file** after the first `--game-center` run (`Build/IOS/Resources/<Project>.entitlements` for iOS, `Build/Mac/Resources/<Project>.entitlements` for MAS). Without it in source control, any clean or teammate/CI regen loses the entitlement path.
+
+On Mac App Store, overriding `CODE_SIGN_ENTITLEMENTS` shadows UE's `ShippingSpecificMacEntitlements` path (which normally points at `Sandbox.NoNet.entitlements`, where `com.apple.security.app-sandbox=true` lives). ship.sh enforces sandbox=true on the seeded file unconditionally for MAS — without it, App Store Connect rejects the upload. With Game Center the file also gets `com.apple.security.network.client=true` (Game Center can't reach Apple's servers from inside the sandbox without it; silent failure mode otherwise).
 
 ## App Sandbox and Game Mode are separate
 

@@ -13,7 +13,8 @@ This is the most common source of confusion when wiring up an Unreal project for
 |---|---|---|---|---|
 | `Build/Apple/Resources/Interface/LaunchScreen.storyboardc` | yes | Stops Mac from trying to compile a consumer-supplied iOS `.storyboard` source. See [gotchas](gotchas.md#adding-a-custom-ios-launchscreenstoryboard-breaks-the-mac-build). | yes | `--no-seed-apple-launchscreen-compat` |
 | `Build/Mac/Resources/Info.Template.plist` | yes | Canonical home for static `Info.plist` keys like `LSSupportsGameMode`. UE's `BaseEngine.ini` already configures `TemplateMacPlist=` to point here. | yes | `--no-seed-mac-info-template-plist` |
-| `Build/IOS/Resources/<Project>.entitlements` | only when `ENABLE_GAME_CENTER=1` and `ENABLE_IOS=1` | Holds `com.apple.developer.game-center`; ship.sh passes its path as `CODE_SIGN_ENTITLEMENTS=<path>` to the iOS `xcodebuild archive`. UBT's `Intermediate/IOS/<Target>.entitlements` is silently ignored under automatic signing, so the committed file is the reliable path. See [gotchas](gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only). | yes | disable `ENABLE_GAME_CENTER` |
+| `Build/IOS/Resources/<Project>.entitlements` | only when `ENABLE_GAME_CENTER=1` and `IOS_DISTRIBUTION=app-store` | Holds `com.apple.developer.game-center`; ship.sh passes its path as `CODE_SIGN_ENTITLEMENTS=<path>` to the iOS `xcodebuild archive`. UBT's `Intermediate/IOS/<Target>.entitlements` is silently ignored under automatic signing, so the committed file is the reliable path. | yes | disable `ENABLE_GAME_CENTER` |
+| `Build/Mac/Resources/<Project>.entitlements` | always when `MAC_DISTRIBUTION=app-store`; with Game Center keys when `ENABLE_GAME_CENTER=1` | Canonical entitlements file for MAS. Always enforces `com.apple.security.app-sandbox=true` (App Store rejects uploads without it, and overriding `CODE_SIGN_ENTITLEMENTS` shadows UE's `ShippingSpecificMacEntitlements` path where sandbox normally lives). With Game Center enabled also holds `com.apple.developer.game-center=true` and `com.apple.security.network.client=true` (Game Center cannot reach Apple's servers from inside the sandbox without it). Pre-existing custom keys in the file are preserved (PlistBuddy `Add`/`Set` is per-key). | yes | not applicable — sandbox is mandatory for MAS |
 | `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` | only when `USE_UE_PACKAGE_VERSION_COUNTER=1` | Strips the engine's `Build.version` Changelist from `CFBundleVersion`. Sanctioned override at `AppleToolChain.cs:394-397`. See [versioning.md](versioning.md#path-a--ue-canonical-opt-in-advanced). | yes | `--no-use-ue-package-version-counter` (turns off Path A entirely) |
 | `Build/Mac/<Project>.PackageVersionCounter` | only when `USE_UE_PACKAGE_VERSION_COUNTER=1` | UE's canonical `CFBundleVersion` source. UE rewrites this every build. **Gitignored per UE convention** (`Build/{Platform}/*.PackageVersionCounter` is in the "UBT writes here itself" category alongside `UBTGenerated/` and `FileOpenOrder/`). | no | `--no-use-ue-package-version-counter` |
 
@@ -23,7 +24,7 @@ All are seeded only when missing — once present, the script never overwrites t
 
 All build output goes under `Saved/` (Mac path configurable via `BUILD_DIR_REL` / `--build-dir`; iOS path is fixed at `Saved/Packages/IOS/`). Filenames are derived from `SHORT_NAME` and `LONG_NAME` (both default to your project name).
 
-**Mac:**
+**Mac — `MAC_DISTRIBUTION=developer-id`** *(default)*:
 
 | Artifact | Path |
 |---|---|
@@ -33,7 +34,17 @@ All build output goes under `Saved/` (Mac path configurable via `BUILD_DIR_REL` 
 | ZIP | `Saved/Packages/Mac/${LONG_NAME}.zip` |
 | DMG | `Saved/Packages/Mac/${LONG_NAME}.dmg` |
 
-**iOS** *(only when `ENABLE_IOS=1` or `--ios-only`)*:
+**Mac — `MAC_DISTRIBUTION=app-store`** *(no ZIP, no DMG, no notarize — App Store review is the equivalent gate)*:
+
+| Artifact | Path |
+|---|---|
+| UAT-packaged app | `Saved/Packages/Mac/${LONG_NAME}-Mac-Shipping.app` |
+| Xcode archive | `Saved/Packages/Mac/${SHORT_NAME}-mas.xcarchive` |
+| Exported installer | `Saved/Packages/Mac/${SHORT_NAME}-mas-export/*.pkg` |
+
+The `.pkg` (not a `.app`) is what `xcodebuild -exportArchive` produces with `method=app-store-connect` on macOS — it's the productbuild output that `xcrun altool --upload-app -t macos` expects. `pkgutil --check-signature` is the right verification command, **not** `codesign --verify` (that only applies to unwrapped `.app` bundles). The `-mas` suffix on archive / export paths means MAS and Developer ID runs don't clobber each other when alternated for testing.
+
+**iOS** *(only when `IOS_DISTRIBUTION=app-store`, e.g. `--ios` or `--ios-only`)*:
 
 | Artifact | Path |
 |---|---|

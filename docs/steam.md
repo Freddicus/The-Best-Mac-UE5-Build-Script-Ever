@@ -33,8 +33,8 @@ If you don't use Steam or don't need the overlay: keep `ENABLE_STEAM=0`.
 
 ## Steam and Game Center are mutually exclusive on Mac
 
-A Steam build is a **Direct Distribution** build (Developer ID Application cert, hardened runtime, notarized, no App Sandbox, with the two Steam entitlements above).
+A Steam build is a **Direct Distribution** build (`MAC_DISTRIBUTION=developer-id`: Developer ID Application cert, hardened runtime, notarized, no App Sandbox, with the two Steam entitlements above).
 
-A Game Center build is a **Mac App Store** build (Apple Distribution cert, MAS provisioning profile, App Sandbox required, uploaded to App Store Connect for review). MAS review forbids the Steam entitlements (`disable-library-validation` and `allow-dyld-environment-variables`) outright.
+A Game Center build on Mac is a **Mac App Store** build (`MAC_DISTRIBUTION=app-store`: Apple Distribution cert, MAS provisioning profile, App Sandbox required, uploaded to App Store Connect for review). MAS review forbids the Steam entitlements (`disable-library-validation` and `allow-dyld-environment-variables`) outright, so ship.sh rejects `MAC_DISTRIBUTION=app-store` + `ENABLE_STEAM=1` up-front.
 
-You cannot ship one Mac binary that does both. `ENABLE_STEAM=1` and the iOS-only `ENABLE_GAME_CENTER=1` can be set on the same ship.sh run — the iOS build gets Game Center and the Mac build gets Steam, since they target different distribution channels. But on a single Mac build, Game Center is unreachable through this script (Direct Distribution / Developer ID Mac apps cannot carry `com.apple.developer.game-center`; AMFI rejects the entitlement at launch). For a Mac Game Center build, use Xcode Organizer's `Distribute App → App Store Connect`; see [gotchas](gotchas.md#game-center-is-a-mac-app-store-feature--shipsh-handles-ios-only).
+You cannot ship one Mac binary that does both. `ENABLE_STEAM=1` and `ENABLE_GAME_CENTER=1` *can* be set on the same ship.sh run as long as the Mac channel isn't MAS — for example: `MAC_DISTRIBUTION=developer-id` + `IOS_DISTRIBUTION=app-store` + Steam on Mac + Game Center on iOS. The Mac and iOS pipelines run independently and each picks up the matching entitlement set. For a Mac build that ships Game Center, switch the Mac channel to `app-store` and drop Steam.
