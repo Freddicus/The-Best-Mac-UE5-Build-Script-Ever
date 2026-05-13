@@ -686,6 +686,103 @@ get_installed_xcode_version() {
   echo "$line" | /usr/bin/awk '{print $2}' 2>/dev/null || true
 }
 
+get_local_swift_branch() {
+  # Returns the major.minor of the active Swift toolchain (e.g. "6.3"), which
+  # doubles as the branch suffix for apple/llvm-project's swift/release/X.Y
+  # convention. Empty on failure. Drives the LLVM version lookup below.
+  local line
+  line="$(/usr/bin/xcrun swift --version 2>/dev/null | /usr/bin/head -n 1 || true)"
+  # Expected: "swift-driver version: ... Apple Swift version 6.3.2 (...)"
+  echo "$line" | /usr/bin/awk -F'Apple Swift version ' '
+    NF>1 { split($2, a, "."); if (a[1] && a[2]) print a[1] "." a[2]; exit }'
+}
+
+fetch_llvm_version_from_apple_source() {
+  # $1 = Swift branch suffix (e.g. "6.3"). Prints the upstream LLVM version
+  # (X.Y.Z) that this Swift release is based on, sourced from Apple's own
+  # version-definition file in apple/llvm-project. Empty + non-zero on failure.
+  #
+  # File location differs across branches:
+  #   - swift/release/6.1+  →  cmake/Modules/LLVMVersion.cmake
+  #   - swift/release/6.0-  →  llvm/CMakeLists.txt (inline set() calls)
+  local swift_branch="$1"
+  [[ -n "$swift_branch" ]] || return 1
+  command -v /usr/bin/curl &>/dev/null || return 1
+
+  local base="https://raw.githubusercontent.com/apple/llvm-project/swift/release/${swift_branch}"
+  local path content major minor patch
+  for path in "cmake/Modules/LLVMVersion.cmake" "llvm/CMakeLists.txt"; do
+    content="$(/usr/bin/curl --silent --location --fail --max-time 15 "$base/$path" 2>/dev/null || true)"
+    [[ -n "$content" ]] || continue
+    major="$(echo "$content" | /usr/bin/grep -oE 'set\(LLVM_VERSION_MAJOR [0-9]+' | /usr/bin/awk '{print $2}')"
+    minor="$(echo "$content" | /usr/bin/grep -oE 'set\(LLVM_VERSION_MINOR [0-9]+' | /usr/bin/awk '{print $2}')"
+    patch="$(echo "$content" | /usr/bin/grep -oE 'set\(LLVM_VERSION_PATCH [0-9]+' | /usr/bin/awk '{print $2}')"
+    if [[ -n "$major" && -n "$minor" && -n "$patch" ]]; then
+      echo "$major.$minor.$patch"
+      return 0
+    fi
+  done
+  return 1
+}
+
+patch_apple_sdk_json() {
+  # $1 = path to Apple_SDK.json, $2 = xcode version (X.Y.Z), $3 = LLVM version (X.Y.Z)
+  # Prints exactly one of: ok | ok_maxv | already_present | parse_failed | error
+  # ("ok_maxv" means the entry was added AND MaxVersion was bumped.)
+  local json="$1" xcode_norm="$2" llvm_ver="$3"
+  command -v python3 &>/dev/null || { echo "error"; return 1; }
+  local result
+  result="$(python3 - "$json" "$xcode_norm" "$llvm_ver" <<'PYEOF' 2>/dev/null
+import sys, re
+try:
+    json_file, xcode_norm, llvm_ver = sys.argv[1], sys.argv[2], sys.argv[3]
+    with open(json_file, "r") as f:
+        content = f.read()
+
+    new_entry = '"' + xcode_norm + '-' + llvm_ver + '"'
+    if new_entry in content:
+        print("already_present"); sys.exit(0)
+
+    m = re.search(r'("AppleVersionToLLVMVersions"\s*:\s*\[)(.*?)(\s*\])', content, re.DOTALL)
+    if not m:
+        print("parse_failed"); sys.exit(0)
+
+    array_body = m.group(2)
+    last_entries = re.findall(r'"[\d.]+-[\d.]+"', array_body)
+    if not last_entries:
+        print("parse_failed"); sys.exit(0)
+
+    last_entry = last_entries[-1]
+    last_pos = array_body.rfind(last_entry)
+    indent_m = re.search(r'\n([\t ]+)"[\d.]+-[\d.]+"', array_body)
+    indent = indent_m.group(1) if indent_m else "\t\t"
+
+    insert_at = last_pos + len(last_entry)
+    new_body = array_body[:insert_at] + ",\n" + indent + new_entry + array_body[insert_at:]
+    new_content = content[:m.start()] + m.group(1) + new_body + m.group(3) + content[m.end():]
+
+    def sv(v):
+        try: return tuple(int(x) for x in v.split("."))
+        except: return (0,)
+
+    bumped = False
+    mx = re.search(r'"MaxVersion"\s*:\s*"([^"]+)"', new_content)
+    if mx and sv(xcode_norm) > sv(mx.group(1)):
+        new_content = new_content[:mx.start(1)] + xcode_norm + new_content[mx.end(1):]
+        bumped = True
+
+    with open(json_file, "w") as f:
+        f.write(new_content)
+
+    print("ok_maxv" if bumped else "ok")
+except Exception:
+    print("error"); sys.exit(0)
+PYEOF
+)" || result="error"
+  # Empty stdout (e.g. interpreter crashed before any print) is also a failure.
+  echo "${result:-error}"
+}
+
 check_apple_sdk_json_compat() {
   # NOTE: Apple_SDK.json describes supported Xcode versions for this UE install.
   # It does NOT describe macOS versions.
@@ -790,6 +887,43 @@ check_apple_sdk_json_compat() {
     fi
     if [[ "$map_ok" -eq 0 ]]; then
       error "AppleVersionToLLVMVersions does not include this Xcode version."
+    fi
+    local yn=""
+    # Auto-patch needs: (a) curl + the active Swift toolchain (for the lookup),
+    # and (b) python3 (for the JSON edit). Only offer when all are present.
+    local swift_branch=""
+    swift_branch="$(get_local_swift_branch || true)"
+    if [[ -t 3 ]] && [[ -n "$swift_branch" ]] && command -v python3 &>/dev/null; then
+      printf "Auto-patch Apple_SDK.json using Apple's own LLVM version source\n" >&3
+      printf "(github.com/apple/llvm-project, branch swift/release/%s)? [y/N] " "$swift_branch" >&3
+      read -r yn || yn=""
+    fi
+    if [[ "$yn" =~ ^[Yy]$ ]]; then
+      info "Fetching LLVM version from apple/llvm-project (swift/release/$swift_branch)..."
+      local llvm_ver=""
+      llvm_ver="$(fetch_llvm_version_from_apple_source "$swift_branch")" || true
+      if [[ -z "$llvm_ver" ]]; then
+        error "Could not fetch LLVM version from apple/llvm-project for Swift $swift_branch."
+        error "The swift/release/$swift_branch branch may not exist yet (beta Xcode?), or"
+        error "the version-file layout has changed. Check manually:"
+        error "  https://github.com/apple/llvm-project/tree/swift/release/$swift_branch"
+        die "Xcode/UE toolchain policy mismatch. Update Apple_SDK.json manually and re-run."
+      fi
+      good "Apple source: Swift $swift_branch -> LLVM $llvm_ver"
+      local patch_result
+      patch_result="$(patch_apple_sdk_json "$json" "$xcode_norm" "$llvm_ver")"
+      case "$patch_result" in
+        ok)
+          good "Patched Apple_SDK.json: added \"$xcode_norm-$llvm_ver\"." ;;
+        ok_maxv)
+          good "Patched Apple_SDK.json: added \"$xcode_norm-$llvm_ver\" and bumped MaxVersion to $xcode_norm." ;;
+        already_present)
+          good "Mapping entry already present in Apple_SDK.json — no change needed." ;;
+        *)
+          error "Failed to patch Apple_SDK.json (result: ${patch_result:-empty})."
+          die "Xcode/UE toolchain policy mismatch. Update Apple_SDK.json manually and re-run." ;;
+      esac
+      return 0
     fi
     error "Fix: edit $json"
     error "  - If needed, update MinVersion/MaxVersion to include $(normalize_semver_3 "$xcode_ver")"

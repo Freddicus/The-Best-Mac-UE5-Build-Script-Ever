@@ -6,6 +6,21 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [unreleased] — Auto-patch `Apple_SDK.json` when Xcode is newer than UE supports
+
+When the Xcode/UE compatibility pre-flight (`check_apple_sdk_json_compat`) finds the active Xcode missing from the engine's `Apple_SDK.json` mapping table, ship.sh now offers to add the entry in place. The LLVM version that pairs with the local Xcode is sourced from Apple's own version-definition file in `apple/llvm-project` (branch `swift/release/<major.minor>`, file `cmake/Modules/LLVMVersion.cmake` on 6.1+ or inline in `llvm/CMakeLists.txt` on older branches) — the same data Apple's own toolchain build system reads, and the same data Wikipedia's editors transcribe from. Local `xcrun swift --version` provides the major.minor that picks the branch, so the lookup is driven entirely by what's actually installed. Removes a recurring failure mode where adopting a new Xcode point release stops a UE build until the user hand-edits the JSON.
+
+### Added
+- **`get_local_swift_branch`** — reads `xcrun swift --version`, returns Swift major.minor (e.g. `6.3`). Doubles as the `apple/llvm-project` branch suffix.
+- **`fetch_llvm_version_from_apple_source`** — pure bash + `curl` + `grep`. Tries `cmake/Modules/LLVMVersion.cmake` first, falls back to `llvm/CMakeLists.txt` for older branches; extracts `LLVM_VERSION_MAJOR/MINOR/PATCH` and returns `X.Y.Z`. No Python, no HTML parsing, no third-party data source.
+- **`patch_apple_sdk_json`** — inserts the new `"Xcode-LLVM"` pair after the last entry in `AppleVersionToLLVMVersions` (preserving comma placement and the file's existing tab indent), and bumps `MaxVersion` if the new Xcode is higher than the current ceiling. Idempotent: re-running with an entry already present returns `already_present` and writes nothing. Python is used here for surgical regex-edit of the JSON text — the existing formatting (including the `//1`..`//9` comment keys at the top) is preserved exactly.
+- **Interactive offer in `check_apple_sdk_json_compat`** when the mapping check fails. Gated on (a) a TTY on FD 3, (b) `xcrun swift --version` producing a usable branch suffix, and (c) `python3` available — the offer is not shown unless all three can complete, so the prompt never dangles a non-functional path. On accept: fetch → patch → success message; on decline: falls through to the existing manual-fix instructions.
+
+### Verified
+End-to-end against the active install (UE 5.7 + Xcode 26.5): Swift `6.3` → LLVM `21.1.6`, identical to the existing `26.5.0-21.1.6` entry in Apple_SDK.json. Also verified across older branches: Swift `6.0` → `17.0.6` (matches `16.0.0-17.0.6`), Swift `5.10` → `16.0.0` (matches `15.0.0-16.0.0`) — confirming the source maps 1:1 to every entry Epic ships. Patcher tested for new-entry add (with MaxVersion bump), idempotent re-run, corrupt JSON, and missing file — each returns a distinct sentinel and the bash case statement handles them without false-success.
+
+---
+
 ## [unreleased] — Mac App Store pipeline (`MAC_DISTRIBUTION=app-store`)
 
 Wires the Mac App Store channel end-to-end on top of the dispatcher landed in the previous PR. `MAC_DISTRIBUTION=app-store` now runs a real build: xcodebuild archive under automatic provisioning → exportArchive against a MAS-specific ExportOptions.plist → optional `xcrun altool -t macos` validate/upload. Mirrors the existing iOS pipeline — same tooling, only the `-t macos` target and the export-plist `method=app-store-connect` differ. No ZIP, no DMG, no notarize/staple: App Store review is the equivalent gate. Resolves PR-2 of [issue #27](https://github.com/Freddicus/The-Best-Mac-UE5-Build-Script-Ever/issues/27).
