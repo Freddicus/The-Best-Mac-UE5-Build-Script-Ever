@@ -6,6 +6,23 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-14] — Add `--preset` layer for common distribution targets (#27 PR-3)
+
+Closes the third and final piece of issue #27. The `MAC_DISTRIBUTION` / `IOS_DISTRIBUTION` dispatcher (PR-1) and the Mac App Store pipeline (PR-2) are usable but verbose: a Steam build still wants `--mac-distribution developer-id --steam --zip --notarize`. `--preset NAME` collapses each common target into one flag.
+
+### Added
+- **`--preset NAME`** — one of `steam-mac`, `direct-mac`, `mas-mac`, `ios`, `mac-ios`, `mas-ios`. Each maps to a coherent set of dispatcher + feature-flag values. `steam-mac` ships a ZIP (Steamworks' required submission artifact); `direct-mac` ships a DMG. Both notarize. The MAS-only and iOS presets skip notarization — App Store review is the equivalent gate. The active preset is printed at the top of `--print-config`.
+- **`--list-presets`** — prints the preset table and exits. Mirrors `--help`.
+- **Interactive Game Center prompt on `mas-mac` / `ios` / `mas-ios`**. When the user did not pass `--game-center` / `--no-game-center` and stdin is a TTY, ship.sh asks per-run whether to enable Game Center for the active channel. The prompt deliberately bypasses `ENABLE_GAME_CENTER` from `.env` for these presets — a user toggling between MAS and Direct Distribution targets often has a stale value from the wrong channel, and the AMFI/App-Store-review mismatch is expensive to discover mid-build. Non-TTY runs skip the prompt and inherit the existing precedence rules.
+- **Precedence model**: `CLI > .env > preset > defaults`. At the top of the defaults block, ship.sh snapshots which preset-controlled variables (`MAC_DISTRIBUTION`, `IOS_DISTRIBUTION`, `ENABLE_STEAM`, `ENABLE_ZIP`, `ENABLE_DMG`, `NOTARIZE`, `ENABLE_GAME_CENTER`) were already non-empty into `PRESET_ENV_LOCKED`. The preset writes a variable only when neither the snapshot nor a `CLI_SET_<VAR>=1` marker exists, then sets the marker itself so downstream reconcilers (notably `resolve_distribution_flags`) treat the preset value as an explicit choice.
+- **`CLI_SET_*` markers** added to `--zip` / `--no-zip`, `--dmg` / `--no-dmg`, `--notarize` / `--no-notarize`, and `--game-center` / `--no-game-center` so the preset cannot silently overwrite an earlier-in-argv CLI flag regardless of where `--preset` appears in the command line.
+
+### Docs
+- **`docs/configuration.md`** gains a "Presets" section between "Distribution channels" and ".env file" — covers the table, precedence model, and the Game Center prompt rationale.
+- **`--help`** body documents `--preset NAME` and `--list-presets` inline.
+
+---
+
 ## [2026-05-13] — Fix Developer ID export when Mac entitlements file holds Game Center; surface notarytool submit errors
 
 Two cooperating fixes. After the `MAC_DISTRIBUTION` dispatcher landed (PR #28), switching a project from a prior MAS build back to Developer ID left `com.apple.developer.game-center=true` in `Build/Mac/Resources/<Project>.entitlements`. UE reads the same file via `ShippingSpecificMacEntitlements`, so the next archive embedded the entitlement and `xcodebuild -exportArchive` failed with `error: exportArchive No profiles for '<bundle id>' were found` — Developer ID provisioning profiles cannot carry game-center. Separately, when `notarytool submit` returned non-zero (notably the transient exit 69 you get if your Mac sleeps or loses network mid-upload), `submit_notary` died at the `out=$(...)` assignment under `set -e` before the captured stderr ever made it to the log, leaving "Script failed at line 93 (exit 69)" with no diagnostic.

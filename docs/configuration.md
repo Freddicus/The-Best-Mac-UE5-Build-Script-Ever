@@ -47,6 +47,41 @@ The script enforces these rules up-front and fails with a clear message if viola
 | `MAC_DISTRIBUTION=app-store` + `ENABLE_GAME_CENTER=1` | **supported** | MAS provisioning profile encodes the entitlement; AMFI accepts it. Entitlements file also gets `com.apple.security.network.client=true` so Game Center can reach Apple's servers from inside the sandbox. |
 | `MAC_DISTRIBUTION=app-store` | **supported** (since 2026-05-12) | Full pipeline: archive → exportArchive → optional altool. Requires `MAS_EXPORT_PLIST` (auto-detected as `MAS-ExportOptions.plist`). |
 
+## Presets
+
+A preset maps a single name to a coherent set of dispatcher values + feature flags, so common distribution targets are one flag away. Pick a preset with `--preset NAME`; see `./ship.sh --list-presets` for the live list.
+
+| Preset | Translates to |
+|---|---|
+| `steam-mac` | `MAC_DISTRIBUTION=developer-id`, `ENABLE_STEAM=1`, `ENABLE_ZIP=1`, `NOTARIZE=yes` |
+| `direct-mac` | `MAC_DISTRIBUTION=developer-id`, `ENABLE_STEAM=0`, `ENABLE_DMG=1`, `NOTARIZE=yes` |
+| `mas-mac` | `MAC_DISTRIBUTION=app-store` |
+| `ios` | `MAC_DISTRIBUTION=off`, `IOS_DISTRIBUTION=app-store` |
+| `mac-ios` | `MAC_DISTRIBUTION=developer-id`, `IOS_DISTRIBUTION=app-store` |
+| `mas-ios` | `MAC_DISTRIBUTION=app-store`, `IOS_DISTRIBUTION=app-store` |
+
+`steam-mac` ships a ZIP (Steamworks' required submission artifact) and `direct-mac` ships a DMG (the common direct-distribution form factor); both notarize and staple. The two MAS-only and iOS-only presets skip notarization — App Store review is the equivalent gate. The active preset is printed at the top of `--print-config`.
+
+### Precedence: CLI > .env > preset > defaults
+
+The preset only writes a variable when:
+
+1. The user didn't pass a CLI flag that touches it (`--no-zip`, `--game-center`, etc.), and
+2. The variable wasn't already populated by `.env` (snapshotted before the defaults block).
+
+So a CI `.env` that pins `ENABLE_DMG=0` survives `--preset steam-mac` cleanly. Conversely, a value left unset in `.env` will pick up whatever the preset says.
+
+### Game Center prompt on MAS-capable presets
+
+On `mas-mac`, `ios`, and `mas-ios`, when the user did *not* pass `--game-center` / `--no-game-center` and the run is interactive (TTY attached on stdin), ship.sh prompts:
+
+```
+Preset 'mas-mac' supports Game Center on the active channel.
+Enable Game Center for this build? (y/N)
+```
+
+The prompt deliberately bypasses any `ENABLE_GAME_CENTER` in `.env` for these presets — a user flipping between MAS and Direct Distribution targets often has a stale value left over from the wrong channel, and AMFI or App Store review will reject the mismatch hours into a build. The prompt forces a fresh decision per run. To skip the prompt (and CI runs), pass `--game-center` or `--no-game-center` on the command line.
+
 ## .env file
 
 Copy `.env.example` to `.env` next to `ship.sh`. It's sourced as shell code — only use a `.env` you trust.
