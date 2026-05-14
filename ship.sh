@@ -951,6 +951,7 @@ check_apple_sdk_json_compat() {
 
 print_config() {
   echo "== Resolved configuration ==" >&3
+  echo "PRESET:            ${PRESET:-<unset>} (see --list-presets)" >&3
   echo "MAC_DISTRIBUTION:  $MAC_DISTRIBUTION (developer-id | app-store | off)" >&3
   echo "IOS_DISTRIBUTION:  $IOS_DISTRIBUTION (off | app-store)" >&3
   echo "REPO_ROOT:         $REPO_ROOT" >&3
@@ -2615,6 +2616,31 @@ autodetect_ue_root_if_needed() {
 #
 # Normalize config from .env / environment / CLI.
 # Only provide internal fallbacks for optional values.
+
+# -----------------------------------------------------------------------------
+# Preset .env snapshot
+#
+# Captures which preset-controlled variables were already populated by .env
+# (or the surrounding environment) BEFORE the defaults block below applies
+# its ${VAR:-default} fallbacks. apply_preset() consults this snapshot so
+# that a preset never clobbers a value the user has explicitly set in .env.
+#
+# Final precedence: CLI > .env > preset > defaults.
+# -----------------------------------------------------------------------------
+PRESET_CONTROLLED_VARS=(
+  MAC_DISTRIBUTION IOS_DISTRIBUTION ENABLE_STEAM
+  ENABLE_ZIP ENABLE_DMG NOTARIZE ENABLE_GAME_CENTER
+)
+# Per-variable lock flags (PRESET_ENV_LOCK_<VAR>=1 when .env set <VAR>).
+# Bash 3.2 (macOS system bash) does not support associative arrays, so we
+# use dynamic variable names — same pattern as the CLI_SET_<VAR> markers.
+for _v in "${PRESET_CONTROLLED_VARS[@]}"; do
+  if [[ -n "${!_v:-}" ]]; then
+    printf -v "PRESET_ENV_LOCK_${_v}" '%s' "1"
+  fi
+done
+unset _v
+
 REPO_ROOT="${REPO_ROOT:-}"
 UPROJECT_NAME="${UPROJECT_NAME:-}"
 XCODE_WORKSPACE="${XCODE_WORKSPACE:-}"
@@ -2767,6 +2793,160 @@ ENABLE_GAME_CENTER="${ENABLE_GAME_CENTER:-}"
 APP_CATEGORY="${APP_CATEGORY:-}"
 CFBUNDLE_VERSION="${CFBUNDLE_VERSION:-}"
 
+# Distribution preset (PR-3 of #27). Empty by default; set via --preset NAME.
+# A preset maps to a coherent set of dispatcher values + feature flags
+# (MAC_DISTRIBUTION, ENABLE_STEAM, ENABLE_ZIP/DMG, NOTARIZE, etc.). The
+# preset is applied after CLI parsing but before resolve_distribution_flags,
+# and only writes a variable that was not already set by .env or the CLI.
+PRESET="${PRESET:-}"
+
+
+# -----------------------------------------------------------------------------
+# Preset layer (PR-3 of #27)
+#
+# A preset maps a single name to a coherent set of dispatcher + feature-flag
+# values. apply_preset() runs after CLI parsing but before
+# resolve_distribution_flags / validate_distribution_compatibility, so the
+# preset's MAC_DISTRIBUTION / IOS_DISTRIBUTION values flow through the
+# normal reconciliation and matrix checks unchanged.
+#
+# Precedence (highest to lowest): CLI > .env > preset > defaults.
+#   - CLI: a CLI_SET_<VAR>=1 marker means the user typed a flag for this
+#     variable; preset never overrides it.
+#   - .env: PRESET_ENV_LOCK_<VAR>=1 (snapshotted at the top of the defaults
+#     block) means the user pinned the value in .env; preset never
+#     overrides it.
+#   - Otherwise: preset writes the value AND sets CLI_SET_<VAR>=1 so that
+#     downstream reconcilers (e.g. resolve_distribution_flags) treat it as
+#     an explicit choice.
+#
+# Game Center on MAS-capable presets: when a preset is in
+# {mas-mac, ios, mas-ios} and the user did not pass --game-center /
+# --no-game-center, apply_preset prompts interactively. A user toggling
+# back and forth between MAS and Direct Distribution targets often has a
+# stale ENABLE_GAME_CENTER in .env; the prompt forces a fresh decision.
+# In non-TTY runs the prompt is skipped and ENABLE_GAME_CENTER is left
+# alone (.env / unset wins).
+#
+# Block placement: defined here (before the CLI parser) so that
+# --list-presets can dispatch to list_presets() inside the parser case.
+# apply_preset() itself is invoked further down, after CLI parsing.
+# -----------------------------------------------------------------------------
+
+# List of presets and their human-readable summaries. Kept here (not inside
+# apply_preset) so --list-presets can iterate it without running the body.
+PRESET_NAMES=(steam-mac direct-mac mas-mac ios mac-ios mas-ios)
+
+_preset_summary() {
+  case "$1" in
+    steam-mac)  echo "MAC_DISTRIBUTION=developer-id, ENABLE_STEAM=1, ENABLE_ZIP=1, NOTARIZE=yes" ;;
+    direct-mac) echo "MAC_DISTRIBUTION=developer-id, ENABLE_STEAM=0, ENABLE_DMG=1, NOTARIZE=yes" ;;
+    mas-mac)    echo "MAC_DISTRIBUTION=app-store (Game Center prompted)" ;;
+    ios)        echo "MAC_DISTRIBUTION=off, IOS_DISTRIBUTION=app-store (Game Center prompted)" ;;
+    mac-ios)    echo "MAC_DISTRIBUTION=developer-id, IOS_DISTRIBUTION=app-store" ;;
+    mas-ios)    echo "MAC_DISTRIBUTION=app-store, IOS_DISTRIBUTION=app-store (Game Center prompted)" ;;
+    *)          return 1 ;;
+  esac
+}
+
+list_presets() {
+  echo "Available --preset values:" >&3
+  echo "" >&3
+  local name
+  for name in "${PRESET_NAMES[@]}"; do
+    printf "  %-12s  %s\n" "$name" "$(_preset_summary "$name")" >&3
+  done
+  echo "" >&3
+  echo "Precedence: CLI > .env > preset > defaults." >&3
+  echo "Game Center is prompted interactively on mas-mac / ios / mas-ios when" >&3
+  echo "--game-center / --no-game-center is not on the command line." >&3
+}
+
+# _preset_assign VAR VALUE
+# Assigns VAR=VALUE iff neither .env nor CLI already set VAR. On a successful
+# assignment, marks CLI_SET_<VAR>=1 so downstream reconcilers treat the value
+# as an explicit user choice.
+#
+# The CLI_SET_* markers referenced below are read INDIRECTLY via
+# ${!cli_marker} — shellcheck can't trace that, so the explicit reference
+# on the first line is what tells SC2034 the variables are used.
+_preset_assign() {
+  : "${CLI_SET_ENABLE_ZIP:-0}" "${CLI_SET_ENABLE_DMG:-0}" \
+    "${CLI_SET_NOTARIZE:-0}" "${CLI_SET_ENABLE_GAME_CENTER:-0}" \
+    "${CLI_SET_MAC_DISTRIBUTION:-0}" "${CLI_SET_IOS_DISTRIBUTION:-0}" \
+    "${CLI_SET_ENABLE_STEAM:-0}"
+  local var="$1" value="$2"
+  local cli_marker="CLI_SET_${var}"
+  local env_lock="PRESET_ENV_LOCK_${var}"
+  if [[ "${!env_lock:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ "${!cli_marker:-0}" == "1" ]]; then
+    return 0
+  fi
+  printf -v "$var" '%s' "$value"
+  printf -v "$cli_marker" '%s' "1"
+}
+
+apply_preset() {
+  [[ -n "${PRESET:-}" ]] || return 0
+
+  case "$PRESET" in
+    steam-mac)
+      _preset_assign MAC_DISTRIBUTION "developer-id"
+      _preset_assign ENABLE_STEAM     "1"
+      _preset_assign ENABLE_ZIP       "1"
+      _preset_assign NOTARIZE         "yes"
+      ;;
+    direct-mac)
+      _preset_assign MAC_DISTRIBUTION "developer-id"
+      _preset_assign ENABLE_STEAM     "0"
+      _preset_assign ENABLE_DMG       "1"
+      _preset_assign NOTARIZE         "yes"
+      ;;
+    mas-mac)
+      _preset_assign MAC_DISTRIBUTION "app-store"
+      ;;
+    ios)
+      _preset_assign MAC_DISTRIBUTION "off"
+      _preset_assign IOS_DISTRIBUTION "app-store"
+      ;;
+    mac-ios)
+      _preset_assign MAC_DISTRIBUTION "developer-id"
+      _preset_assign IOS_DISTRIBUTION "app-store"
+      ;;
+    mas-ios)
+      _preset_assign MAC_DISTRIBUTION "app-store"
+      _preset_assign IOS_DISTRIBUTION "app-store"
+      ;;
+    *)
+      die "Unknown --preset '$PRESET'. Run --list-presets to see valid names."
+      ;;
+  esac
+
+  # Interactive Game Center prompt for MAS-capable presets. Bypassed when the
+  # user already passed --game-center / --no-game-center; bypassed in
+  # non-TTY runs (CI) since we can't prompt. We deliberately do NOT pre-fill
+  # from .env here — a user flipping between targets often has a stale value
+  # for the wrong channel.
+  case "$PRESET" in
+    mas-mac|ios|mas-ios)
+      if [[ "${CLI_SET_ENABLE_GAME_CENTER:-0}" != "1" && -t 0 ]]; then
+        local ans=""
+        info "Preset '$PRESET' supports Game Center on the active channel."
+        read -r -p "Enable Game Center for this build? (y/N) " ans
+        if [[ "${ans:-N}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+          ENABLE_GAME_CENTER="1"
+          good "Game Center: enabled for this build."
+        else
+          ENABLE_GAME_CENTER="0"
+          info "Game Center: disabled for this build."
+        fi
+        CLI_SET_ENABLE_GAME_CENTER=1
+      fi
+      ;;
+  esac
+}
 
 # -----------------------------------------------------------------------------
 # Command-line flag overrides (highest priority)
@@ -2868,6 +3048,33 @@ Options (highest priority):
                                      legacy alias for "--mac-distribution off
                                      --ios-distribution app-store". Does not
                                      require SIGN_IDENTITY.
+
+  --preset NAME                      ergonomic shortcut: one name maps to a
+                                     coherent set of dispatcher values +
+                                     feature flags. Precedence:
+                                     CLI > .env > preset > defaults. Available:
+                                       steam-mac  MAC_DISTRIBUTION=developer-id,
+                                                  ENABLE_STEAM=1, ENABLE_ZIP=1,
+                                                  NOTARIZE=yes
+                                       direct-mac MAC_DISTRIBUTION=developer-id,
+                                                  ENABLE_STEAM=0, ENABLE_DMG=1,
+                                                  NOTARIZE=yes
+                                       mas-mac    MAC_DISTRIBUTION=app-store
+                                       ios        MAC_DISTRIBUTION=off,
+                                                  IOS_DISTRIBUTION=app-store
+                                       mac-ios    MAC_DISTRIBUTION=developer-id,
+                                                  IOS_DISTRIBUTION=app-store
+                                       mas-ios    MAC_DISTRIBUTION=app-store,
+                                                  IOS_DISTRIBUTION=app-store
+                                     On mas-mac / ios / mas-ios, ship.sh
+                                     prompts interactively for Game Center
+                                     when --game-center / --no-game-center
+                                     is not on the command line (a stale
+                                     ENABLE_GAME_CENTER in .env is bypassed
+                                     so the wrong-channel value can't sneak
+                                     through). Non-TTY runs skip the prompt.
+  --list-presets                     print the preset table and exit
+
   --ios-workspace FILE_OR_PATH       (e.g. "MyGame (iOS).xcworkspace")
   --ios-scheme NAME                  iOS Xcode scheme (auto-detected if unset)
   --ios-export-plist PATH            iOS-ExportOptions.plist path
@@ -2958,6 +3165,8 @@ USAGE
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
+    --list-presets) list_presets; exit 0 ;;
+    --preset)               PRESET="$2"; shift 2 ;;
 
     --repo-root)            REPO_ROOT="$2"; shift 2 ;;
     --uproject)
@@ -3036,10 +3245,10 @@ while [[ $# -gt 0 ]]; do
     --ios-asc-api-issuer)     IOS_ASC_API_ISSUER="$2"; shift 2 ;;
     --ios-asc-api-key-path)   IOS_ASC_API_KEY_PATH="$2"; shift 2 ;;
 
-    --zip)                  ENABLE_ZIP="1"; shift ;;
-    --no-zip)               ENABLE_ZIP="0"; shift ;;
-    --dmg)                  ENABLE_DMG="1"; shift ;;
-    --no-dmg)               ENABLE_DMG="0"; shift ;;
+    --zip)                  ENABLE_ZIP="1"; CLI_SET_ENABLE_ZIP=1; shift ;;
+    --no-zip)               ENABLE_ZIP="0"; CLI_SET_ENABLE_ZIP=1; shift ;;
+    --dmg)                  ENABLE_DMG="1"; CLI_SET_ENABLE_DMG=1; shift ;;
+    --no-dmg)               ENABLE_DMG="0"; CLI_SET_ENABLE_DMG=1; shift ;;
     --fancy-dmg)            FANCY_DMG="1"; shift ;;
     --no-fancy-dmg)         FANCY_DMG="0"; shift ;;
     --dmg-name)             DMG_NAME="$2"; shift 2 ;;
@@ -3047,8 +3256,8 @@ while [[ $# -gt 0 ]]; do
     --dmg-output-dir)       DMG_OUTPUT_DIR="$2"; shift 2 ;;
 
     --build-type)           BUILD_TYPE="$2"; shift 2 ;;
-    --notarize)             NOTARIZE="yes"; shift ;;
-    --no-notarize)          NOTARIZE="no"; shift ;;
+    --notarize)             NOTARIZE="yes"; CLI_SET_NOTARIZE=1; shift ;;
+    --no-notarize)          NOTARIZE="no"; CLI_SET_NOTARIZE=1; shift ;;
 
     --version-mode)             VERSION_MODE="$2"; shift 2 ;;
     --version-string)           VERSION_STRING="$2"; shift 2 ;;
@@ -3056,8 +3265,8 @@ while [[ $# -gt 0 ]]; do
     --marketing-version)        MARKETING_VERSION="$2"; shift 2 ;;
     --game-mode)                ENABLE_GAME_MODE="1"; shift ;;
     --no-game-mode)             ENABLE_GAME_MODE="0"; shift ;;
-    --game-center)              ENABLE_GAME_CENTER="1"; shift ;;
-    --no-game-center)           ENABLE_GAME_CENTER="0"; shift ;;
+    --game-center)              ENABLE_GAME_CENTER="1"; CLI_SET_ENABLE_GAME_CENTER=1; shift ;;
+    --no-game-center)           ENABLE_GAME_CENTER="0"; CLI_SET_ENABLE_GAME_CENTER=1; shift ;;
     --app-category)             APP_CATEGORY="$2"; shift 2 ;;
     --set-cfbundle-version)     CFBUNDLE_VERSION="$2"; CLI_SET_CFBUNDLE_VERSION=1; shift 2 ;;
     --bump-major|--bump-minor|--bump-patch)
@@ -3179,6 +3388,7 @@ resolve_asc_credential_aliases() {
   IOS_ASC_API_KEY_PATH="$ASC_API_KEY_PATH"
 }
 
+apply_preset
 resolve_distribution_flags
 validate_distribution_compatibility
 resolve_asc_credential_aliases
