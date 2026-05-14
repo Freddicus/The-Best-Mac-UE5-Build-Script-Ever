@@ -89,12 +89,19 @@ wait_for_notary_profile_with_backoff() {
 submit_notary() {
   local path="$1"
   local label="$2"
-  local out id
-  out="$(/usr/bin/xcrun notarytool submit "$path" --keychain-profile "$NOTARY_PROFILE" --no-wait --output-format json 2>&1)"
-  echo "$out" >&2
+  local out rc id last_line
+  # Capture stdout+stderr without letting set -e abort us on nonzero exit —
+  # we need to log the captured output and surface a useful error message.
+  if out="$(/usr/bin/xcrun notarytool submit "$path" --keychain-profile "$NOTARY_PROFILE" --no-wait --output-format json 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf '%s\n' "$out" >&2
   id="$(printf '%s' "$out" | /usr/bin/sed -nE 's/.*"id"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | /usr/bin/head -n 1)"
-  if [[ -z "$id" ]]; then
-    die "Notary submit failed for $label (no submission id)."
+  if [[ "$rc" -ne 0 || -z "$id" ]]; then
+    last_line="$(printf '%s\n' "$out" | /usr/bin/awk 'NF{line=$0} END{print line}')"
+    die "Notary submit failed for $label (exit $rc): ${last_line:-no output captured}. Full notarytool output is in the log."
   fi
   echo "Notary submit id ($label): $id" >&3
   echo "$id"
@@ -1421,7 +1428,15 @@ ensure_game_center_entitlements() {
     touched=1
   fi
 
-  if [[ "${MAC_DISTRIBUTION:-developer-id}" == "app-store" ]]; then
+  # MAC_DISTRIBUTION=app-store: full add/remove management.
+  # MAC_DISTRIBUTION=developer-id + remove: also clean up. UE points
+  # ShippingSpecificMacEntitlements at the same Build/Mac/Resources/<Project>.entitlements
+  # we manage for MAS, so a leftover com.apple.developer.game-center=true (from a prior
+  # MAS run) causes exportArchive to fail with "No profiles for '<bundle id>' were found" —
+  # Developer ID provisioning profiles cannot carry the game-center entitlement.
+  # (Add under developer-id is blocked earlier by validate_distribution_compatibility.)
+  if [[ "${MAC_DISTRIBUTION:-developer-id}" == "app-store" \
+        || ( "${MAC_DISTRIBUTION:-developer-id}" == "developer-id" && "$action" == "remove" ) ]]; then
     local mac_ent
     mac_ent="$(mac_app_store_entitlements_path)"
     _ensure_game_center_entitlement_for_platform "$mac_ent" "$action"
