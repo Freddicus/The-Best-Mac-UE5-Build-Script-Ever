@@ -6,6 +6,19 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-13] — Fix Developer ID export when Mac entitlements file holds Game Center; surface notarytool submit errors
+
+Two cooperating fixes. After the `MAC_DISTRIBUTION` dispatcher landed (PR #28), switching a project from a prior MAS build back to Developer ID left `com.apple.developer.game-center=true` in `Build/Mac/Resources/<Project>.entitlements`. UE reads the same file via `ShippingSpecificMacEntitlements`, so the next archive embedded the entitlement and `xcodebuild -exportArchive` failed with `error: exportArchive No profiles for '<bundle id>' were found` — Developer ID provisioning profiles cannot carry game-center. Separately, when `notarytool submit` returned non-zero (notably the transient exit 69 you get if your Mac sleeps or loses network mid-upload), `submit_notary` died at the `out=$(...)` assignment under `set -e` before the captured stderr ever made it to the log, leaving "Script failed at line 93 (exit 69)" with no diagnostic.
+
+### Fixed
+- **`ensure_game_center_entitlements` now honors `--no-game-center` under `MAC_DISTRIBUTION=developer-id`**. The Mac cleanup branch previously gated on `MAC_DISTRIBUTION == app-store` only — symmetric for add, but wrong for remove, because `Build/Mac/Resources/<Project>.entitlements` is the same file UE Shipping reads via `ShippingSpecificMacEntitlements`. Widened the predicate to also fire under `developer-id` + remove (only remove — add on developer-id is already blocked upstream by `validate_distribution_compatibility`). Verified end-to-end on a project switching from MAS back to Developer ID: removes the `com.apple.developer.game-center` key, writes `bEnableGameCenterSupport=False` under `[/Script/MacRuntimeSettings.MacRuntimeSettings]`, archive embeds clean entitlements, `exportArchive` succeeds.
+- **`submit_notary` no longer swallows `notarytool` errors**. Captures the exit code explicitly via `if out="$(...)"; then rc=0; else rc=$?; fi` so `set -e` cannot kill the function before the captured output is emitted, and the `die` message includes the exit code plus the last non-empty line of `notarytool`'s output. A transient service blip (machine sleep mid-upload, brief network outage, intermittent service error) now surfaces a usable error message instead of an unannotated exit code.
+
+### Docs
+- **`docs/configuration.md`** updated to describe the new `ENABLE_GAME_CENTER=0` cleanup semantics under `MAC_DISTRIBUTION=developer-id`. The "no-op with a warning" claim no longer applies to the remove path — it always cleans up; only the add path is rejected for incompatible distributions.
+
+---
+
 ## [2026-05-13] — Auto-patch `Apple_SDK.json` when Xcode is newer than UE supports
 
 When the Xcode/UE compatibility pre-flight (`check_apple_sdk_json_compat`) finds the active Xcode missing from the engine's `Apple_SDK.json` mapping table, ship.sh now offers to add the entry in place. The LLVM version that pairs with the local Xcode is sourced from Apple's own version-definition file in `apple/llvm-project` (branch `swift/release/<major.minor>`, file `cmake/Modules/LLVMVersion.cmake` on 6.1+ or inline in `llvm/CMakeLists.txt` on older branches) — the same data Apple's own toolchain build system reads, and the same data Wikipedia's editors transcribe from. Local `xcrun swift --version` provides the major.minor that picks the branch, so the lookup is driven entirely by what's actually installed. Removes a recurring failure mode where adopting a new Xcode point release stops a UE build until the user hand-edits the JSON.
