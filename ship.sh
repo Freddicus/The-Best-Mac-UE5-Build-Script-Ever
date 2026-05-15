@@ -2984,6 +2984,8 @@ Options (highest priority):
   --xcode-workspace FILE_OR_PATH     (e.g. "MyGame (Mac).xcworkspace")
   --xcode-scheme NAME
   --build-dir PATH                   (script-side outputs; default: BuildArtifacts/Mac.
+                                      Relative paths are anchored to the project
+                                      root; absolute paths are used as-is.
                                       UAT BuildCookRun's -archivedirectory is
                                       derived as the parent so its /<Platform>/
                                       output lands inside this dir.)
@@ -3499,9 +3501,9 @@ SCHEME="${XCODE_SCHEME:-}"
 SCRIPTS="$UE_ROOT/$UAT_SCRIPTS_SUBPATH"
 UE_EDITOR="$UE_ROOT/$UE_EDITOR_SUBPATH"
 
-# Artifact roots
-BUILD_DIR="$REPO_ROOT/$BUILD_DIR_REL"
-LOG_DIR="$REPO_ROOT/$LOG_DIR_REL"
+# Artifact roots — relative paths are anchored to REPO_ROOT; absolute paths used as-is.
+if [[ "$BUILD_DIR_REL" == /* ]]; then BUILD_DIR="$BUILD_DIR_REL"; else BUILD_DIR="$REPO_ROOT/$BUILD_DIR_REL"; fi
+if [[ "$LOG_DIR_REL"   == /* ]]; then LOG_DIR="$LOG_DIR_REL";     else LOG_DIR="$REPO_ROOT/$LOG_DIR_REL";     fi
 
 # UAT BuildCookRun's -archivedirectory has /<TargetPlatform>/ appended by UAT,
 # so we point it at the parent of BUILD_DIR. With the default
