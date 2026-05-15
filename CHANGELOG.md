@@ -6,6 +6,15 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-14] — Add Metal Toolchain pre-flight check
+
+Since Xcode 15, the Metal shader compiler ships as a separately-downloadable component rather than bundled with Xcode. When it isn't installed, UAT fails deep into a multi-hour cook with ambiguous shader-compile errors, and opening the UE Editor surfaces the same missing-toolchain warning at the splash screen. Detecting it up front in `Sanity checks` turns the wasted build into a one-line fix.
+
+### Added
+- **Metal Toolchain pre-flight** in the sanity-check block. Probes `/usr/bin/xcrun metal --version 2>&1` and matches Apple's missing-toolchain message (`Metal Toolchain` with a space, or `downloadComponent MetalToolchain`) — both patterns appear together in the error and neither appears in a healthy install's output (the install path contains the unspaced `MetalToolchain-vNN` directory, which the spaced regex avoids matching). Gated on both `xcrun` and `xcodebuild` being on `PATH`, so a CLT-only host doesn't trip a misleading branch. On detection: `die` with the exact remediation `xcodebuild -downloadComponent MetalToolchain`; on success: `good "Metal Toolchain available."`.
+
+---
+
 ## [2026-05-14] — Add `--preset` layer for common distribution targets (#27 PR-3)
 
 Closes the third and final piece of issue #27. The `MAC_DISTRIBUTION` / `IOS_DISTRIBUTION` dispatcher (PR-1) and the Mac App Store pipeline (PR-2) are usable but verbose: a Steam build still wants `--mac-distribution developer-id --steam --zip --notarize`. `--preset NAME` collapses each common target into one flag.

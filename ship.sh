@@ -3733,6 +3733,20 @@ if [[ "$USE_XCODE_EXPORT" == "1" ]]; then
 fi
 # Workspace existence is checked after GenerateProjectFiles runs (post-regen block).
 
+# Metal Toolchain — separately-downloaded Xcode component (Xcode 15+) required
+# to compile Metal shaders. Missing toolchain makes UAT fail with ambiguous
+# errors deep into the build, and the UE Editor pops a warning at splash.
+# Apple prints "missing Metal Toolchain; use: xcodebuild -downloadComponent
+# MetalToolchain" from `xcrun metal --version` when it isn't installed.
+if command -v xcrun >/dev/null 2>&1 && command -v xcodebuild >/dev/null 2>&1; then
+  _metal_probe="$(/usr/bin/xcrun metal --version 2>&1 || true)"
+  if echo "$_metal_probe" | /usr/bin/grep -qiE 'metal toolchain|downloadComponent MetalToolchain'; then
+    die "Metal Toolchain is not installed for the active Xcode. Install it with: xcodebuild -downloadComponent MetalToolchain (without it, UAT fails with ambiguous shader-compile errors and the UE Editor warns at splash)."
+  fi
+  unset _metal_probe
+  good "Metal Toolchain available."
+fi
+
 # Notarization requires Apple tools and a configured, accessible notary profile
 if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
   command -v xcrun >/dev/null 2>&1 || die "xcrun not found. Install Xcode Command Line Tools."
