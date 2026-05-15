@@ -1462,6 +1462,26 @@ ensure_game_center_entitlements() {
   fi
 }
 
+ensure_build_dir_gitignored() {
+  # Append the build artifact root to the project's .gitignore when it isn't
+  # already covered, so generated outputs don't appear as untracked files.
+  # Skip when BUILD_DIR lives outside the project (absolute path or ../escape).
+  local top_dir gitignore_path entry
+  case "$BUILD_DIR_REL" in /*|..*) return 0 ;; esac
+  top_dir="${BUILD_DIR_REL%%/*}"
+  [[ -z "$top_dir" ]] && return 0
+
+  gitignore_path="$REPO_ROOT/.gitignore"
+  entry="${top_dir}/"
+
+  if [[ -f "$gitignore_path" ]] && /usr/bin/grep -qE "^/?${top_dir}(/|$)" "$gitignore_path"; then
+    return 0
+  fi
+
+  printf '\n%s\n' "$entry" >> "$gitignore_path"
+  good "Added $entry to $gitignore_path"
+}
+
 seed_mac_info_template_plist() {
   # Defensively place a Mac Info.Template.plist at the canonical project path.
   # When the file is missing, copy the engine's stock template; when GameMode
@@ -2646,11 +2666,11 @@ UPROJECT_NAME="${UPROJECT_NAME:-}"
 XCODE_WORKSPACE="${XCODE_WORKSPACE:-}"
 XCODE_SCHEME="${XCODE_SCHEME:-}"
 # BUILD_DIR holds script-side outputs: .xcarchive, export dir, ZIP, DMG.
-# Default sits under Saved/ (UE's documented dumping ground for derived artifacts);
-# Build/{Platform}/ is reserved for committed source-controlled inputs.
+# Default is BuildArtifacts/Mac — outside Saved/ so concurrent UAT builds for
+# other platforms writing to Saved/Packages/ don't collide.
 # UAT BuildCookRun's -archivedirectory is derived as the parent so that UAT's
 # automatic /<Platform>/ suffix lands inside BUILD_DIR.
-BUILD_DIR_REL="${BUILD_DIR_REL:-Saved/Packages/Mac}"
+BUILD_DIR_REL="${BUILD_DIR_REL:-BuildArtifacts/Mac}"
 LOG_DIR_REL="${LOG_DIR_REL:-Saved/Logs}"
 
 SHORT_NAME="${SHORT_NAME:-}"
@@ -2963,7 +2983,7 @@ Options (highest priority):
   --ue-root PATH
   --xcode-workspace FILE_OR_PATH     (e.g. "MyGame (Mac).xcworkspace")
   --xcode-scheme NAME
-  --build-dir PATH                   (script-side outputs; default: Saved/Packages/Mac.
+  --build-dir PATH                   (script-side outputs; default: BuildArtifacts/Mac.
                                       UAT BuildCookRun's -archivedirectory is
                                       derived as the parent so its /<Platform>/
                                       output lands inside this dir.)
@@ -3485,7 +3505,7 @@ LOG_DIR="$REPO_ROOT/$LOG_DIR_REL"
 
 # UAT BuildCookRun's -archivedirectory has /<TargetPlatform>/ appended by UAT,
 # so we point it at the parent of BUILD_DIR. With the default
-# (Saved/Packages/Mac), UAT writes to Saved/Packages/Mac/<App>-Mac-Shipping.app/
+# (BuildArtifacts/Mac), UAT writes to BuildArtifacts/Mac/<App>-Mac-Shipping.app/
 # — the same directory that holds the rest of the script's artifacts.
 UAT_ARCHIVE_DIR="$(/usr/bin/dirname "$BUILD_DIR")"
 
@@ -3671,11 +3691,10 @@ ZIP_PATH="$BUILD_DIR/${LONG_NAME}.zip"
 MAS_ARCHIVE_PATH="$BUILD_DIR/${SHORT_NAME}-mas.xcarchive"
 MAS_EXPORT_DIR="$BUILD_DIR/${SHORT_NAME}-mas-export"
 
-# Build outputs (iOS) — parallel of Mac, but under Saved/Packages/IOS/.
-# UAT writes to UAT_ARCHIVE_DIR/<TargetPlatform>/, which for iOS is
-# Saved/Packages/IOS/. Script-side artifacts (xcarchive, export dir, .ipa)
-# live alongside.
-IOS_BUILD_DIR="$REPO_ROOT/Saved/Packages/IOS"
+# Build outputs (iOS) — parallel of Mac. UAT writes to UAT_ARCHIVE_DIR/IOS/,
+# so IOS_BUILD_DIR is derived from the same parent; it tracks BUILD_DIR when
+# --build-dir is customized.
+IOS_BUILD_DIR="$UAT_ARCHIVE_DIR/IOS"
 IOS_ARCHIVE_PATH="$IOS_BUILD_DIR/${SHORT_NAME}-iOS.xcarchive"
 IOS_EXPORT_DIR="$IOS_BUILD_DIR/${SHORT_NAME}-iOS-export"
 
@@ -3902,6 +3921,7 @@ if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
   mkdir -p "$IOS_BUILD_DIR"
 fi
 
+ensure_build_dir_gitignored
 ensure_game_ini_staging_entry
 write_version_to_content
 seed_apple_launchscreen_compat
