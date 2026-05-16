@@ -5,7 +5,7 @@
 This is the most common source of confusion when wiring up an Unreal project for distribution. Despite the name, `Build/{Platform}/` is **not** for build output.
 
 - **`Build/{Platform}/` is for committed source-controlled *inputs*.** App icons, custom launch storyboards, `Info.plist` fragments, entitlements, signing config, `PakBlacklist*.txt`. The folder name is a UE3-era misnomer; treat it as "platform-source-inputs/". UBT does write a small set of intermediates here (`UBTGenerated/`, `FileOpenOrder/`, `*.PackageVersionCounter`); those are managed by the engine and stay gitignored.
-- **`Saved/` is for derived artifacts** — UE's documented dumping ground. It is gitignored by default and is where this script writes everything: cooked content, staged builds, packaged `.app`/`.zip`/`.dmg`, and logs.
+- **`Saved/` is for derived artifacts** — UE's documented dumping ground. It is gitignored by default. This script writes logs to `Saved/Logs/`; all other build outputs (packaged `.app`, `.xcarchive`, `.zip`, `.dmg`) land in `BuildArtifacts/` by default — outside `Saved/` so concurrent UAT runs for other platforms writing to `Saved/Packages/` don't collide. The artifact root is fully configurable via `BUILD_DIR_REL` / `--build-dir`.
 
 `ship.sh` writes a few specific files under `Build/` — all of them at their *canonical* UE locations, so UE's regular machinery picks them up at `GenerateProjectFiles` / `xcodebuild` time. The first two are seeded by default; the last two are seeded only when you opt into Path A for `CFBundleVersion`:
 
@@ -22,25 +22,25 @@ All are seeded only when missing — once present, the script never overwrites t
 
 ## Artifact paths
 
-All build output goes under `Saved/` (Mac path configurable via `BUILD_DIR_REL` / `--build-dir`; iOS path is fixed at `Saved/Packages/IOS/`). Filenames are derived from `SHORT_NAME` and `LONG_NAME` (both default to your project name).
+Mac build outputs land in `BuildArtifacts/Mac/` by default (configurable via `BUILD_DIR_REL` / `--build-dir`); iOS outputs land alongside in `BuildArtifacts/IOS/`. Logs go to `Saved/Logs/`. Filenames are derived from `SHORT_NAME` and `LONG_NAME` (both default to your project name).
 
 **Mac — `MAC_DISTRIBUTION=developer-id`** *(default)*:
 
 | Artifact | Path |
 |---|---|
-| UAT-packaged app (BuildCookRun `-archive`) | `Saved/Packages/Mac/${LONG_NAME}-Mac-Shipping.app` |
-| Xcode archive | `Saved/Packages/Mac/${SHORT_NAME}.xcarchive` |
-| Exported app | `Saved/Packages/Mac/${SHORT_NAME}-export/*.app` |
-| ZIP | `Saved/Packages/Mac/${LONG_NAME}.zip` |
-| DMG | `Saved/Packages/Mac/${LONG_NAME}.dmg` |
+| UAT-packaged app (BuildCookRun `-archive`) | `BuildArtifacts/Mac/${LONG_NAME}-Mac-Shipping.app` |
+| Xcode archive | `BuildArtifacts/Mac/${SHORT_NAME}.xcarchive` |
+| Exported app | `BuildArtifacts/Mac/${SHORT_NAME}-export/*.app` |
+| ZIP | `BuildArtifacts/Mac/${LONG_NAME}.zip` |
+| DMG | `BuildArtifacts/Mac/${LONG_NAME}.dmg` |
 
 **Mac — `MAC_DISTRIBUTION=app-store`** *(no ZIP, no DMG, no notarize — App Store review is the equivalent gate)*:
 
 | Artifact | Path |
 |---|---|
-| UAT-packaged app | `Saved/Packages/Mac/${LONG_NAME}-Mac-Shipping.app` |
-| Xcode archive | `Saved/Packages/Mac/${SHORT_NAME}-mas.xcarchive` |
-| Exported installer | `Saved/Packages/Mac/${SHORT_NAME}-mas-export/*.pkg` |
+| UAT-packaged app | `BuildArtifacts/Mac/${LONG_NAME}-Mac-Shipping.app` |
+| Xcode archive | `BuildArtifacts/Mac/${SHORT_NAME}-mas.xcarchive` |
+| Exported installer | `BuildArtifacts/Mac/${SHORT_NAME}-mas-export/*.pkg` |
 
 The `.pkg` (not a `.app`) is what `xcodebuild -exportArchive` produces with `method=app-store-connect` on macOS — it's the productbuild output that `xcrun altool --upload-app -t macos` expects. `pkgutil --check-signature` is the right verification command, **not** `codesign --verify` (that only applies to unwrapped `.app` bundles). The `-mas` suffix on archive / export paths means MAS and Developer ID runs don't clobber each other when alternated for testing.
 
@@ -48,9 +48,9 @@ The `.pkg` (not a `.app`) is what `xcodebuild -exportArchive` produces with `met
 
 | Artifact | Path |
 |---|---|
-| UAT-packaged app | `Saved/Packages/IOS/${LONG_NAME}-IOS-Shipping.app` |
-| Xcode archive | `Saved/Packages/IOS/${SHORT_NAME}-iOS.xcarchive` |
-| IPA | `Saved/Packages/IOS/${SHORT_NAME}-iOS-export/*.ipa` |
+| UAT-packaged app | `BuildArtifacts/IOS/${LONG_NAME}-IOS-Shipping.app` |
+| Xcode archive | `BuildArtifacts/IOS/${SHORT_NAME}-iOS.xcarchive` |
+| IPA | `BuildArtifacts/IOS/${SHORT_NAME}-iOS-export/*.ipa` |
 
 **Logs:** `Saved/Logs/build_YYYY-MM-DD_HH-MM-SS.log`
 
@@ -58,7 +58,7 @@ The build log captures all stdout/stderr from UAT, `xcodebuild`, `codesign`, `no
 
 ### How `BUILD_DIR_REL` and `UAT_ARCHIVE_DIR` relate
 
-UAT BuildCookRun's `-archivedirectory=<path>` is appended with `/<TargetPlatform>/` by UAT itself. The script computes its UAT archive directory as `dirname BUILD_DIR`, so UAT's automatic `/Mac/` suffix lands inside `BUILD_DIR` alongside the script-side artifacts. With the default `BUILD_DIR_REL=Saved/Packages/Mac`, that puts UAT's `-archive` output at `Saved/Packages/Mac/<App>-Mac-Shipping.app/`.
+UAT BuildCookRun's `-archivedirectory=<path>` is appended with `/<TargetPlatform>/` by UAT itself. The script computes its UAT archive directory as `dirname BUILD_DIR`, so UAT's automatic `/Mac/` suffix lands inside `BUILD_DIR` alongside the script-side artifacts. With the default `BUILD_DIR_REL=BuildArtifacts/Mac`, that puts UAT's `-archive` output at `BuildArtifacts/Mac/<App>-Mac-Shipping.app/`.
 
 If you override `BUILD_DIR_REL` to a path that doesn't end with `/Mac`, UAT will still append `/Mac` and the script's app-discovery (`find_first_app_under "$BUILD_DIR"`) won't find it. Keep the trailing `/Mac` segment, or override only the parent (e.g. `BUILD_DIR_REL=Output/Mac`).
 
@@ -90,7 +90,7 @@ Optional overrides:
 ```bash
 DMG_NAME="MyGame.dmg"
 DMG_VOLUME_NAME="MyGame"
-DMG_OUTPUT_DIR="Saved/Packages/Mac"   # default: same as BUILD_DIR_REL
+DMG_OUTPUT_DIR="BuildArtifacts/Mac"   # default: same as BUILD_DIR_REL
 ```
 
 When `NOTARIZE=yes`, the DMG is also notarized and stapled.

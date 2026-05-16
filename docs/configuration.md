@@ -122,8 +122,8 @@ The script locates your project automatically when run from the project root. Se
 |---|---|
 | `SHORT_NAME` | Short identifier used for archive and export folder names. Defaults to the project name. |
 | `LONG_NAME` | Full name used for ZIP and DMG filenames. Defaults to `SHORT_NAME`. |
-| `BUILD_DIR_REL` | Output directory relative to `REPO_ROOT`. Default: `Saved/Packages/Mac`. UAT BuildCookRun's `-archivedirectory` is derived as the parent so UAT's `/<Platform>/` suffix lands inside this dir. See [output.md](output.md#build-vs-saved--what-goes-where) for the rationale. |
-| `LOG_DIR_REL` | Log directory relative to `REPO_ROOT`. Default: `Saved/Logs`. |
+| `BUILD_DIR_REL` | Build artifact output directory. Default: `BuildArtifacts/Mac`. Relative paths are anchored to `REPO_ROOT`; absolute paths are used as-is. UAT BuildCookRun's `-archivedirectory` is derived as the parent so UAT's `/<Platform>/` suffix lands inside this dir. On the first real build, the script appends the artifact root to the project's `.gitignore` if not already covered. See [output.md](output.md#build-vs-saved--what-goes-where). |
+| `LOG_DIR_REL` | Log directory. Default: `Saved/Logs`. Relative paths are anchored to `REPO_ROOT`; absolute paths are used as-is. |
 
 ### Behavior
 

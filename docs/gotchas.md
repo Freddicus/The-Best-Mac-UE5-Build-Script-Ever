@@ -36,9 +36,11 @@ If your archive step fails with a scheme-not-found error but you can see the sch
 
 The folder name is misleading — `Build/` looks like a build-output directory, but in modern Unreal it's a **source-controlled inputs** folder. App icons, custom launch storyboards, `Info.plist` fragments, entitlements, and `PakBlacklist*.txt` all live there and are committed to git. UBT writes a few intermediates of its own here too (`UBTGenerated/`, `FileOpenOrder/`, `*.PackageVersionCounter`), and those stay gitignored.
 
-Build *output* belongs under `Saved/` — `Saved/Cooked/{Platform}/`, `Saved/StagedBuilds/{Platform}/`, `Saved/Packages/{Platform}/`, `Saved/Logs/`. `Saved/` is gitignored by default and is the documented dumping ground for derived artifacts.
+UE's build output belongs under `Saved/` — `Saved/Cooked/{Platform}/`, `Saved/StagedBuilds/{Platform}/`, `Saved/Packages/{Platform}/`, `Saved/Logs/`. `Saved/` is gitignored by default and is the documented dumping ground for derived artifacts.
 
-If you find a packaged `.app` sitting at `Build/Mac/<App>-Mac-Shipping.app/`, something is misconfigured — either a UAT `-archivedirectory` flag pointing the wrong way, or a downstream copy step. This script writes outputs under `Saved/Packages/Mac/` by default; see [output.md](output.md) for the path layout.
+This script writes outputs to `BuildArtifacts/Mac/` by default (outside `Saved/` to avoid collisions with other platform UAT runs). Logs still go to `Saved/Logs/`. See [output.md](output.md) for the full path layout.
+
+If you find a packaged `.app` sitting at `Build/Mac/<App>-Mac-Shipping.app/`, something is misconfigured — either a UAT `-archivedirectory` flag pointing the wrong way, or a downstream copy step.
 
 ## New files under `Build/{Platform}/Resources/` need a project-file regen to be picked up
 

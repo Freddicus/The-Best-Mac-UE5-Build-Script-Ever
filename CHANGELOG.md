@@ -6,6 +6,25 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-15] — Move default build dir out of `Saved/`; support absolute paths; auto-gitignore artifact root (#34)
+
+### Changed
+- **`BUILD_DIR_REL` default changed from `Saved/Packages/Mac` to `BuildArtifacts/Mac`.** Keeping script outputs inside `Saved/Packages/` caused collisions when a concurrent UAT run for another platform wrote to the same directory tree. `BuildArtifacts/` is completely outside `Saved/`, so other platform UAT processes can write freely without interference. Users with an explicit `BUILD_DIR_REL=Saved/Packages/Mac` in `.env` are unaffected — `.env` takes priority over the default.
+- **`IOS_BUILD_DIR` is now derived from `UAT_ARCHIVE_DIR`** (the parent of `BUILD_DIR`) instead of being hardcoded to `Saved/Packages/IOS/`. It now tracks `--build-dir` automatically when the Mac build dir is customized — no separate override needed for iOS.
+- **`--build-dir` (and `LOG_DIR_REL`) now accept absolute paths.** Relative paths continue to anchor to `REPO_ROOT` as before. Absolute paths are used as-is, allowing build outputs to be redirected to a shared scratch volume or any out-of-tree location.
+
+### Added
+- **`ensure_build_dir_gitignored()`** — on the first real build, appends the top-level artifact directory (e.g. `BuildArtifacts/`) to the project's `.gitignore` if not already covered, so generated outputs don't appear as untracked files. Creates `.gitignore` if it doesn't exist. Skips silently when `BUILD_DIR` is outside the project root (absolute path or `../` escape). No-op on subsequent runs (idempotent grep check).
+
+### Docs
+- `docs/output.md`, `docs/configuration.md`, `docs/gotchas.md`, `docs/troubleshooting.md`, `README.md`: updated all `Saved/Packages/Mac/` and `Saved/Packages/IOS/` artifact path references to `BuildArtifacts/Mac/` and `BuildArtifacts/IOS/`; updated `BUILD_DIR_REL` description to document the new default, absolute-path support, and the auto-gitignore behavior.
+
+### Migration
+- If your `.env` sets `BUILD_DIR_REL=Saved/Packages/Mac`, remove it to pick up the new default — or leave it to keep the old layout.
+- If you have CI that uploads artifacts from `Saved/Packages/Mac/`, update the path to `BuildArtifacts/Mac/` (or set `BUILD_DIR_REL=Saved/Packages/Mac` in `.env` to preserve the old path without changing CI).
+
+---
+
 ## [2026-05-14] — Add Metal Toolchain pre-flight check
 
 Since Xcode 15, the Metal shader compiler ships as a separately-downloadable component rather than bundled with Xcode. When it isn't installed, UAT fails deep into a multi-hour cook with ambiguous shader-compile errors, and opening the UE Editor surfaces the same missing-toolchain warning at the splash screen. Detecting it up front in `Sanity checks` turns the wasted build into a one-line fix.
