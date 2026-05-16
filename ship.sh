@@ -164,7 +164,9 @@ exec 3>&1 4>&2
 # without editing the script.
 #
 # Quick usage:
-#   - Copy `.env.example` (if provided) to `.env` next to this script
+#   - Copy `.env.example` (minimal) or one of the preset variants
+#     (`.env.example.steam-mac`, `.env.example.mas-mac`, etc.) to `.env` next
+#     to this script. See `.env.example.full` for a comprehensive reference.
 #   - Fill in DEVELOPMENT_TEAM, SIGN_IDENTITY, and (if using Xcode export) EXPORT_PLIST
 #   - Run the script
 #

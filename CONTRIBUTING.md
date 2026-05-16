@@ -33,7 +33,7 @@ Real builds require Xcode, an Apple Developer account, and UE5 installed. For mo
 ./ship.sh --dry-run       # walk the pipeline steps without executing them
 ```
 
-Copy `.env.example` to `.env` in your repo root and fill in your values for local testing.
+Copy `.env.example` (minimal) or one of the preset variants (`.env.example.steam-mac`, `.env.example.mas-mac`, etc.) to `.env` in your repo root and fill in your values for local testing. See `.env.example.full` for a comprehensive reference of every supported variable.
 
 ## What a good PR looks like
 
