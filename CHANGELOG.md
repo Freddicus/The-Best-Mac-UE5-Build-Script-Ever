@@ -23,6 +23,42 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-15] — Slim `.env.example`; add preset variants; extract Pipeline doc
+
+The 227-line `.env.example` was trying to be both a quick-start template and an encyclopedia of every variable. Split that responsibility three ways — one minimal template, one comprehensive reference, six preset-specific starters — and pulled the `./ship.sh` execution order out of README into its own doc.
+
+### Changed
+- **`.env.example` slimmed from 227 → 27 lines.** Now lists only the variables required for a non-interactive Developer ID run (`DEVELOPMENT_TEAM`, `SIGN_IDENTITY`, `NOTARY_PROFILE`, `EXPORT_PLIST`, `XCODE_SCHEME`, `BUILD_TYPE`, `NOTARIZE`) plus the persisted `CFBUNDLE_VERSION` baseline. Encyclopedic prose moved to `docs/configuration.md` (which already carried most of it). Header points to `docs/configuration.md` for the full variable reference and to `./ship.sh --help all` for CLI flags.
+- **README `Pipeline` section** — replaced the in-line 34-line step-by-step block with a one-paragraph pointer to the new `docs/pipeline.md`. README dropped from 111 → 97 lines.
+- **README `Quick start` step 2** — now shows `cp .env.example.<preset> .env` recipes alongside the bare `.env.example` copy, so new users see the preset-template path immediately.
+- **`docs/configuration.md` `.env file` section** — replaced the one-line copy instruction with a table of all eight templates and what each is for.
+
+### Added
+- **`.env.example.full`** (112 lines) — comprehensive reference template listing every supported variable as a commented `# VAR=...` entry, grouped by topic. Discovery surface for users who want to scan all knobs without leaving the repo root.
+- **Six preset-specific templates**, each ~33-40 lines, with the preset's dispatcher values + feature flags baked in (uncommented) and channel-relevant signing/upload values stubbed for the user to fill:
+  - `.env.example.steam-mac` — `MAC_DISTRIBUTION=developer-id`, `ENABLE_STEAM=1`, `ENABLE_ZIP=1`, `NOTARIZE=yes`
+  - `.env.example.direct-mac` — `MAC_DISTRIBUTION=developer-id`, `ENABLE_DMG=1`, `NOTARIZE=yes`
+  - `.env.example.mas-mac` — `MAC_DISTRIBUTION=app-store`
+  - `.env.example.ios` — `MAC_DISTRIBUTION=off`, `IOS_DISTRIBUTION=app-store`
+  - `.env.example.mac-ios` — `MAC_DISTRIBUTION=developer-id`, `IOS_DISTRIBUTION=app-store`
+  - `.env.example.mas-ios` — `MAC_DISTRIBUTION=app-store`, `IOS_DISTRIBUTION=app-store`
+- **`docs/pipeline.md`** — the full execution-order reference (shared setup → Mac developer-id branch → Mac App Store branch → iOS branch → CFBundleVersion notes) lifted from README's `Pipeline` section. README now links here.
+
+### Docs
+- `docs/configuration.md`: new template table replacing the old one-line copy instruction.
+- `README.md`: added `docs/pipeline.md` to the `Docs` list, between Configuration and Versioning.
+- `CONTRIBUTING.md`: mentions the preset variants and `.env.example.full` for local testing.
+- `ship.sh`: in-script `.env` quick-usage comment block updated to mention the variants.
+
+### Migration
+- Existing `.env` files are unaffected — none of the variable semantics changed; only the template files did. Users with a populated `.env` from the old encyclopedic `.env.example` keep working.
+- New users who want the old comprehensive template can use `.env.example.full`.
+
+### Closes
+- `docs/ROADMAP.md` item 2 (`.env.example` slim) — landed bigger than the roadmap proposed: the roadmap suggested keeping a single minimal template, but adding preset variants + a full reference gave us both discovery and a clean minimal default.
+
+---
+
 ## [2026-05-15] — Move default build dir out of `Saved/`; support absolute paths; auto-gitignore artifact root (#34)
 
 ### Changed

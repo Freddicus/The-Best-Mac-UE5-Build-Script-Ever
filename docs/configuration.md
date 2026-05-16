@@ -84,7 +84,22 @@ The prompt deliberately bypasses any `ENABLE_GAME_CENTER` in `.env` for these pr
 
 ## .env file
 
-Copy `.env.example` to `.env` next to `ship.sh`. It's sourced as shell code — only use a `.env` you trust.
+Copy one of the starter templates to `.env` next to `ship.sh`:
+
+| Template | Use it for |
+|---|---|
+| `.env.example` | Minimal — required signing values for a non-interactive Developer ID run |
+| `.env.example.full` | Comprehensive reference of every supported variable, commented out for opt-in |
+| `.env.example.steam-mac` | Preset: Steam Direct Distribution (Developer ID, ZIP, notarize) |
+| `.env.example.direct-mac` | Preset: Direct download DMG (Developer ID, DMG, notarize) |
+| `.env.example.mas-mac` | Preset: Mac App Store |
+| `.env.example.ios` | Preset: iOS App Store only (Mac skipped; no `SIGN_IDENTITY` needed) |
+| `.env.example.mac-ios` | Preset: Direct Mac + iOS App Store |
+| `.env.example.mas-ios` | Preset: Mac App Store + iOS App Store |
+
+Each preset template bakes in the dispatcher values and the channel-relevant feature flags so you don't have to pass `--preset` on the CLI. `.env.example.full` is the discovery surface for variables not covered above — it lists every knob.
+
+`.env` is sourced as shell code — only use a `.env` you trust.
 
 ### Signing and notarization (required)
 
