@@ -6,6 +6,23 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-15] — Compact `--help`; full reference moves to `--help all`
+
+`./ship.sh --help` used to print all 205 lines of flag reference at once, which buried the common path under signing/iOS/MAS/Steam/versioning detail. Now the default is a short summary; the full reference is opt-in via `--help all`.
+
+### Changed
+- **`--help` is now a ~40-line summary** listing the most-used flags (`--preset`, `--mac-distribution`, `--ios-distribution`, `--build-dir`, `--build-type`, `--steam`, `--notarize`, `--version-string`, `--bump-*`, `--set-cfbundle-version`, `--print-config`, `--dry-run`) plus a pointer to the full reference and a precedence/examples block.
+
+### Added
+- **`--help all`** invokes a new `usage_full()` that prints every flag and description, grouped into 13 sections with rule-bounded headers for visual scanning: Distribution channel · Project layout · Signing & notarization · iOS pipeline · Mac App Store · App Store Connect credentials · Steam · Bundle metadata · Versioning · Build process · Output packaging · Tooling · Legacy aliases.
+- The legacy aliases (`--ios`, `--no-ios`, `--ios-only`, `--ios-asc-api-key-id`, `--ios-asc-api-issuer`, `--ios-asc-api-key-path`) now live in their own bottom section so the future deprecation pass (`docs/ROADMAP.md` item 4) is a clean diff.
+
+### Notes
+- Pure presentation change. No flags added or removed; every flag description is preserved verbatim from the prior single-block help.
+- `-h all` is equivalent to `--help all` (the dispatcher inspects `$2` regardless of whether `-h` or `--help` was used).
+
+---
+
 ## [2026-05-15] — Move default build dir out of `Saved/`; support absolute paths; auto-gitignore artifact root (#34)
 
 ### Changed

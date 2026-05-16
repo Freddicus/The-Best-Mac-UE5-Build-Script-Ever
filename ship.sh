@@ -2977,100 +2977,54 @@ usage() {
 Usage:
   ./ship.sh [options]
 
-Options (highest priority):
-  --repo-root PATH
-  --uproject FILE_OR_PATH            (e.g. MyGame.uproject)
-  --ue-root PATH
-  --xcode-workspace FILE_OR_PATH     (e.g. "MyGame (Mac).xcworkspace")
-  --xcode-scheme NAME
-  --build-dir PATH                   (script-side outputs; default: BuildArtifacts/Mac.
-                                      Relative paths are anchored to the project
-                                      root; absolute paths are used as-is.
-                                      UAT BuildCookRun's -archivedirectory is
-                                      derived as the parent so its /<Platform>/
-                                      output lands inside this dir.)
-  --development-team TEAMID
-  --sign-identity "Developer ID Application: ... (TEAMID)"
-  --export-plist PATH
-  --notary-profile NAME
+Builds, signs, notarizes, and packages a UE5 macOS (and optionally iOS) game.
 
-  --short-name NAME
-  --long-name NAME
+Common flags:
+  --preset NAME              one-name shortcut: steam-mac, direct-mac, mas-mac,
+                             ios, mac-ios, mas-ios (see --list-presets)
+  --list-presets             print available presets and exit
 
-  --xcode-export / --no-xcode-export
-  --regen-project-files / --no-regen-project-files
-                                     run GenerateProjectFiles.sh before xcodebuild
-                                     (default: enabled when --xcode-export)
-  --seed-apple-launchscreen-compat / --no-seed-apple-launchscreen-compat
-                                     copy engine's LaunchScreen.storyboardc into
-                                     Build/Apple/Resources/Interface/ if absent,
-                                     so Mac's launch-screen path priority list
-                                     short-circuits before Xcode tries to compile
-                                     a consumer-supplied iOS .storyboard source
-                                     (default: enabled)
-  --seed-mac-info-template-plist / --no-seed-mac-info-template-plist
-                                     copy engine's Info.Template.plist into
-                                     Build/Mac/Resources/ if absent. UE merges
-                                     this template into the final Info.plist;
-                                     this is the canonical home for
-                                     LSSupportsGameMode / GCSupportsGameMode and
-                                     any other static plist keys (default: enabled)
-  --use-ue-package-version-counter / --no-use-ue-package-version-counter
-                                     opt into UE's canonical CFBundleVersion path
-                                     (Path A): seeds Build/Mac/<Project>.PackageVersionCounter
-                                     and a project-level
-                                     Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh
-                                     override (sanctioned at AppleToolChain.cs:394-397)
-                                     that strips the engine's Build.version
-                                     Changelist (e.g. 51494982) from CFBundleVersion.
-                                     Mutually exclusive with the default auto-bump.
-                                     (default: disabled — the script's auto-bump
-                                     of CFBUNDLE_VERSION wins instead)
-  --clean-build-dir / --no-clean-build-dir
-  --dry-run / --no-dry-run
-  --print-config / --no-print-config
+  --mac-distribution VALUE   developer-id (default) | app-store | off
+  --ios-distribution VALUE   off (default) | app-store
+  --build-dir PATH           script-side outputs (default: BuildArtifacts/Mac)
+  --build-type VALUE         shipping (default) | development
 
-  --steam / --no-steam
-  --write-steam-appid / --no-write-steam-appid
-  --steam-app-id ID
-  --steam-dylib-src PATH
+  --steam / --no-steam       Steam staging + entitlements
+  --notarize / --no-notarize Apple notarization (developer-id channel only)
 
-  --macos-appicon-set-name NAME      name of the *.appiconset to mirror to
-                                     "AppIcon" inside Build/Mac/Resources/Assets.xcassets
-                                     (UE's xcconfig hardcodes the lookup
-                                     name to "AppIcon"). Auto-detects the
-                                     first appiconset in the catalog if unset.
+  --version-string X.Y.Z     marketing version base
+  --bump-major | --bump-minor | --bump-patch
+                             bump VERSION_STRING (implies VERSION_MODE=MANUAL)
+  --set-cfbundle-version N   set + persist CFBundleVersion baseline
 
-  --mac-distribution VALUE           macOS distribution channel:
-                                       developer-id (default) — Direct
-                                         Distribution (Developer ID, hardened
-                                         runtime, notarized + stapled). Steam
-                                         allowed; Game Center not available
-                                         (AMFI rejects it on this channel).
-                                       app-store — Mac App Store (Apple
-                                         Distribution + App Sandbox + ASC
-                                         upload, Game Center allowed, Steam
-                                         forbidden). Mirrors iOS: xcodebuild
-                                         archive + export under automatic
-                                         provisioning, then xcrun altool
-                                         -t macos to validate/upload. No
-                                         notarize/staple/ZIP/DMG.
-                                       off — skip Mac entirely (iOS-only run).
-  --ios-distribution VALUE           iOS distribution channel:
-                                       off (default) — skip iOS.
-                                       app-store — run the iOS pipeline
-                                         (UAT → archive → IPA → optional ASC
-                                         upload). No other channel exists for
-                                         iOS in the US.
+  --print-config             show resolved config and exit
+  --dry-run / --no-dry-run   preview without building
 
-  --ios / --no-ios                   enable iOS pass after the Mac pipeline
-                                     (legacy alias for --ios-distribution
-                                     app-store; default: off)
-  --ios-only                         skip Mac entirely and run only iOS;
-                                     legacy alias for "--mac-distribution off
-                                     --ios-distribution app-store". Does not
-                                     require SIGN_IDENTITY.
+  -h, --help                 this short help
+      --help all             full reference (every flag, grouped by section)
 
+Configuration:
+  CLI flags > .env / env > preset > defaults. Put long-lived settings in .env;
+  use CLI flags for per-run overrides. See docs/configuration.md for the full
+  variable reference.
+
+Examples:
+  ./ship.sh --preset steam-mac --bump-patch
+  ./ship.sh --preset mas-mac --mas-upload-app
+  ./ship.sh --print-config
+USAGE
+}
+
+usage_full() {
+  cat >&3 <<'USAGE'
+Usage:
+  ./ship.sh [options]
+
+Configuration precedence: CLI flags > .env / env > preset > defaults.
+
+──────────────────────────────────────────────────────────────────────────────
+Distribution channel
+──────────────────────────────────────────────────────────────────────────────
   --preset NAME                      ergonomic shortcut: one name maps to a
                                      coherent set of dispatcher values +
                                      feature flags. Precedence:
@@ -3096,7 +3050,57 @@ Options (highest priority):
                                      so the wrong-channel value can't sneak
                                      through). Non-TTY runs skip the prompt.
   --list-presets                     print the preset table and exit
+  --mac-distribution VALUE           macOS distribution channel:
+                                       developer-id (default) — Direct
+                                         Distribution (Developer ID, hardened
+                                         runtime, notarized + stapled). Steam
+                                         allowed; Game Center not available
+                                         (AMFI rejects it on this channel).
+                                       app-store — Mac App Store (Apple
+                                         Distribution + App Sandbox + ASC
+                                         upload, Game Center allowed, Steam
+                                         forbidden). Mirrors iOS: xcodebuild
+                                         archive + export under automatic
+                                         provisioning, then xcrun altool
+                                         -t macos to validate/upload. No
+                                         notarize/staple/ZIP/DMG.
+                                       off — skip Mac entirely (iOS-only run).
+  --ios-distribution VALUE           iOS distribution channel:
+                                       off (default) — skip iOS.
+                                       app-store — run the iOS pipeline
+                                         (UAT → archive → IPA → optional ASC
+                                         upload). No other channel exists for
+                                         iOS in the US.
 
+──────────────────────────────────────────────────────────────────────────────
+Project layout
+──────────────────────────────────────────────────────────────────────────────
+  --repo-root PATH
+  --uproject FILE_OR_PATH            (e.g. MyGame.uproject)
+  --ue-root PATH
+  --xcode-workspace FILE_OR_PATH     (e.g. "MyGame (Mac).xcworkspace")
+  --xcode-scheme NAME
+  --build-dir PATH                   (script-side outputs; default: BuildArtifacts/Mac.
+                                      Relative paths are anchored to the project
+                                      root; absolute paths are used as-is.
+                                      UAT BuildCookRun's -archivedirectory is
+                                      derived as the parent so its /<Platform>/
+                                      output lands inside this dir.)
+  --short-name NAME
+  --long-name NAME
+
+──────────────────────────────────────────────────────────────────────────────
+Signing & notarization
+──────────────────────────────────────────────────────────────────────────────
+  --development-team TEAMID
+  --sign-identity "Developer ID Application: ... (TEAMID)"
+  --export-plist PATH
+  --notary-profile NAME
+  --notarize / --no-notarize
+
+──────────────────────────────────────────────────────────────────────────────
+iOS pipeline
+──────────────────────────────────────────────────────────────────────────────
   --ios-workspace FILE_OR_PATH       (e.g. "MyGame (iOS).xcworkspace")
   --ios-scheme NAME                  iOS Xcode scheme (auto-detected if unset)
   --ios-export-plist PATH            iOS-ExportOptions.plist path
@@ -3114,6 +3118,10 @@ Options (highest priority):
   --ios-upload-ipa                   upload the IPA via xcrun altool
                                      --upload-app -t ios; implies
                                      --ios-validate-ipa
+
+──────────────────────────────────────────────────────────────────────────────
+Mac App Store
+──────────────────────────────────────────────────────────────────────────────
   --mas-export-plist PATH            Mac App Store ExportOptions.plist path
                                      (auto-detected from
                                      "MAS-ExportOptions.plist" in repo root)
@@ -3126,6 +3134,10 @@ Options (highest priority):
   --mas-upload-app                   upload the exported .pkg installer via
                                      xcrun altool --upload-app -t macos;
                                      implies --mas-validate-app
+
+──────────────────────────────────────────────────────────────────────────────
+App Store Connect credentials (shared by iOS + Mac App Store uploads)
+──────────────────────────────────────────────────────────────────────────────
   --asc-api-key-id ID                App Store Connect API key ID (10-char,
                                      shared between iOS and Mac App Store
                                      uploads — one key per developer account)
@@ -3135,24 +3147,23 @@ Options (highest priority):
                                      Config/DefaultEngine.ini's
                                      AppStoreConnectKeyID/IssuerID/KeyPath
                                      fields if Xcode wrote them)
-  --ios-asc-api-key-id ID            (legacy alias for --asc-api-key-id)
-  --ios-asc-api-issuer UUID          (legacy alias for --asc-api-issuer)
-  --ios-asc-api-key-path PATH        (legacy alias for --asc-api-key-path)
 
-  --zip / --no-zip
-  --dmg / --no-dmg
-  --fancy-dmg / --no-fancy-dmg
-  --dmg-name NAME
-  --dmg-volume-name NAME
-  --dmg-output-dir PATH
+──────────────────────────────────────────────────────────────────────────────
+Steam
+──────────────────────────────────────────────────────────────────────────────
+  --steam / --no-steam
+  --write-steam-appid / --no-write-steam-appid
+  --steam-app-id ID
+  --steam-dylib-src PATH
 
-  --build-type shipping|development
-  --notarize / --no-notarize
-
-  --version-mode NONE|MANUAL|DATETIME|HYBRID
-  --version-string STRING
-  --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
-  --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
+──────────────────────────────────────────────────────────────────────────────
+Bundle metadata
+──────────────────────────────────────────────────────────────────────────────
+  --macos-appicon-set-name NAME      name of the *.appiconset to mirror to
+                                     "AppIcon" inside Build/Mac/Resources/Assets.xcassets
+                                     (UE's xcconfig hardcodes the lookup
+                                     name to "AppIcon"). Auto-detects the
+                                     first appiconset in the catalog if unset.
   --game-mode / --no-game-mode       (stamp LSSupportsGameMode + GCSupportsGameMode in xcconfig, default: YES)
   --game-center / --no-game-center   Seed Build/<Platform>/Resources/<project>.entitlements
                                      with com.apple.developer.game-center, write
@@ -3168,6 +3179,14 @@ Options (highest priority):
                                      of notarization. Default: unset (leaves things
                                      alone).
   --app-category STRING              (INFOPLIST_KEY_LSApplicationCategoryType, e.g. public.app-category.games)
+
+──────────────────────────────────────────────────────────────────────────────
+Versioning
+──────────────────────────────────────────────────────────────────────────────
+  --version-mode NONE|MANUAL|DATETIME|HYBRID
+  --version-string STRING
+  --version-content-dir DIR          (subdirectory under Content/, default: BuildInfo)
+  --marketing-version STRING         (CFBundleShortVersionString stamped into xcconfig, default: 1.0.0)
   --set-cfbundle-version STRING      set CFBundleVersion to STRING for this build
                                      AND persist it to .env as the new baseline.
                                      Future auto-bump builds will resume from
@@ -3179,14 +3198,81 @@ Options (highest priority):
   --bump-major / --bump-minor / --bump-patch
                                      bump VERSION_STRING from .env or --version-string;
                                      implies VERSION_MODE=MANUAL if not already set
+  --use-ue-package-version-counter / --no-use-ue-package-version-counter
+                                     opt into UE's canonical CFBundleVersion path
+                                     (Path A): seeds Build/Mac/<Project>.PackageVersionCounter
+                                     and a project-level
+                                     Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh
+                                     override (sanctioned at AppleToolChain.cs:394-397)
+                                     that strips the engine's Build.version
+                                     Changelist (e.g. 51494982) from CFBundleVersion.
+                                     Mutually exclusive with the default auto-bump.
+                                     (default: disabled — the script's auto-bump
+                                     of CFBUNDLE_VERSION wins instead)
 
-  -h, --help
+──────────────────────────────────────────────────────────────────────────────
+Build process
+──────────────────────────────────────────────────────────────────────────────
+  --build-type shipping|development
+  --xcode-export / --no-xcode-export
+  --regen-project-files / --no-regen-project-files
+                                     run GenerateProjectFiles.sh before xcodebuild
+                                     (default: enabled when --xcode-export)
+  --seed-apple-launchscreen-compat / --no-seed-apple-launchscreen-compat
+                                     copy engine's LaunchScreen.storyboardc into
+                                     Build/Apple/Resources/Interface/ if absent,
+                                     so Mac's launch-screen path priority list
+                                     short-circuits before Xcode tries to compile
+                                     a consumer-supplied iOS .storyboard source
+                                     (default: enabled)
+  --seed-mac-info-template-plist / --no-seed-mac-info-template-plist
+                                     copy engine's Info.Template.plist into
+                                     Build/Mac/Resources/ if absent. UE merges
+                                     this template into the final Info.plist;
+                                     this is the canonical home for
+                                     LSSupportsGameMode / GCSupportsGameMode and
+                                     any other static plist keys (default: enabled)
+  --clean-build-dir / --no-clean-build-dir
+
+──────────────────────────────────────────────────────────────────────────────
+Output packaging (developer-id channel only)
+──────────────────────────────────────────────────────────────────────────────
+  --zip / --no-zip
+  --dmg / --no-dmg
+  --fancy-dmg / --no-fancy-dmg
+  --dmg-name NAME
+  --dmg-volume-name NAME
+  --dmg-output-dir PATH
+
+──────────────────────────────────────────────────────────────────────────────
+Tooling
+──────────────────────────────────────────────────────────────────────────────
+  --dry-run / --no-dry-run
+  --print-config / --no-print-config
+  -h, --help                         short help
+      --help all                     this full reference
+
+──────────────────────────────────────────────────────────────────────────────
+Legacy aliases (kept for back-compat; prefer the dispatcher / ASC names above)
+──────────────────────────────────────────────────────────────────────────────
+  --ios / --no-ios                   enable iOS pass after the Mac pipeline
+                                     (legacy alias for --ios-distribution
+                                     app-store; default: off)
+  --ios-only                         skip Mac entirely and run only iOS;
+                                     legacy alias for "--mac-distribution off
+                                     --ios-distribution app-store". Does not
+                                     require SIGN_IDENTITY.
+  --ios-asc-api-key-id ID            (legacy alias for --asc-api-key-id)
+  --ios-asc-api-issuer UUID          (legacy alias for --asc-api-issuer)
+  --ios-asc-api-key-path PATH        (legacy alias for --asc-api-key-path)
 USAGE
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -h|--help) usage; exit 0 ;;
+    -h|--help)
+      if [[ "${2:-}" == "all" ]]; then usage_full; else usage; fi
+      exit 0 ;;
     --list-presets) list_presets; exit 0 ;;
     --preset)               PRESET="$2"; shift 2 ;;
 
