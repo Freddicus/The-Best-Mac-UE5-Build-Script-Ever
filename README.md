@@ -74,7 +74,7 @@ When you run `./ship.sh`, this is the execution order:
 
 **Mac pipeline — `MAC_DISTRIBUTION=developer-id`** *(default, skipped when `MAC_DISTRIBUTION=off`)*:
 
-6. **Mac UAT BuildCookRun** — `-targetplatform=Mac`, output to `Saved/Packages/Mac/`.
+6. **Mac UAT BuildCookRun** — `-targetplatform=Mac`, output to `BuildArtifacts/Mac/`.
 7. **Mac Xcode archive + export** — `xcodebuild archive` with `CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION` build-setting override (Apple-documented mechanism, takes precedence over xcconfig — no PlistBuddy fixups needed). Then `xcodebuild -exportArchive` produces signed `.app`.
 8. **Mac component signing** — signs nested `.dylib`/`.so`/`.framework` individually, then the outer `.app`. Never uses `--deep`.
 9. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.
@@ -89,13 +89,13 @@ When you run `./ship.sh`, this is the execution order:
 
 **iOS pipeline** *(only when `IOS_DISTRIBUTION=app-store`, e.g. `--ios` or `--ios-only`)*:
 
-12. **iOS UAT BuildCookRun** — `-targetplatform=IOS`, output to `Saved/Packages/IOS/`.
+12. **iOS UAT BuildCookRun** — `-targetplatform=IOS`, output to `BuildArtifacts/IOS/`.
 13. **iOS Xcode archive + export** — `xcodebuild archive -destination 'generic/platform=iOS' -allowProvisioningUpdates` with the same `CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION` (shared bump across platforms). Then `xcodebuild -exportArchive` with the iOS `ExportOptions.plist` → `.ipa`. iOS doesn't need per-component codesign or notarization — `xcodebuild` handles iOS App Store signing in one pass via automatic provisioning.
 14. **App Store Connect** *(optional)* — `xcrun altool --validate-app` and/or `--upload-app` (TestFlight / App Store review). **Note:** `altool` ≠ `notarytool` — different tools, different services. See [configuration.md](docs/configuration.md#ios-app-store-connect-upload-xcrun-altool--not-notarytool).
 
 **CFBundleVersion** is auto-bumped from `CFBUNDLE_VERSION` in `.env` (default Path B; one bump per `ship.sh` run, shared across both archives). `--set-cfbundle-version N` sets a new baseline. `USE_UE_PACKAGE_VERSION_COUNTER=1` opts into Path A (UE's canonical mechanism). See [versioning.md](docs/versioning.md#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical).
 
-Full build log: `Saved/Logs/build_YYYY-MM-DD_HH-MM-SS.log`. Mac artifacts land in `Saved/Packages/Mac/` (`--build-dir` overrides); iOS artifacts in `Saved/Packages/IOS/`. `Build/{Platform}/` is reserved for committed source-controlled inputs (icons, launch storyboard, entitlements) — see [output.md](docs/output.md#build-vs-saved--what-goes-where).
+Full build log: `Saved/Logs/build_YYYY-MM-DD_HH-MM-SS.log`. Mac artifacts land in `BuildArtifacts/Mac/` by default (`--build-dir` overrides; relative or absolute paths accepted); iOS artifacts in `BuildArtifacts/IOS/`. `Build/{Platform}/` is reserved for committed source-controlled inputs (icons, launch storyboard, entitlements) — see [output.md](docs/output.md#build-vs-saved--what-goes-where).
 
 ## Docs
 

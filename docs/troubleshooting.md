@@ -102,11 +102,11 @@ grep -F "LaunchScreen.storyboard" \
 
 See [the gotchas page](gotchas.md#new-files-under-buildplatformresources-need-a-project-file-regen-to-be-picked-up) for the full path priority list and why this happens.
 
-## My packaged `.app` ended up in `Build/{Platform}/` instead of `Saved/Packages/`
+## My packaged `.app` ended up in `Build/{Platform}/` instead of `BuildArtifacts/`
 
 `Build/{Platform}/` is for committed source-controlled inputs (icons, launch storyboard, entitlements), not for build output. If you have an app sitting in `Build/Mac/` or `Build/IOS/`, something is misconfigured — most likely a UAT `-archivedirectory` flag pointing at `Build/`, or a downstream copy step.
 
-The script writes outputs under `Saved/Packages/Mac/` by default. If you previously had `BUILD_DIR_REL=Build` in your `.env`, remove it (or change it to `Saved/Packages/Mac`). See [output.md](output.md#build-vs-saved--what-goes-where) for the convention.
+The script writes outputs to `BuildArtifacts/Mac/` by default. If you previously had `BUILD_DIR_REL=Saved/Packages/Mac` or `BUILD_DIR_REL=Build` in your `.env`, remove it to pick up the new default. See [output.md](output.md#build-vs-saved--what-goes-where) for the convention.
 
 ## The xcconfig stamp step is skipped
 
