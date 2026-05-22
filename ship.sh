@@ -2974,6 +2974,13 @@ apply_preset() {
 # Command-line flag overrides (highest priority)
 # -----------------------------------------------------------------------------
 
+# Guard for flags that take a value. Call as `need_arg "$@"` at the top of a
+# case branch that reads $2 — surfaces a clear error instead of the cryptic
+# "unbound variable" message set -u would otherwise produce.
+need_arg() {
+  [[ $# -ge 2 ]] || die "Option $1 requires a value. Run --help to see usage."
+}
+
 usage() {
   cat >&3 <<'USAGE'
 Usage:
@@ -3276,10 +3283,11 @@ while [[ $# -gt 0 ]]; do
       if [[ "${2:-}" == "all" ]]; then usage_full; else usage; fi
       exit 0 ;;
     --list-presets) list_presets; exit 0 ;;
-    --preset)               PRESET="$2"; shift 2 ;;
+    --preset)               need_arg "$@"; PRESET="$2"; shift 2 ;;
 
-    --repo-root)            REPO_ROOT="$2"; shift 2 ;;
+    --repo-root)            need_arg "$@"; REPO_ROOT="$2"; shift 2 ;;
     --uproject)
+      need_arg "$@"
       # Resolve immediately: absolute path → set both UPROJECT_PATH and UPROJECT_NAME.
       # Bare filename or relative path → set UPROJECT_NAME only; path resolved later.
       if [[ "$2" == /* ]]; then
@@ -3290,18 +3298,18 @@ while [[ $# -gt 0 ]]; do
         UPROJECT_PATH=""
       fi
       shift 2 ;;
-    --ue-root)              UE_ROOT="$2"; shift 2 ;;
-    --xcode-workspace)      XCODE_WORKSPACE="$2"; shift 2 ;;
-    --xcode-scheme)         XCODE_SCHEME="$2"; shift 2 ;;
-    --build-dir)            BUILD_DIR_REL="$2"; shift 2 ;;
+    --ue-root)              need_arg "$@"; UE_ROOT="$2"; shift 2 ;;
+    --xcode-workspace)      need_arg "$@"; XCODE_WORKSPACE="$2"; shift 2 ;;
+    --xcode-scheme)         need_arg "$@"; XCODE_SCHEME="$2"; shift 2 ;;
+    --build-dir)            need_arg "$@"; BUILD_DIR_REL="$2"; shift 2 ;;
 
-    --development-team)     DEVELOPMENT_TEAM="$2"; shift 2 ;;
-    --sign-identity)        SIGN_IDENTITY="$2"; shift 2 ;;
-    --export-plist)         EXPORT_PLIST="$2"; shift 2 ;;
-    --notary-profile)       NOTARY_PROFILE="$2"; shift 2 ;;
+    --development-team)     need_arg "$@"; DEVELOPMENT_TEAM="$2"; shift 2 ;;
+    --sign-identity)        need_arg "$@"; SIGN_IDENTITY="$2"; shift 2 ;;
+    --export-plist)         need_arg "$@"; EXPORT_PLIST="$2"; shift 2 ;;
+    --notary-profile)       need_arg "$@"; NOTARY_PROFILE="$2"; shift 2 ;;
 
-    --short-name)           SHORT_NAME="$2"; shift 2 ;;
-    --long-name)            LONG_NAME="$2"; shift 2 ;;
+    --short-name)           need_arg "$@"; SHORT_NAME="$2"; shift 2 ;;
+    --long-name)            need_arg "$@"; LONG_NAME="$2"; shift 2 ;;
 
     --xcode-export)         USE_XCODE_EXPORT="1"; shift ;;
     --no-xcode-export)      USE_XCODE_EXPORT="0"; shift ;;
@@ -3324,36 +3332,36 @@ while [[ $# -gt 0 ]]; do
     --no-steam)             ENABLE_STEAM="0"; CLI_SET_ENABLE_STEAM=1; shift ;;
     --write-steam-appid)    WRITE_STEAM_APPID="1"; shift ;;
     --no-write-steam-appid) WRITE_STEAM_APPID="0"; shift ;;
-    --steam-app-id)         STEAM_APP_ID="$2"; shift 2 ;;
-    --steam-dylib-src)      STEAM_DYLIB_SRC="$2"; shift 2 ;;
+    --steam-app-id)         need_arg "$@"; STEAM_APP_ID="$2"; shift 2 ;;
+    --steam-dylib-src)      need_arg "$@"; STEAM_DYLIB_SRC="$2"; shift 2 ;;
 
-    --macos-appicon-set-name) MACOS_APPICON_SET_NAME="$2"; shift 2 ;;
+    --macos-appicon-set-name) need_arg "$@"; MACOS_APPICON_SET_NAME="$2"; shift 2 ;;
 
-    --mac-distribution)       MAC_DISTRIBUTION="$2"; CLI_SET_MAC_DISTRIBUTION=1; shift 2 ;;
-    --ios-distribution)       IOS_DISTRIBUTION="$2"; CLI_SET_IOS_DISTRIBUTION=1; shift 2 ;;
+    --mac-distribution)       need_arg "$@"; MAC_DISTRIBUTION="$2"; CLI_SET_MAC_DISTRIBUTION=1; shift 2 ;;
+    --ios-distribution)       need_arg "$@"; IOS_DISTRIBUTION="$2"; CLI_SET_IOS_DISTRIBUTION=1; shift 2 ;;
 
     --ios)                    ENABLE_IOS="1"; shift ;;
     --no-ios)                 ENABLE_IOS="0"; shift ;;
     --ios-only)               IOS_ONLY="1"; ENABLE_IOS="1"; shift ;;
-    --ios-workspace)          IOS_WORKSPACE="$2"; shift 2 ;;
-    --ios-scheme)             IOS_SCHEME="$2"; shift 2 ;;
-    --ios-export-plist)       IOS_EXPORT_PLIST="$2"; shift 2 ;;
-    --ios-appicon-set-name)   IOS_APPICON_SET_NAME="$2"; shift 2 ;;
-    --ios-marketing-version)  IOS_MARKETING_VERSION="$2"; shift 2 ;;
+    --ios-workspace)          need_arg "$@"; IOS_WORKSPACE="$2"; shift 2 ;;
+    --ios-scheme)             need_arg "$@"; IOS_SCHEME="$2"; shift 2 ;;
+    --ios-export-plist)       need_arg "$@"; IOS_EXPORT_PLIST="$2"; shift 2 ;;
+    --ios-appicon-set-name)   need_arg "$@"; IOS_APPICON_SET_NAME="$2"; shift 2 ;;
+    --ios-marketing-version)  need_arg "$@"; IOS_MARKETING_VERSION="$2"; shift 2 ;;
     --ios-validate-ipa)       IOS_ASC_VALIDATE="1"; shift ;;
     --ios-upload-ipa)         IOS_ASC_UPLOAD="1"; IOS_ASC_VALIDATE="1"; shift ;;
-    --mas-export-plist)       MAS_EXPORT_PLIST="$2"; shift 2 ;;
+    --mas-export-plist)       need_arg "$@"; MAS_EXPORT_PLIST="$2"; shift 2 ;;
     --mas-validate-app)       MAS_ASC_VALIDATE="1"; shift ;;
     --mas-upload-app)         MAS_ASC_UPLOAD="1"; MAS_ASC_VALIDATE="1"; shift ;;
     # Generic ASC credentials (shared by iOS + Mac App Store uploads).
-    --asc-api-key-id)         ASC_API_KEY_ID="$2"; shift 2 ;;
-    --asc-api-issuer)         ASC_API_ISSUER="$2"; shift 2 ;;
-    --asc-api-key-path)       ASC_API_KEY_PATH="$2"; shift 2 ;;
+    --asc-api-key-id)         need_arg "$@"; ASC_API_KEY_ID="$2"; shift 2 ;;
+    --asc-api-issuer)         need_arg "$@"; ASC_API_ISSUER="$2"; shift 2 ;;
+    --asc-api-key-path)       need_arg "$@"; ASC_API_KEY_PATH="$2"; shift 2 ;;
     # Legacy iOS-prefixed ASC credential flags (still honored; resolved into
     # ASC_API_* by resolve_asc_credential_aliases()).
-    --ios-asc-api-key-id)     IOS_ASC_API_KEY_ID="$2"; shift 2 ;;
-    --ios-asc-api-issuer)     IOS_ASC_API_ISSUER="$2"; shift 2 ;;
-    --ios-asc-api-key-path)   IOS_ASC_API_KEY_PATH="$2"; shift 2 ;;
+    --ios-asc-api-key-id)     need_arg "$@"; IOS_ASC_API_KEY_ID="$2"; shift 2 ;;
+    --ios-asc-api-issuer)     need_arg "$@"; IOS_ASC_API_ISSUER="$2"; shift 2 ;;
+    --ios-asc-api-key-path)   need_arg "$@"; IOS_ASC_API_KEY_PATH="$2"; shift 2 ;;
 
     --zip)                  ENABLE_ZIP="1"; CLI_SET_ENABLE_ZIP=1; shift ;;
     --no-zip)               ENABLE_ZIP="0"; CLI_SET_ENABLE_ZIP=1; shift ;;
@@ -3361,24 +3369,24 @@ while [[ $# -gt 0 ]]; do
     --no-dmg)               ENABLE_DMG="0"; CLI_SET_ENABLE_DMG=1; shift ;;
     --fancy-dmg)            FANCY_DMG="1"; shift ;;
     --no-fancy-dmg)         FANCY_DMG="0"; shift ;;
-    --dmg-name)             DMG_NAME="$2"; shift 2 ;;
-    --dmg-volume-name)      DMG_VOLUME_NAME="$2"; shift 2 ;;
-    --dmg-output-dir)       DMG_OUTPUT_DIR="$2"; shift 2 ;;
+    --dmg-name)             need_arg "$@"; DMG_NAME="$2"; shift 2 ;;
+    --dmg-volume-name)      need_arg "$@"; DMG_VOLUME_NAME="$2"; shift 2 ;;
+    --dmg-output-dir)       need_arg "$@"; DMG_OUTPUT_DIR="$2"; shift 2 ;;
 
-    --build-type)           BUILD_TYPE="$2"; shift 2 ;;
+    --build-type)           need_arg "$@"; BUILD_TYPE="$2"; shift 2 ;;
     --notarize)             NOTARIZE="yes"; CLI_SET_NOTARIZE=1; shift ;;
     --no-notarize)          NOTARIZE="no"; CLI_SET_NOTARIZE=1; shift ;;
 
-    --version-mode)             VERSION_MODE="$2"; shift 2 ;;
-    --version-string)           VERSION_STRING="$2"; shift 2 ;;
-    --version-content-dir)      VERSION_CONTENT_DIR="$2"; shift 2 ;;
-    --marketing-version)        MARKETING_VERSION="$2"; shift 2 ;;
+    --version-mode)             need_arg "$@"; VERSION_MODE="$2"; shift 2 ;;
+    --version-string)           need_arg "$@"; VERSION_STRING="$2"; shift 2 ;;
+    --version-content-dir)      need_arg "$@"; VERSION_CONTENT_DIR="$2"; shift 2 ;;
+    --marketing-version)        need_arg "$@"; MARKETING_VERSION="$2"; shift 2 ;;
     --game-mode)                ENABLE_GAME_MODE="1"; shift ;;
     --no-game-mode)             ENABLE_GAME_MODE="0"; shift ;;
     --game-center)              ENABLE_GAME_CENTER="1"; CLI_SET_ENABLE_GAME_CENTER=1; shift ;;
     --no-game-center)           ENABLE_GAME_CENTER="0"; CLI_SET_ENABLE_GAME_CENTER=1; shift ;;
-    --app-category)             APP_CATEGORY="$2"; shift 2 ;;
-    --set-cfbundle-version)     CFBUNDLE_VERSION="$2"; CLI_SET_CFBUNDLE_VERSION=1; shift 2 ;;
+    --app-category)             need_arg "$@"; APP_CATEGORY="$2"; shift 2 ;;
+    --set-cfbundle-version)     need_arg "$@"; CFBUNDLE_VERSION="$2"; CLI_SET_CFBUNDLE_VERSION=1; shift 2 ;;
     --bump-major|--bump-minor|--bump-patch)
       if is_placeholder "${VERSION_STRING:-}"; then
         die "$1 requires a base version. Set VERSION_STRING in .env or pass --version-string X.Y.Z before $1."

@@ -6,6 +6,18 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-21] — Clear error when a CLI flag is missing its value
+
+Running a value-taking flag with no argument (e.g. `./ship.sh --preset`) used to fail with `line 3169: $2: unbound variable` because `set -Eeuo pipefail` is active and each branch read `$2` directly. The error mentioned a line number deep inside the parser and gave the user no clue which flag was at fault.
+
+### Changed
+- **All value-taking CLI flags now validate that an argument was supplied** before reading it. Missing values produce `Option <flag> requires a value. Run --help to see usage.` and exit through the normal `die()` cleanup path. A new `need_arg()` helper is invoked at the top of each affected case branch (~40 flags across project layout, signing, iOS/MAS, ASC credentials, Steam, DMG, version, and metadata groups).
+
+### Notes
+- No behavior change for valid invocations; this only converts a `set -u` abort into a normal user-facing error.
+
+---
+
 ## [2026-05-15] — Compact `--help`; full reference moves to `--help all`
 
 `./ship.sh --help` used to print all 205 lines of flag reference at once, which buried the common path under signing/iOS/MAS/Steam/versioning detail. Now the default is a short summary; the full reference is opt-in via `--help all`.
