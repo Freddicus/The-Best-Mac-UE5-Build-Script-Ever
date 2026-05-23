@@ -47,6 +47,8 @@ Use `--bump-major`, `--bump-minor`, or `--bump-patch` to auto-increment `VERSION
 
 `--bump-*` implies `VERSION_MODE=MANUAL` if `VERSION_MODE` is still `NONE`.
 
+`--bump-*` also resets `CFBUNDLE_VERSION` to `0` so the new marketing-version line starts a fresh build-number sequence. Under Path B (default), the auto pre-increment then ships `CFBundleVersion=1` and persists `1` to `.env`. A later `--set-cfbundle-version N` on the same command line still wins (last-write semantics). See [CFBundleVersion: auto-bump by default](#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical) for the Path B/A details.
+
 On a **successful build**, the bumped value is written back to `.env` (`VERSION_STRING=` updated in-place, or appended if not present). `.env` is never modified on a failed or dry-run build.
 
 ### DefaultGame.ini
@@ -146,7 +148,7 @@ The plist is auto-seeded from the engine's stock template (`$UE_ROOT/Engine/Buil
 
 The two paths are mutually exclusive. Setting `USE_UE_PACKAGE_VERSION_COUNTER=1` disables the auto-bump and Info.plist override; UE's canonical flow takes over.
 
-> **Relationship to `--bump-major/--bump-minor/--bump-patch`:** these flags bump the *runtime* `VERSION_STRING` (used for `Content/<dir>/version.txt`) — they don't touch `CFBundleVersion`. The two version concepts are intentionally independent: `VERSION_STRING` is a semver string for in-game display; `CFBundleVersion` is an integer build counter for App Store / Gatekeeper.
+> **Relationship to `--bump-major/--bump-minor/--bump-patch`:** these flags bump the *runtime* `VERSION_STRING` (the semver in `Content/<dir>/version.txt`) and *also* reset `CFBUNDLE_VERSION` to `0`, so each new marketing-version line starts a fresh build-counter sequence (Path B ships `CFBundleVersion=1` on the next build and persists `1` to `.env`). `VERSION_STRING` and `CFBundleVersion` remain distinct concepts — semver for in-game display vs. integer build counter for App Store / Gatekeeper — but their lifecycles are now linked: every marketing-version bump implies a build-counter restart. Combine with `--set-cfbundle-version N` (last-write wins) if you need a specific starting value instead of `0`.
 
 #### Path B — auto-bump (default behavior)
 

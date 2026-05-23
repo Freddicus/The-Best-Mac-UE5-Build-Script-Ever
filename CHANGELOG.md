@@ -6,6 +6,19 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-05-22] — `--bump-*` resets CFBundleVersion to 0
+
+Bumping the marketing version (`--bump-major` / `--bump-minor` / `--bump-patch`) starts a new X.Y.Z line, but until now the CFBundleVersion build-number counter kept ticking from whatever value `.env` happened to hold. That left the new marketing-version line inheriting an unrelated, mid-sequence build number — surprising for App Store submissions and harder to reason about in release notes.
+
+### Changed
+- **`--bump-major` / `--bump-minor` / `--bump-patch` now set `CFBUNDLE_VERSION="0"`** as part of the bump. Path B's auto-increment then ships `CFBundleVersion=1` and persists `1` to `.env`, so each new marketing-version line restarts at 1. If `--set-cfbundle-version N` appears later on the same command line it still wins (last-write semantics on the same variable).
+- Help text for `--bump-*` (both `--help` and `--help all`) now documents the reset.
+
+### Notes
+- No effect on Path A (`USE_UE_PACKAGE_VERSION_COUNTER=1`): the resolver still clears `CFBUNDLE_VERSION` and lets UE's PackageVersionCounter drive `CFBundleVersion`.
+
+---
+
 ## [2026-05-21] — Clear error when a CLI flag is missing its value
 
 Running a value-taking flag with no argument (e.g. `./ship.sh --preset`) used to fail with `line 3169: $2: unbound variable` because `set -Eeuo pipefail` is active and each branch read `$2` directly. The error mentioned a line number deep inside the parser and gave the user no clue which flag was at fault.
