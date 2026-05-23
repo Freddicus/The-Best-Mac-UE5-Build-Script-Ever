@@ -3003,7 +3003,8 @@ Common flags:
 
   --version-string X.Y.Z     marketing version base
   --bump-major | --bump-minor | --bump-patch
-                             bump VERSION_STRING (implies VERSION_MODE=MANUAL)
+                             bump VERSION_STRING (implies VERSION_MODE=MANUAL);
+                             also resets CFBUNDLE_VERSION to 0
   --set-cfbundle-version N   set + persist CFBundleVersion baseline
 
   --print-config             show resolved config and exit
@@ -3206,7 +3207,13 @@ Versioning
                                      (default behavior; first build ships 1).
   --bump-major / --bump-minor / --bump-patch
                                      bump VERSION_STRING from .env or --version-string;
-                                     implies VERSION_MODE=MANUAL if not already set
+                                     implies VERSION_MODE=MANUAL if not already set.
+                                     Also resets CFBUNDLE_VERSION to 0 so the new
+                                     marketing-version line starts a fresh build-
+                                     number sequence (Path B's auto-bump then ships
+                                     CFBundleVersion=1 and persists 1 to .env).
+                                     A later --set-cfbundle-version on the same
+                                     command line still wins.
   --use-ue-package-version-counter / --no-use-ue-package-version-counter
                                      opt into UE's canonical CFBundleVersion path
                                      (Path A): seeds Build/Mac/<Project>.PackageVersionCounter
@@ -3394,6 +3401,12 @@ while [[ $# -gt 0 ]]; do
       VERSION_STRING="$(bump_semver "${1#--bump-}" "$VERSION_STRING")"
       if [[ "$VERSION_MODE" == "NONE" ]]; then VERSION_MODE="MANUAL"; fi
       _VERSION_BUMPED=1
+      # Reset the CFBundleVersion counter alongside the marketing-version bump
+      # so the new X.Y.Z line starts a fresh build-number sequence. Path B's
+      # auto-bump pre-increments, so this build ships CFBundleVersion=1 and
+      # persists 1 to .env. A later --set-cfbundle-version on the same command
+      # line still wins (last-write-wins on CFBUNDLE_VERSION).
+      CFBUNDLE_VERSION="0"
       shift ;;
 
 
