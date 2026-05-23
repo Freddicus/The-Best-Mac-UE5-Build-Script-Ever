@@ -6,15 +6,29 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
-## [2026-05-22] — `--bump-*` resets CFBundleVersion to 0
+## [2026-05-23] — `--bump-*` drives a complete release-version bump
 
-Bumping the marketing version (`--bump-major` / `--bump-minor` / `--bump-patch`) starts a new X.Y.Z line, but until now the CFBundleVersion build-number counter kept ticking from whatever value `.env` happened to hold. That left the new marketing-version line inheriting an unrelated, mid-sequence build number — surprising for App Store submissions and harder to reason about in release notes.
+Bumping the marketing version (`--bump-major` / `--bump-minor` / `--bump-patch`) used to update only `VERSION_STRING` (the in-game runtime semver written to `Content/<dir>/version.txt`). Two real-ship problems surfaced:
+
+1. The `CFBundleVersion` build-number counter kept ticking from whatever value `.env` happened to hold, so each new marketing-version line inherited an unrelated, mid-sequence build number.
+2. `MARKETING_VERSION` (`CFBundleShortVersionString`) wasn't touched at all. Projects that manage the canonical marketing version in `DefaultEngine.ini` (UE editor or manual edit) shipped iOS `.ipa`s with the *previous* short version, and App Store Connect rejected the upload because the build had already been submitted under that version.
+
+UE reads `VersionInfo` from `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` in `UEDeployIOS.cs:294/641` (stamped directly into the iOS `Info.plist` at line 729) and `XcodeProject.cs:2011` (emitted as `MARKETING_VERSION` into the xcconfig at line 2660). The Mac side reads the parallel `MacRuntimeSettings` section at `XcodeProject.cs:1997/2165`. Writing the bumped value back to `DefaultEngine.ini` before UAT and `xcodebuild` run is the canonical override path.
 
 ### Changed
-- **`--bump-major` / `--bump-minor` / `--bump-patch` now set `CFBUNDLE_VERSION="0"`** as part of the bump. Path B's auto-increment then ships `CFBundleVersion=1` and persists `1` to `.env`, so each new marketing-version line restarts at 1. If `--set-cfbundle-version N` appears later on the same command line it still wins (last-write semantics on the same variable).
-- Help text for `--bump-*` (both `--help` and `--help all`) now documents the reset.
+- **`--bump-major` / `--bump-minor` / `--bump-patch` now bump three linked values in lockstep:**
+  - **`VERSION_STRING`** (existing behavior).
+  - **`MARKETING_VERSION`** (new). Resolution order: (1) bump env/.env value if set; (2) auto-detect `VersionInfo` from `DefaultEngine.ini`'s iOS section (then Mac) via the new `autodetect_marketing_version_from_engine_ini`, bump it, and persist to `.env`; (3) derive from the bumped `VERSION_STRING` (stripped of `v` prefix, must match `X.Y.Z` or `X.Y`). Derived values aren't persisted — they re-derive next run from the persisted `VERSION_STRING`.
+  - **`IOS_MARKETING_VERSION`** (new). If explicitly set, bumps too and persists to `.env`.
+  - **`CFBUNDLE_VERSION`** is reset to `0` so the new marketing-version line starts a fresh build-number sequence. Path B's auto pre-increment then ships `CFBundleVersion=1` and persists `1` to `.env`. A later `--set-cfbundle-version N` on the same command line still wins (last-write semantics on the shared variable).
+- **New `write_marketing_version_to_env`** runs alongside `write_bumped_version_to_env` at end-of-build.
+- **New `read_ini_section_value` helper** (section-scoped ini reader; the existing `read_ini_value` is section-agnostic and would return the wrong `VersionInfo=` when both the iOS and Mac sections are present).
+- **Help text** for `--bump-*` (both `--help` and `--help all`) documents the full resolution order, persistence rules, and `CFBUNDLE_VERSION` reset.
+- **`docs/versioning.md`** updated: canonical mapping table now lists the iOS `VersionInfo` location and references to `UEDeployIOS.cs`; the `MARKETING_VERSION` resolution section documents the new ini-auto-detect + `VERSION_STRING`-derive precedence; the "Relationship to `--bump-*`" callout is rewritten to cover all three linked values.
 
 ### Notes
+- Behavior change for projects with `VERSION_STRING` set but no `MARKETING_VERSION`: the script now writes a derived (or ini-detected) value to `DefaultEngine.ini` instead of leaving it untouched. Set `MARKETING_VERSION` explicitly to keep the two decoupled.
+- No change for projects using `--marketing-version` explicitly or with `MARKETING_VERSION` already in `.env`.
 - No effect on Path A (`USE_UE_PACKAGE_VERSION_COUNTER=1`): the resolver still clears `CFBUNDLE_VERSION` and lets UE's PackageVersionCounter drive `CFBundleVersion`.
 
 ---

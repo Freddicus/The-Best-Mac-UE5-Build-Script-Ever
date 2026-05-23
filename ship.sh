@@ -1044,6 +1044,14 @@ print_config() {
 _CONTENT_VERSION_FILE_TO_RESTORE=""
 # Set to 1 when --bump-* fires; causes VERSION_STRING to be persisted to .env on success.
 _VERSION_BUMPED=""
+# Ordered list of components (major|minor|patch) passed via --bump-*, replayed
+# on MARKETING_VERSION after ini auto-detect (apply_deferred_marketing_version_bumps).
+_BUMP_COMPONENTS=()
+# Source-tracking flags for MARKETING_VERSION so we know whether to persist on
+# success. Derived values are skipped (will re-derive next run); ini- and
+# env-sourced values are persisted to .env.
+_MARKETING_VERSION_FROM_INI=0
+_MARKETING_VERSION_DERIVED=0
 
 # Reset Content/<dir>/version.txt to "dev" so the editor stays clean.
 # Registered as an EXIT trap — safe to call multiple times.
@@ -1149,6 +1157,19 @@ ensure_game_ini_staging_entry() {
 write_bumped_version_to_env() {
   [[ -z "${_VERSION_BUMPED:-}" ]] && return 0
   _write_env_var "VERSION_STRING" "$VERSION_STRING"
+}
+
+# Persist the bumped MARKETING_VERSION (and IOS_MARKETING_VERSION if set
+# explicitly) back to .env so the next run picks them up without re-reading
+# DefaultEngine.ini. Skipped when MARKETING_VERSION was derived from
+# VERSION_STRING — that path re-derives next run from the persisted
+# VERSION_STRING, keeping .env as the single source of truth.
+write_marketing_version_to_env() {
+  [[ -z "${_VERSION_BUMPED:-}" ]] && return 0
+  [[ "${_MARKETING_VERSION_DERIVED:-0}" == "1" ]] && return 0
+  [[ -n "${MARKETING_VERSION:-}" ]] && _write_env_var "MARKETING_VERSION" "$MARKETING_VERSION"
+  [[ -n "${IOS_MARKETING_VERSION:-}" ]] && _write_env_var "IOS_MARKETING_VERSION" "$IOS_MARKETING_VERSION"
+  return 0
 }
 
 # --- Canonical UE override helpers --------------------------------------------
@@ -2452,6 +2473,39 @@ read_ini_value() {
   echo "$val"
 }
 
+read_ini_section_value() {
+  # Section-scoped reader: returns the first Key=Value match inside [Section].
+  # Section name is the bare identifier (no surrounding brackets).
+  local file="$1"; local section="$2"; local key="$3"
+  [[ -f "$file" ]] || { echo ""; return 0; }
+
+  /usr/bin/awk -v want_section="[$section]" -v want_key="$key" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s; }
+    /^[[:space:]]*[;#]/ { next }
+    /^[[:space:]]*\[/ {
+      cur = $0
+      sub(/^[[:space:]]+/, "", cur)
+      sub(/[[:space:]]+$/, "", cur)
+      in_section = (cur == want_section) ? 1 : 0
+      next
+    }
+    in_section {
+      line = $0
+      idx = index(line, "=")
+      if (idx == 0) next
+      k = substr(line, 1, idx - 1)
+      v = substr(line, idx + 1)
+      k = trim(k)
+      if (k != want_key) next
+      sub(/[;#].*$/, "", v)
+      v = trim(v)
+      gsub(/^"|"$/, "", v)
+      print v
+      exit
+    }
+  ' "$file" 2>/dev/null || true
+}
+
 detect_steam_from_ini() {
   local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
   [[ -f "$engine_ini" ]] || return 1
@@ -2567,6 +2621,63 @@ autodetect_steam_dylib_src_from_engine_if_needed() {
   warn "ENABLE_STEAM=1 but could not locate libsteam_api.dylib under: $steam_root"
   warn "Expected (based on SteamVersionNumber=$ver): $candidate"
   warn "Set STEAM_DYLIB_SRC explicitly (--steam-dylib-src or env/USER CONFIG) if your layout differs."
+}
+
+autodetect_marketing_version_from_engine_ini() {
+  # Seed MARKETING_VERSION from DefaultEngine.ini's VersionInfo when not set
+  # explicitly (env/.env/CLI). Prefer the iOS section because iOS App Store
+  # validation is strictest about CFBundleShortVersionString uniqueness — if
+  # the user has only set one section in UE editor, it's usually iOS. Falls
+  # back to the Mac section.
+  #
+  # Read by UEDeployIOS.cs:294/641 (iOS Info.plist stamping), XcodeProject.cs
+  # 1997/2011 (xcconfig MARKETING_VERSION), so updating .ini before UAT and
+  # xcodebuild run is the canonical override path.
+  [[ -z "${MARKETING_VERSION:-}" ]] || return 0
+  local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
+  [[ -f "$engine_ini" ]] || return 0
+
+  local v
+  v="$(read_ini_section_value "$engine_ini" "/Script/IOSRuntimeSettings.IOSRuntimeSettings" "VersionInfo")"
+  if [[ -z "$v" ]]; then
+    v="$(read_ini_section_value "$engine_ini" "/Script/MacRuntimeSettings.MacRuntimeSettings" "VersionInfo")"
+  fi
+  if [[ -n "$v" ]]; then
+    MARKETING_VERSION="$v"
+    _MARKETING_VERSION_FROM_INI=1
+    info "Detected MARKETING_VERSION from DefaultEngine.ini VersionInfo: $MARKETING_VERSION"
+  fi
+}
+
+derive_marketing_version_from_version_string() {
+  # Last-resort fallback when MARKETING_VERSION isn't set anywhere and the
+  # .ini has no VersionInfo: derive from VERSION_STRING (strip leading 'v',
+  # require X.Y.Z or X.Y). Non-semver values (DATETIME timestamps, "dev",
+  # HYBRID hashes) are skipped — MARKETING_VERSION stays empty and UE's
+  # built-in defaults apply.
+  [[ -z "${MARKETING_VERSION:-}" ]] || return 0
+  local v="${VERSION_STRING:-}"
+  v="${v#v}"
+  if [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$v" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    MARKETING_VERSION="$v"
+    _MARKETING_VERSION_DERIVED=1
+    info "Derived MARKETING_VERSION from VERSION_STRING: $MARKETING_VERSION"
+  fi
+}
+
+apply_deferred_marketing_version_bumps() {
+  # When --bump-* fires before MARKETING_VERSION is known (empty in env/.env
+  # at CLI parse time, then populated by ini auto-detect), replay the bump
+  # components on the detected value so the new marketing-version line lands
+  # on .ini before the build. Skips for derived values (those already reflect
+  # the bumped VERSION_STRING).
+  [[ "${_MARKETING_VERSION_FROM_INI:-0}" == "1" ]] || return 0
+  [[ "${#_BUMP_COMPONENTS[@]}" -gt 0 ]] || return 0
+  local c old="$MARKETING_VERSION"
+  for c in "${_BUMP_COMPONENTS[@]}"; do
+    MARKETING_VERSION="$(bump_semver "$c" "$MARKETING_VERSION")"
+  done
+  info "Bumped MARKETING_VERSION (from ini): $old → $MARKETING_VERSION"
 }
 
 autodetect_ue_root_if_needed() {
@@ -3003,8 +3114,8 @@ Common flags:
 
   --version-string X.Y.Z     marketing version base
   --bump-major | --bump-minor | --bump-patch
-                             bump VERSION_STRING (implies VERSION_MODE=MANUAL);
-                             also resets CFBUNDLE_VERSION to 0
+                             bump VERSION_STRING and MARKETING_VERSION;
+                             resets CFBUNDLE_VERSION to 0
   --set-cfbundle-version N   set + persist CFBundleVersion baseline
 
   --print-config             show resolved config and exit
@@ -3208,6 +3319,22 @@ Versioning
   --bump-major / --bump-minor / --bump-patch
                                      bump VERSION_STRING from .env or --version-string;
                                      implies VERSION_MODE=MANUAL if not already set.
+                                     Also bumps MARKETING_VERSION (CFBundleShortVersionString):
+                                       1. If MARKETING_VERSION is set in env/.env, it
+                                          bumps that value.
+                                       2. Otherwise the script reads VersionInfo from
+                                          DefaultEngine.ini's iOS section (then Mac)
+                                          and bumps that, writing the new value back
+                                          to DefaultEngine.ini before UAT/xcodebuild
+                                          runs (so UEDeployIOS.cs and XcodeProject.cs
+                                          pick it up canonically) and persisting it
+                                          to .env on success.
+                                       3. As a last resort, MARKETING_VERSION derives
+                                          from VERSION_STRING (stripped of 'v' prefix,
+                                          must be X.Y.Z or X.Y) — derived values are
+                                          re-derived each run rather than persisted.
+                                     IOS_MARKETING_VERSION, if set explicitly, bumps
+                                     too and is persisted to .env.
                                      Also resets CFBUNDLE_VERSION to 0 so the new
                                      marketing-version line starts a fresh build-
                                      number sequence (Path B's auto-bump then ships
@@ -3398,15 +3525,27 @@ while [[ $# -gt 0 ]]; do
       if is_placeholder "${VERSION_STRING:-}"; then
         die "$1 requires a base version. Set VERSION_STRING in .env or pass --version-string X.Y.Z before $1."
       fi
-      VERSION_STRING="$(bump_semver "${1#--bump-}" "$VERSION_STRING")"
+      _component="${1#--bump-}"
+      VERSION_STRING="$(bump_semver "$_component" "$VERSION_STRING")"
       if [[ "$VERSION_MODE" == "NONE" ]]; then VERSION_MODE="MANUAL"; fi
       _VERSION_BUMPED=1
+      _BUMP_COMPONENTS+=("$_component")
+      # Propagate to MARKETING_VERSION / IOS_MARKETING_VERSION when set in
+      # env/.env at parse time. Empty values are bumped later by
+      # apply_deferred_marketing_version_bumps once ini auto-detect has run.
+      if [[ -n "${MARKETING_VERSION:-}" ]]; then
+        MARKETING_VERSION="$(bump_semver "$_component" "$MARKETING_VERSION")"
+      fi
+      if [[ -n "${IOS_MARKETING_VERSION:-}" ]]; then
+        IOS_MARKETING_VERSION="$(bump_semver "$_component" "$IOS_MARKETING_VERSION")"
+      fi
       # Reset the CFBundleVersion counter alongside the marketing-version bump
       # so the new X.Y.Z line starts a fresh build-number sequence. Path B's
       # auto-bump pre-increments, so this build ships CFBundleVersion=1 and
       # persists 1 to .env. A later --set-cfbundle-version on the same command
       # line still wins (last-write-wins on CFBUNDLE_VERSION).
       CFBUNDLE_VERSION="0"
+      unset _component
       shift ;;
 
 
@@ -3596,6 +3735,9 @@ autodetect_mas_export_plist_if_needed
 autodetect_asc_credentials_if_needed
 autodetect_steam_if_needed
 autodetect_steam_dylib_src_from_engine_if_needed
+autodetect_marketing_version_from_engine_ini
+apply_deferred_marketing_version_bumps
+derive_marketing_version_from_version_string
 
 # Derive common paths (after CLI parsing/autodetect).
 # WORKSPACE/SCHEME are deferred: full detection runs after GenerateProjectFiles.
@@ -4700,6 +4842,7 @@ if [[ "${ENABLE_IOS:-0}" == "1" ]]; then
 fi
 
 write_bumped_version_to_env
+write_marketing_version_to_env
 write_cfbundle_version_to_env
 echo "✅ Done" >&3
 if [[ "$MAC_DISTRIBUTION" == "developer-id" ]]; then
