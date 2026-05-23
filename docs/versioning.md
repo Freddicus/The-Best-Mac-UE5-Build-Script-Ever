@@ -47,9 +47,17 @@ Use `--bump-major`, `--bump-minor`, or `--bump-patch` to auto-increment `VERSION
 
 `--bump-*` implies `VERSION_MODE=MANUAL` if `VERSION_MODE` is still `NONE`.
 
+`--bump-*` propagates to **MARKETING_VERSION** (`CFBundleShortVersionString`) so the new release line ships end-to-end:
+
+- If `MARKETING_VERSION` is set in env/.env, it bumps that value directly.
+- Otherwise the script reads `VersionInfo` from `DefaultEngine.ini`'s iOS section (then Mac) and bumps that — rewriting `DefaultEngine.ini` before UAT/`xcodebuild` runs so `UEDeployIOS.cs:294/641` and `XcodeProject.cs:1997/2011` pick up the new value canonically. The bumped `MARKETING_VERSION` is persisted to `.env` on success.
+- As a last resort (no env value, no `.ini` value), `MARKETING_VERSION` derives from the bumped `VERSION_STRING` (stripped of `v` prefix, must be `X.Y.Z` or `X.Y`). Derived values are re-derived next run rather than persisted.
+
+`IOS_MARKETING_VERSION`, if set explicitly, bumps too and is persisted to `.env` on success.
+
 `--bump-*` also resets `CFBUNDLE_VERSION` to `0` so the new marketing-version line starts a fresh build-number sequence. Under Path B (default), the auto pre-increment then ships `CFBundleVersion=1` and persists `1` to `.env`. A later `--set-cfbundle-version N` on the same command line still wins (last-write semantics). See [CFBundleVersion: auto-bump by default](#cfbundleversion-auto-bump-by-default-opt-in-for-ue-canonical) for the Path B/A details.
 
-On a **successful build**, the bumped value is written back to `.env` (`VERSION_STRING=` updated in-place, or appended if not present). `.env` is never modified on a failed or dry-run build.
+On a **successful build**, the bumped values are written back to `.env` (`VERSION_STRING=`, `MARKETING_VERSION=` if non-derived, `IOS_MARKETING_VERSION=` if explicit, `CFBUNDLE_VERSION=` — each updated in-place, or appended if not present). `.env` is never modified on a failed or dry-run build.
 
 ### DefaultGame.ini
 
@@ -76,7 +84,7 @@ Earlier versions of this script post-processed the UE-generated xcconfig at `Int
 
 | Info.plist key | Canonical override location | Reference |
 |---|---|---|
-| `CFBundleShortVersionString` (`MARKETING_VERSION`) | `Config/DefaultEngine.ini` → `[/Script/MacRuntimeSettings.MacRuntimeSettings]` `VersionInfo=` | `XcodeProject.cs:1997` |
+| `CFBundleShortVersionString` (`MARKETING_VERSION`) | `Config/DefaultEngine.ini` → `[/Script/MacRuntimeSettings.MacRuntimeSettings]` `VersionInfo=` (Mac) and `[/Script/IOSRuntimeSettings.IOSRuntimeSettings]` `VersionInfo=` (iOS, when `ENABLE_IOS=1` or `IOS_MARKETING_VERSION` is set) | `XcodeProject.cs:1997` (Mac), `:2011` (iOS), `UEDeployIOS.cs:294/641/729` (iOS Info.plist direct) |
 | `LSApplicationCategoryType` | `Config/DefaultEngine.ini` → `[/Script/MacTargetPlatform.XcodeProjectSettings]` `AppCategory=` | `XcodeProject.cs:1982` (defaults to `public.app-category.games` in `BaseEngine.ini`) |
 | `LSSupportsGameMode`, `GCSupportsGameMode` | `Build/Mac/Resources/Info.Template.plist` (UE merges this template into the final `Info.plist`) | `BaseEngine.ini:3463` `TemplateMacPlist=` |
 | `CFBundleVersion` (`CURRENT_PROJECT_VERSION`) | **Path B (default):** `CFBUNDLE_VERSION` in `.env`, auto pre-incremented every build by the script and persisted on success. Post-export `PlistBuddy` rewrite of `.app/Contents/Info.plist` before codesign. `--set-cfbundle-version N` sets a new baseline.<br>**Path A (opt-in via `USE_UE_PACKAGE_VERSION_COUNTER=1`):** `Build/Mac/<Project>.PackageVersionCounter` (UE auto-increments per build); CL prefix stripped via project-level `Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` override (`AppleToolChain.cs:394-397`). | `Engine/Build/BatchFiles/Mac/UpdateVersionAfterBuild.sh` |
@@ -98,7 +106,13 @@ CLI: `--marketing-version 1.2.0`
 
 UE then stamps the value into each platform's generated xcconfig at regen time, and Xcode bakes it into `CFBundleShortVersionString` in the final `Info.plist`. The value is visible to you in your committed `DefaultEngine.ini` — not buried in `Intermediate/`.
 
-When unset, the script does **not** touch `DefaultEngine.ini`. UE falls back to the engine display version (e.g. `5.7.0`) — almost certainly not what you want, so set this once.
+When unset in env/.env/CLI, the script resolves `MARKETING_VERSION` in this order:
+
+1. **Auto-detect from `DefaultEngine.ini`** — `VersionInfo` in the iOS section first, then the Mac section. Catches projects where the marketing version is managed in the UE editor or hand-edited in the ini.
+2. **Derive from `VERSION_STRING`** — strip leading `v`; accept `X.Y.Z` or `X.Y`. Lets a project with a single `VERSION_STRING` in `.env` ship a coherent `CFBundleShortVersionString` without duplicating the value.
+3. **Leave unset** — when `VERSION_STRING` isn't a clean semver (DATETIME, `dev`, HYBRID hashes) and the ini has no value, UE's built-in defaults apply.
+
+Auto-detected values are persisted to `.env` on a successful `--bump-*` build; derived values are not — they re-derive from the (also-bumped, also-persisted) `VERSION_STRING` next run.
 
 ### IOS_MARKETING_VERSION (rare)
 
@@ -148,7 +162,12 @@ The plist is auto-seeded from the engine's stock template (`$UE_ROOT/Engine/Buil
 
 The two paths are mutually exclusive. Setting `USE_UE_PACKAGE_VERSION_COUNTER=1` disables the auto-bump and Info.plist override; UE's canonical flow takes over.
 
-> **Relationship to `--bump-major/--bump-minor/--bump-patch`:** these flags bump the *runtime* `VERSION_STRING` (the semver in `Content/<dir>/version.txt`) and *also* reset `CFBUNDLE_VERSION` to `0`, so each new marketing-version line starts a fresh build-counter sequence (Path B ships `CFBundleVersion=1` on the next build and persists `1` to `.env`). `VERSION_STRING` and `CFBundleVersion` remain distinct concepts — semver for in-game display vs. integer build counter for App Store / Gatekeeper — but their lifecycles are now linked: every marketing-version bump implies a build-counter restart. Combine with `--set-cfbundle-version N` (last-write wins) if you need a specific starting value instead of `0`.
+> **Relationship to `--bump-major/--bump-minor/--bump-patch`:** these flags bump three linked things in lockstep so a single command kicks off a coherent new release line:
+> - **`VERSION_STRING`** — the semver in `Content/<dir>/version.txt` for in-game display. Persisted to `.env`.
+> - **`MARKETING_VERSION`** — `CFBundleShortVersionString`. Bumped from env/.env if set, otherwise from `DefaultEngine.ini`'s iOS or Mac `VersionInfo` (the script writes the new value back to `.ini` before UAT/`xcodebuild` runs), otherwise derived from the bumped `VERSION_STRING`. Persisted to `.env` unless derived.
+> - **`CFBundleVersion`** — reset to `0`, so Path B's auto pre-increment ships `CFBundleVersion=1` and persists `1` to `.env`.
+>
+> The three remain distinct concepts (runtime semver / App Store short version / App Store build counter) but their lifecycles are linked: every marketing-version bump restarts the build counter. Override any of them on the same command with `--marketing-version`, `--ios-marketing-version`, or `--set-cfbundle-version` (last-write wins).
 
 #### Path B — auto-bump (default behavior)
 
