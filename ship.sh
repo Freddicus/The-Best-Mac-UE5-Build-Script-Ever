@@ -4220,6 +4220,18 @@ fi
 if [[ "${IOS_ONLY:-0}" != "1" ]]; then
   info "Building game (UAT BuildCookRun, Mac)"
 
+  # -specifiedarchitecture=arm64+x86_64 below forces a universal Game binary
+  # for players, but it also propagates to the ProjectEditor build (needed
+  # only locally, to run the cook commandlet — it's never shipped). A
+  # universal-arch Editor build hits a UBT action-graph bug on UE 5.8/UBA:
+  # the Lipo step for the editor dylib runs before the two per-arch Link
+  # steps it depends on, so it always fails ("can't open input file"). The
+  # Game target's own Lipo is unaffected. -editorarchitecture pins the
+  # Editor to the host's native arch (single-arch, no Lipo needed) and
+  # overrides -specifiedarchitecture for that target only, per UAT's
+  # ProjectParams.cs. Confirmed on UE_5.8 with a from-clean build.
+  UE_HOST_ARCH="$(/usr/bin/uname -m)"
+
   "$SCRIPTS/RunUAT.sh" BuildCookRun \
     -unrealexe="$UE_EDITOR" \
     -project="$UPROJECT_PATH" \
@@ -4227,7 +4239,8 @@ if [[ "${IOS_ONLY:-0}" != "1" ]]; then
     -targetplatform=Mac -clientconfig="$UE_CLIENT_CONFIG" \
     -stage -package \
     -archive -archivedirectory="$UAT_ARCHIVE_DIR" \
-    -utf8output -verbose -specifiedarchitecture=arm64+x86_64
+    -utf8output -verbose -specifiedarchitecture=arm64+x86_64 \
+    -editorarchitecture="$UE_HOST_ARCH"
 
   echo "== Note: UE clientconfig=$UE_CLIENT_CONFIG, Xcode configuration=$XCODE_CONFIG ==" >&3
 fi

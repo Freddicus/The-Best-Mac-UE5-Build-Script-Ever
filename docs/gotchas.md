@@ -145,6 +145,18 @@ ship.sh solves this by seeding a committed entitlements file under `Build/<Platf
 
 On Mac App Store, overriding `CODE_SIGN_ENTITLEMENTS` shadows UE's `ShippingSpecificMacEntitlements` path (which normally points at `Sandbox.NoNet.entitlements`, where `com.apple.security.app-sandbox=true` lives). ship.sh enforces sandbox=true on the seeded file unconditionally for MAS — without it, App Store Connect rejects the upload. With Game Center the file also gets `com.apple.security.network.client=true` (Game Center can't reach Apple's servers from inside the sandbox without it; silent failure mode otherwise).
 
+## Universal `-specifiedarchitecture` breaks the Editor build on UBA
+
+`-specifiedarchitecture=arm64+x86_64` is how UAT produces a universal Game binary for players — but the same flag also applies to the local `ProjectEditor` build that UAT spins up to run the cook commandlet (it's never shipped, just used to cook assets). On UE 5.8 with UBA, forcing that Editor build to be universal too hits a UBT action-graph ordering bug: the Lipo step that merges the editor dylib's two architecture slices runs *before* the two per-arch Link steps it depends on, so it always fails with something like:
+
+```
+ERROR: Lipo failed: can't open input file: .../UnrealEditor-<Module>.dylib (arm64) (No such file or directory)
+```
+
+The Game target's own Lipo step is unaffected — the bug is specific to how the Editor target's dependency graph gets scheduled.
+
+The fix is `-editorarchitecture=<host arch>` (e.g. `arm64` or `x86_64`, from `uname -m`). Per UAT's `ProjectParams.cs`, this flag overrides `-specifiedarchitecture` for the Editor target only, pinning it to a single arch (no Lipo step needed) while leaving the Game target's `-specifiedarchitecture=arm64+x86_64` universal build untouched.
+
 ## App Sandbox and Game Mode are separate
 
 Enabling macOS Game Mode (`LSSupportsGameMode`) does not require the App Sandbox. Game Mode just tells macOS to deprioritize background processes while a controller is connected. You can and should enable it for any game — it has no security implications and no entitlement requirements.

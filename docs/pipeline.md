@@ -12,7 +12,7 @@ When you run `./ship.sh`, this is the execution order.
 
 ## Mac pipeline — `MAC_DISTRIBUTION=developer-id` *(default; skipped when `MAC_DISTRIBUTION=off`)*
 
-6. **Mac UAT BuildCookRun** — `-targetplatform=Mac`, output to `BuildArtifacts/Mac/`.
+6. **Mac UAT BuildCookRun** — `-targetplatform=Mac`, output to `BuildArtifacts/Mac/`. Passes `-specifiedarchitecture=arm64+x86_64` (universal Game binary) and `-editorarchitecture=$(uname -m)` (pins the local Editor build, which UAT also spins up to run the cook commandlet, to the host's native arch). See [gotchas.md](gotchas.md#universal-specifiedarchitecture-breaks-the-editor-build-on-uba).
 7. **Mac Xcode archive + export** — `xcodebuild archive` with `CURRENT_PROJECT_VERSION=$CFBUNDLE_VERSION` build-setting override (Apple-documented mechanism, takes precedence over xcconfig — no PlistBuddy fixups needed). Then `xcodebuild -exportArchive` produces signed `.app`.
 8. **Mac component signing** — signs nested `.dylib`/`.so`/`.framework` individually, then the outer `.app`. Never uses `--deep`.
 9. **Steam staging** *(if `ENABLE_STEAM=1`)* — copies `libsteam_api.dylib` next to the executable and signs it.

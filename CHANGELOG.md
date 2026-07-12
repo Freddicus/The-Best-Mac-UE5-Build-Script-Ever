@@ -6,6 +6,19 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-07-11] — Pin Editor build to host arch to avoid UBT Lipo/Link ordering bug
+
+`-specifiedarchitecture=arm64+x86_64` correctly forces a universal Game binary for players, but it also propagates to the local `ProjectEditor` build that UAT spins up to run the cook commandlet (never shipped). On UE 5.8/UBA, a universal-arch Editor build hits a UBT action-graph bug: the Lipo step for the editor dylib runs before the two per-arch Link steps it depends on, so it always fails with "can't open input file". The Game target's own Lipo step is unaffected — only the Editor target trips it.
+
+### Changed
+- **UAT `BuildCookRun` now also passes `-editorarchitecture="$(uname -m)"`**, pinning the Editor target to the host's native arch (single-arch, no Lipo needed). Per UAT's `ProjectParams.cs`, this overrides `-specifiedarchitecture` for the Editor target only — the Game target still builds universal.
+- **`docs/pipeline.md`** and **`docs/gotchas.md`** updated to document the flag and the underlying UBT bug.
+
+### Notes
+- Confirmed on UE_5.8 with a from-clean build.
+
+---
+
 ## [2026-05-23] — `--bump-*` drives a complete release-version bump
 
 Bumping the marketing version (`--bump-major` / `--bump-minor` / `--bump-patch`) used to update only `VERSION_STRING` (the in-game runtime semver written to `Content/<dir>/version.txt`). Two real-ship problems surfaced:
