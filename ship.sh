@@ -2609,6 +2609,37 @@ resolve_mac_targeted_rhis() {
   return 0
 }
 
+_host_gpu_label() {
+  local chip os
+  chip="$(/usr/sbin/sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+  os="$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+  printf '%s / macOS %s\n' "${chip:-unknown CPU}" "${os:-unknown}"
+}
+
+detect_host_sm6_support() {
+  # SM6 on Mac requires BOTH macOS 15.0+ and MTLGPUFamilyApple8 (M2 or newer)
+  # — MetalRHI.cpp:255-266. Prints "yes" or "no".
+  #
+  # GPUFamilyApple8 has no CLI probe, so map from the chip string:
+  # "Apple M1*" is Apple7 (no SM6); "Apple M2" and later are Apple8+.
+  # Anything else (Intel) is no — UE 5.8 dropped Intel Mac rendering
+  # entirely anyway (MetalDevice.cpp:203-208).
+  #
+  # The macOS comparison must be numeric, not lexical: hosts are on macOS 26.x
+  # and "26" < "15" as a string.
+  local chip os_major
+  os_major="$(/usr/bin/sw_vers -productVersion 2>/dev/null | /usr/bin/cut -d. -f1 || true)"
+  [[ "$os_major" =~ ^[0-9]+$ ]] || { echo "no"; return 0; }
+  [[ "$os_major" -ge 15 ]] || { echo "no"; return 0; }
+
+  chip="$(/usr/sbin/sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+  if [[ "$chip" =~ ^Apple\ M([0-9]+) ]] && [[ "${BASH_REMATCH[1]}" -ge 2 ]]; then
+    echo "yes"
+    return 0
+  fi
+  echo "no"
+}
+
 report_mac_targeted_rhis() {
   # Always-on, one-line report of what this Mac build targets, plus a note when
   # SM6 is absent. Silent when no Mac build runs, or when resolution is unknown.
@@ -2629,6 +2660,27 @@ report_mac_targeted_rhis() {
       suffix="(requires M2 or newer on macOS 15+)"
     fi
     echo "Mac TargetedRHIs:  $display  $suffix" >&3
+  fi
+
+  # Host testability context. This is the only place host capability is used —
+  # it answers "can I exercise this path on this machine?", never "what should
+  # I cook?". The build host's GPU says nothing about the audience's. An
+  # SM6-capable host always takes the SM6 branch, so it can never reach the SM5
+  # fallback without being forced with -sm5.
+  local host_sm6 host_desc
+  host_sm6="$(detect_host_sm6_support)"
+  if [[ "$host_sm6" == "yes" ]]; then
+    host_desc="SM6 capable"
+  else
+    host_desc="not SM6 capable"
+  fi
+  echo "  This host:       $(_host_gpu_label) — $host_desc" >&3
+
+  if [[ "$host_sm6" == "yes" ]]; then
+    echo "                   Cannot exercise the SM5 fallback on this machine." >&3
+    echo "                   Test it with:  open <app> --args -sm5" >&3
+  elif _rhi_has "$rhis" "SF_METAL_SM6"; then
+    echo "                   Cannot exercise the SM6 path on this machine." >&3
   fi
 
   # SM6-absent note. Deliberately host-independent: an M1 CI runner must still
