@@ -2640,13 +2640,20 @@ detect_host_sm6_support() {
   echo "no"
 }
 
+# Set once report_mac_targeted_rhis has emitted, so the report appears exactly
+# once per run. Both pre-flight and print_config call it, and --dry-run reaches
+# both (print_config only exits early under --print-config).
+_MAC_RHI_REPORTED=0
+
 report_mac_targeted_rhis() {
   # Always-on, one-line report of what this Mac build targets, plus a note when
   # SM6 is absent. Silent when no Mac build runs, or when resolution is unknown.
+  [[ "${_MAC_RHI_REPORTED:-0}" != "1" ]] || return 0
   [[ "${MAC_DISTRIBUTION:-developer-id}" != "off" ]] || return 0
 
   local rhis display suffix
   rhis="$(resolve_mac_targeted_rhis)" || return 0
+  _MAC_RHI_REPORTED=1
 
   if [[ -z "$rhis" ]]; then
     echo "Mac TargetedRHIs:  <none> (none targeted — engine will request SM5)" >&3
