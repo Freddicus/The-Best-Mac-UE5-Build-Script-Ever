@@ -2694,6 +2694,59 @@ report_mac_targeted_rhis() {
   return 0
 }
 
+add_sm5_to_engine_ini() { warn "add_sm5_to_engine_ini not implemented yet (Task 4)."; }
+
+maybe_prompt_mac_targeted_rhis() {
+  # Stop the presses when the resolved TargetedRHIs would strand users at
+  # launch. Missing SM5 means every M1 Mac, and any Apple Silicon Mac on
+  # macOS 14 or older, dies with "Shader Platform Unavailable".
+  #
+  # Never fires for a non-Mac run, never fires when suppressed, never prompts
+  # without a TTY, and never fails the build: SM6-only is a legitimate
+  # deliberate choice, and hard-failing would break existing CI.
+  [[ "${MAC_DISTRIBUTION:-developer-id}" != "off" ]] || return 0
+  [[ "${MAC_RHI_CHECK:-1}" != "0" ]] || return 0
+  [[ "${DRY_RUN:-0}" != "1" ]] || return 0
+
+  local rhis
+  rhis="$(resolve_mac_targeted_rhis)" || return 0
+  ! _rhi_has "$rhis" "SF_METAL_SM5" || return 0
+
+  warn "Mac TargetedRHIs resolves without SF_METAL_SM5."
+  echo "   Macs on M1, or on macOS 14 or older, will fail at launch with" >&3
+  echo "   \"Shader Platform Unavailable: SF_METAL_SM5 was not cooked\"." >&3
+  echo "   Adding SM5 forces a full shader recook — this build will take" >&3
+  echo "   significantly longer." >&3
+
+  if [[ ! -t 0 ]]; then
+    warn "Non-interactive run — continuing with the current targeting."
+    return 0
+  fi
+
+  local ans=""
+  echo "   [y] add +TargetedRHIs=SF_METAL_SM5 to Config/DefaultEngine.ini" >&3
+  echo "   [n] ship without SM5 this run" >&3
+  echo "   [x] ship without SM5, never ask again" >&3
+  # `|| true` matters: read returns non-zero on EOF (Ctrl-D), and under
+  # `set -e` that would abort the build from inside a purely advisory prompt.
+  read -r -p "Choice? (y/n/x) [n]: " ans || true
+
+  case "${ans:-n}" in
+    [Yy]*)
+      add_sm5_to_engine_ini
+      ;;
+    [Xx]*)
+      MAC_RHI_CHECK=0
+      _write_env_var "MAC_RHI_CHECK" "0" \
+        || warn "Could not persist MAC_RHI_CHECK to $ENV_FILE — continuing."
+      ;;
+    *)
+      info "Continuing with the current targeting."
+      ;;
+  esac
+  return 0
+}
+
 detect_steam_from_ini() {
   local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
   [[ -f "$engine_ini" ]] || return 1
@@ -2988,6 +3041,10 @@ SEED_MAC_INFO_TEMPLATE_PLIST="${SEED_MAC_INFO_TEMPLATE_PLIST:-1}"
 # CFBundleVersion to UE. Mutually exclusive with the auto-bump.
 USE_UE_PACKAGE_VERSION_COUNTER="${USE_UE_PACKAGE_VERSION_COUNTER:-0}"
 CLEAN_BUILD_DIR="${CLEAN_BUILD_DIR:-0}"
+# 1 = pre-flight prompts before shipping a Mac build whose TargetedRHIs omits
+# SF_METAL_SM5 (fails to launch on M1 Macs and on macOS 14 or older).
+# 0 = skip the prompt. The resolved-targeting report always prints regardless.
+MAC_RHI_CHECK="${MAC_RHI_CHECK:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 PRINT_CONFIG="${PRINT_CONFIG:-0}"
 BUILD_TYPE="${BUILD_TYPE:-}"
@@ -3549,6 +3606,11 @@ Build process
   --regen-project-files / --no-regen-project-files
                                      run GenerateProjectFiles.sh before xcodebuild
                                      (default: enabled when --xcode-export)
+  --no-rhi-check                     skip the Mac shader-platform (TargetedRHIs)
+                                     pre-flight prompt that fires when
+                                     SF_METAL_SM5 is not targeted. Equivalent to
+                                     MAC_RHI_CHECK=0 in .env. The resolved
+                                     targeting is still reported either way.
   --seed-apple-launchscreen-compat / --no-seed-apple-launchscreen-compat
                                      copy engine's LaunchScreen.storyboardc into
                                      Build/Apple/Resources/Interface/ if absent,
@@ -3637,6 +3699,7 @@ while [[ $# -gt 0 ]]; do
     --no-xcode-export)      USE_XCODE_EXPORT="0"; shift ;;
     --regen-project-files)    REGEN_PROJECT_FILES="1"; shift ;;
     --no-regen-project-files) REGEN_PROJECT_FILES="0"; shift ;;
+    --no-rhi-check) MAC_RHI_CHECK="0"; shift ;;
     --seed-apple-launchscreen-compat)    SEED_APPLE_LAUNCHSCREEN_COMPAT="1"; shift ;;
     --no-seed-apple-launchscreen-compat) SEED_APPLE_LAUNCHSCREEN_COMPAT="0"; shift ;;
     --seed-mac-info-template-plist)      SEED_MAC_INFO_TEMPLATE_PLIST="1"; shift ;;
@@ -4206,6 +4269,11 @@ if command -v xcrun >/dev/null 2>&1 && command -v xcodebuild >/dev/null 2>&1; th
   unset _metal_probe
   good "Metal Toolchain available."
 fi
+
+# Mac shader-platform pre-flight. Runs before the multi-hour build so a cook
+# that cannot launch for a large share of users surfaces immediately.
+report_mac_targeted_rhis
+maybe_prompt_mac_targeted_rhis
 
 # Notarization requires Apple tools and a configured, accessible notary profile
 if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
