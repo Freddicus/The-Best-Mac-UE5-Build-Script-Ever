@@ -1038,6 +1038,7 @@ print_config() {
   if [[ "$USE_XCODE_EXPORT" == "1" && "$MAC_DISTRIBUTION" == "developer-id" ]]; then
     echo "EXPORT_PLIST:      ${EXPORT_PLIST:-<unset>}" >&3
   fi
+  report_mac_targeted_rhis
 }
 
 # Tracks the Content/<dir>/version.txt written before UAT; reset to "dev" on EXIT.
@@ -2504,6 +2505,141 @@ read_ini_section_value() {
       exit
     }
   ' "$file" 2>/dev/null || true
+}
+
+# --- Mac shader platform (TargetedRHIs) resolution ----------------------------
+#
+# A Mac build cooks only the Metal shader platforms listed in
+# [/Script/MacTargetPlatform.MacTargetSettings] TargetedRHIs. At runtime UE
+# picks SM6 only when the machine has BOTH macOS 15+ and an M2-or-newer GPU
+# (MetalRHI.cpp:255-266); everything else falls back to SM5 unconditionally
+# (MetalRHI.cpp:433) and then fatals in ValidateTargetedRHIFeatureLevelExists
+# (MetalRHI.cpp:96) if SM5 was never cooked. So an SM6-only cook cannot launch
+# on any M1 Mac, or on any Apple Silicon Mac running macOS 14 or older.
+#
+# The check below reads the same config the engine reads, so it is the faithful
+# signal rather than a proxy for one.
+
+_mac_targeted_rhi_ops() {
+  # Emits "<op> <value>" for every TargetedRHIs line inside
+  # [/Script/MacTargetPlatform.MacTargetSettings], in file order.
+  # Operator semantics per ConfigCacheIni.h:132-152:
+  #   Foo=Bar   Set             replace all values
+  #   +Foo=Bar  ArrayAddUnique  append if absent
+  #   .Foo=Bar  ArrayAdd        append, duplicates allowed
+  #   -Foo=Bar  Remove          remove the value
+  #   !Foo=...  Clear           clear the key
+  #   ^Foo=     InitializeToEmpty
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  /usr/bin/awk '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    /^[[:space:]]*[;#]/ { next }
+    /^[[:space:]]*\[/ {
+      insec = (trim($0) == "[/Script/MacTargetPlatform.MacTargetSettings]")
+      next
+    }
+    !insec { next }
+    {
+      line = trim($0)
+      if (line == "") next
+      op = "set"; rest = line
+      c = substr(line, 1, 1)
+      if      (c == "+") { op = "addunique"; rest = substr(line, 2) }
+      else if (c == "-") { op = "remove";    rest = substr(line, 2) }
+      else if (c == ".") { op = "add";       rest = substr(line, 2) }
+      else if (c == "!") { op = "clear";     rest = substr(line, 2) }
+      else if (c == "^") { op = "empty";     rest = substr(line, 2) }
+      eq = index(rest, "=")
+      if (eq == 0) next
+      if (trim(substr(rest, 1, eq - 1)) != "TargetedRHIs") next
+      printf "%s %s\n", op, trim(substr(rest, eq + 1))
+    }
+  ' "$file" 2>/dev/null || true
+}
+
+_rhi_has() {
+  # $1 = newline-delimited platform list, $2 = token
+  [[ -n "$1" ]] || return 1
+  printf '%s\n' "$1" | /usr/bin/grep -qx -- "$2"
+}
+
+resolve_mac_targeted_rhis() {
+  # Resolves the effective TargetedRHIs array the way UE's config stack does:
+  # BaseEngine.ini, then the project's DefaultEngine.ini, then
+  # Config/Mac/MacEngine.ini. Within each file, operators apply in file order.
+  #
+  # Prints one platform per line. Returns 1 with no output when BaseEngine.ini
+  # cannot be read: callers must treat that as "unknown" and stay silent rather
+  # than guess.
+  local base="${UE_ROOT:-}/Engine/Config/BaseEngine.ini"
+  [[ -f "$base" ]] || return 1
+
+  local resolved="" f op val
+  for f in "$base" \
+           "${REPO_ROOT:-}/Config/DefaultEngine.ini" \
+           "${REPO_ROOT:-}/Config/Mac/MacEngine.ini"; do
+    [[ -f "$f" ]] || continue
+    while read -r op val; do
+      case "$op" in
+        clear|empty)
+          resolved=""
+          ;;
+        set)
+          resolved="$val"
+          ;;
+        add)
+          resolved="${resolved:+$resolved$'\n'}$val"
+          ;;
+        addunique)
+          if ! _rhi_has "$resolved" "$val"; then
+            resolved="${resolved:+$resolved$'\n'}$val"
+          fi
+          ;;
+        remove)
+          if [[ -n "$resolved" ]]; then
+            resolved="$(printf '%s\n' "$resolved" | /usr/bin/grep -vx -- "$val" || true)"
+          fi
+          ;;
+      esac
+    done < <(_mac_targeted_rhi_ops "$f")
+  done
+
+  [[ -n "$resolved" ]] && printf '%s\n' "$resolved"
+  return 0
+}
+
+report_mac_targeted_rhis() {
+  # Always-on, one-line report of what this Mac build targets, plus a note when
+  # SM6 is absent. Silent when no Mac build runs, or when resolution is unknown.
+  [[ "${MAC_DISTRIBUTION:-developer-id}" != "off" ]] || return 0
+
+  local rhis display suffix
+  rhis="$(resolve_mac_targeted_rhis)" || return 0
+
+  if [[ -z "$rhis" ]]; then
+    echo "Mac TargetedRHIs:  <none> (none targeted — engine will request SM5)" >&3
+  else
+    display="$(printf '%s\n' "$rhis" | /usr/bin/tr '\n' ',' | /usr/bin/sed 's/,$//; s/,/, /g')"
+    if _rhi_has "$rhis" "SF_METAL_SM5" && _rhi_has "$rhis" "SF_METAL_SM6"; then
+      suffix="(all supported Macs)"
+    elif _rhi_has "$rhis" "SF_METAL_SM5"; then
+      suffix="(all supported Macs; SM6 path unused)"
+    else
+      suffix="(requires M2 or newer on macOS 15+)"
+    fi
+    echo "Mac TargetedRHIs:  $display  $suffix" >&3
+  fi
+
+  # SM6-absent note. Deliberately host-independent: an M1 CI runner must still
+  # surface it, or its players on M2+ Macs silently lose the SM6 path.
+  if ! _rhi_has "$rhis" "SF_METAL_SM6"; then
+    echo "   Note: SF_METAL_SM6 is not targeted. M2-or-newer Macs on macOS 15+" >&3
+    echo "   will run the SM5 path. Projects migrated from UE 5.3 or earlier" >&3
+    echo "   often never had SM6 added — this may be an oversight." >&3
+    echo "       +TargetedRHIs=SF_METAL_SM6   in Config/DefaultEngine.ini" >&3
+  fi
+  return 0
 }
 
 detect_steam_from_ini() {
