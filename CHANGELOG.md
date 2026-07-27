@@ -6,6 +6,26 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-07-27] — Pre-flight guard for Mac shader-platform targeting
+
+A project whose `Config/DefaultEngine.ini` subtracts `SF_METAL_SM5` from `[/Script/MacTargetPlatform.MacTargetSettings]` cooks an SM6-only build. UE picks SM6 only when the machine has both macOS 15+ and an M2-or-newer GPU (`MetalRHI.cpp:255-266`); everything else falls back to SM5 unconditionally (`MetalRHI.cpp:433`) and then fatals in `ValidateTargetedRHIFeatureLevelExists` (`MetalRHI.cpp:96`) because SM5 was never cooked. The result is a build that cannot launch on any M1 Mac, or on any Apple Silicon Mac running macOS 14 or older.
+
+The failure is invisible to the person who built it: SM6-capable hardware always takes the SM6 branch, and the check is compiled out of Editor builds (`!WITH_EDITOR`). Forcing `-sm5` on the packaged app reproduces it on any machine.
+
+### Added
+- **Resolved Mac `TargetedRHIs` now reported on every Mac build** and in `--print-config`, with the audience it supports. The resolver reproduces UE's config stack (`BaseEngine.ini` → `DefaultEngine.ini` → `Config/Mac/MacEngine.ini`) and honors the full operator set from `ConfigCacheIni.h:132-152`. A plain grep would be wrong here — the Editor writes both `-TargetedRHIs=X` and `+TargetedRHIs=X` for the same token, and that shape is healthy.
+- **Host SM6-capability detection**, used only to report which paths this machine can exercise. An SM6-capable host can never reach the SM5 fallback without `-sm5`.
+- **Interactive pre-flight prompt** when the resolved set omits `SF_METAL_SM5`: `y` adds it to `Config/DefaultEngine.ini` (placed to match the Editor's own shape), `n` ships as-is for this run, `x` ships as-is and persists `MAC_RHI_CHECK=0` to `.env`.
+- **`MAC_RHI_CHECK`** (default `1`) and **`--no-rhi-check`**.
+- **Note when `SF_METAL_SM6` is absent** — not a failure, but often an oversight in projects migrated from UE 5.3 or earlier. Emitted regardless of host capability, so an M1 build machine still surfaces it.
+
+### Notes
+- Non-TTY runs print the warning and continue. They do not prompt, and they do not fail: SM6-only is a legitimate deliberate choice, and hard-failing would break existing CI.
+- Every failure path in the guard is non-fatal — an unreadable `BaseEngine.ini` skips the check silently rather than guessing, and a read-only `DefaultEngine.ini` prints the line to add by hand.
+- Windows/Vulkan `TargetedRHIs` and the iOS `bSupportsMetalMobileSM*` settings are deliberately untouched.
+
+---
+
 ## [2026-07-11] — Pin Editor build to host arch to avoid UBT Lipo/Link ordering bug
 
 `-specifiedarchitecture=arm64+x86_64` correctly forces a universal Game binary for players, but it also propagates to the local `ProjectEditor` build that UAT spins up to run the cook commandlet (never shipped). On UE 5.8/UBA, a universal-arch Editor build hits a UBT action-graph bug: the Lipo step for the editor dylib runs before the two per-arch Link steps it depends on, so it always fails with "can't open input file". The Game target's own Lipo step is unaffected — only the Editor target trips it.

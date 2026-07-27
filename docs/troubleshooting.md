@@ -167,6 +167,44 @@ ls "/Users/Shared/Epic Games/UE_5.x/Engine/Config/Apple/Apple_SDK.json"
 
 The LLVM-version side of the pair comes from `apple/llvm-project`'s `cmake/Modules/LLVMVersion.cmake` on `swift/release/<Swift major.minor>` — same source the script uses.
 
+## "Shader Platform Unavailable: SF_METAL_SM5 was not cooked"
+
+Full dialog text:
+
+```
+Shader Platform Unavailable
+Shader platform: SF_METAL_SM5 was not cooked!
+Please enable this shader platform in the project's settings.
+```
+
+The build was cooked without `SF_METAL_SM5`, and the machine running it is not SM6-capable — an M1 Mac, or any Apple Silicon Mac on macOS 14 or older. It will never reproduce on an M2-or-newer Mac running macOS 15+, and never in the Editor.
+
+Fix it in the project, then re-cook:
+
+```ini
+[/Script/MacTargetPlatform.MacTargetSettings]
+-TargetedRHIs=SF_METAL_SM5
++TargetedRHIs=SF_METAL_SM5
++TargetedRHIs=SF_METAL_SM6
+```
+
+Both the `-` and `+` lines for SM5 are correct and intentional — that is the shape the UE Editor writes. Changing `TargetedRHIs` invalidates the shader cook, so the next build recooks from scratch and takes considerably longer.
+
+Confirm the shipped artifact afterwards:
+
+```bash
+strings -a "Your Game.app/Contents/UE/<Project>/Content/Paks/<Project>-Mac.pak" \
+  | grep -o "SF_METAL_[A-Z0-9_]*" | sort -u
+```
+
+To reproduce the failure on SM6-capable hardware, run the packaged app with `-sm5`:
+
+```bash
+open "/path/to/Your Game.app" --args -sm5
+```
+
+`ship.sh` reports the resolved targeting on every Mac build and prompts before shipping without SM5. See [gotchas](gotchas.md#your-mac-cannot-run-the-shader-path-your-players-will).
+
 ## Getting more detail
 
 The full log is at `Logs/build_YYYY-MM-DD_HH-MM-SS.log`. All command output from UAT, `xcodebuild`, `codesign`, and `notarytool` goes there. The terminal only shows status lines.
