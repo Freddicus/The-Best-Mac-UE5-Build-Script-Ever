@@ -2694,7 +2694,71 @@ report_mac_targeted_rhis() {
   return 0
 }
 
-add_sm5_to_engine_ini() { warn "add_sm5_to_engine_ini not implemented yet (Task 4)."; }
+add_sm5_to_engine_ini() {
+  # Adds +TargetedRHIs=SF_METAL_SM5 to the project's DefaultEngine.ini,
+  # mirroring the shape the UE Editor writes: the + line goes directly after
+  # the matching - line when one exists, so the diff reads as native.
+  #
+  # Only ever touches the project's DefaultEngine.ini. Never BaseEngine.ini,
+  # never Config/Mac/MacEngine.ini. Never fails the build.
+  local ini="${REPO_ROOT:-}/Config/DefaultEngine.ini"
+  local section="[/Script/MacTargetPlatform.MacTargetSettings]"
+  local add_line="+TargetedRHIs=SF_METAL_SM5"
+  local tmp
+
+  if [[ ! -f "$ini" ]]; then
+    warn "No $ini — add this by hand:"
+    warn "  $section"
+    warn "  $add_line"
+    return 0
+  fi
+  if [[ ! -w "$ini" ]]; then
+    warn "$ini is not writable — add this by hand under $section:"
+    warn "  $add_line"
+    return 0
+  fi
+
+  if ! /usr/bin/grep -qF -- "$section" "$ini"; then
+    printf '\n%s\n%s\n' "$section" "$add_line" >> "$ini"
+    good "Appended $section with $add_line to $ini"
+    return 0
+  fi
+
+  tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/rhi_ini_XXXXXX")"
+  /usr/bin/awk -v section="$section" -v addline="$add_line" '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    {
+      line = $0
+      if (trim(line) ~ /^\[/) {
+        # Leaving the target section without having inserted: insert now.
+        if (insec && !done) { print addline; done = 1 }
+        insec = (trim(line) == section)
+        print line
+        next
+      }
+      print line
+      if (insec && !done && trim(line) == "-TargetedRHIs=SF_METAL_SM5") {
+        print addline
+        done = 1
+      }
+    }
+    END { if (insec && !done) print addline }
+  ' "$ini" > "$tmp"
+
+  # Guard, not decoration: if the awk pass ever fails to insert (malformed
+  # section, unexpected layout), leave the original untouched and tell the
+  # user rather than silently losing the edit.
+  if ! /usr/bin/grep -qF -- "$add_line" "$tmp"; then
+    /bin/rm -f "$tmp"
+    warn "Could not add $add_line automatically — add it by hand under $section in $ini"
+    return 0
+  fi
+
+  /bin/mv "$tmp" "$ini"
+  good "Added $add_line to $ini"
+  info "This edits a file in your game repo — commit or revert it as you prefer."
+  return 0
+}
 
 maybe_prompt_mac_targeted_rhis() {
   # Stop the presses when the resolved TargetedRHIs would strand users at
