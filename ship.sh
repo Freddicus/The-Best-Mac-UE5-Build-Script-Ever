@@ -2715,13 +2715,15 @@ add_sm5_to_engine_ini() {
 
   if [[ ! -f "$ini" ]]; then
     warn "No $ini — add this by hand:"
-    warn "  $section"
-    warn "  $add_line"
+    # Raw echo, not warn: these lines are meant to be copy-pasted into the
+    # user's ini, so they must not carry the ⚠️ prefix.
+    echo "  $section" >&3
+    echo "  $add_line" >&3
     return 0
   fi
   if [[ ! -w "$ini" ]]; then
     warn "$ini is not writable — add this by hand under $section:"
-    warn "  $add_line"
+    echo "  $add_line" >&3
     return 0
   fi
 
