@@ -2656,7 +2656,7 @@ report_mac_targeted_rhis() {
   _MAC_RHI_REPORTED=1
 
   if [[ -z "$rhis" ]]; then
-    echo "Mac TargetedRHIs:  <none> (none targeted — engine will request SM5)" >&3
+    echo "Mac TargetedRHIs:  <none>  (none targeted — engine will request SM5)" >&3
   else
     display="$(printf '%s\n' "$rhis" | /usr/bin/tr '\n' ',' | /usr/bin/sed 's/,$//; s/,/, /g')"
     if _rhi_has "$rhis" "SF_METAL_SM5" && _rhi_has "$rhis" "SF_METAL_SM6"; then
@@ -2683,20 +2683,28 @@ report_mac_targeted_rhis() {
   fi
   echo "  This host:       $(_host_gpu_label) — $host_desc" >&3
 
-  if [[ "$host_sm6" == "yes" ]]; then
-    echo "                   Cannot exercise the SM5 fallback on this machine." >&3
-    echo "                   Test it with:  open <app> --args -sm5" >&3
-  elif _rhi_has "$rhis" "SF_METAL_SM6"; then
+  # Only advertise a path the build actually cooks. When SM5 is missing there
+  # is no SM5 path to test — the gate says the accurate thing about that.
+  if [[ "$host_sm6" == "yes" ]] && _rhi_has "$rhis" "SF_METAL_SM5"; then
+    echo "                   Cannot exercise the SM5 path on this machine." >&3
+    echo "                   Test it with:  open <YourGame>.app --args -sm5" >&3
+  elif [[ "$host_sm6" != "yes" ]] && _rhi_has "$rhis" "SF_METAL_SM6"; then
     echo "                   Cannot exercise the SM6 path on this machine." >&3
   fi
 
   # SM6-absent note. Deliberately host-independent: an M1 CI runner must still
   # surface it, or its players on M2+ Macs silently lose the SM6 path.
-  if ! _rhi_has "$rhis" "SF_METAL_SM6"; then
-    echo "   Note: SF_METAL_SM6 is not targeted. M2-or-newer Macs on macOS 15+" >&3
-    echo "   will run the SM5 path. Projects migrated from UE 5.3 or earlier" >&3
-    echo "   often never had SM6 added — this may be an oversight." >&3
-    echo "       +TargetedRHIs=SF_METAL_SM6   in Config/DefaultEngine.ini" >&3
+  #
+  # Requires SM5 to be present. The note's premise is "you cook SM5, you're
+  # missing the SM6 upgrade" — with an empty array that premise is false, and
+  # claiming those Macs "will run the SM5 path" would contradict the gate,
+  # which correctly warns that SM5 was never cooked.
+  if ! _rhi_has "$rhis" "SF_METAL_SM6" && _rhi_has "$rhis" "SF_METAL_SM5"; then
+    echo "  Note:            SF_METAL_SM6 is not targeted. M2-or-newer Macs on" >&3
+    echo "                   macOS 15+ will run the SM5 path. Projects migrated" >&3
+    echo "                   from UE 5.3 or earlier often never had SM6 added —" >&3
+    echo "                   this may be an oversight." >&3
+    echo "                   Add:  +TargetedRHIs=SF_METAL_SM6" >&3
   fi
   return 0
 }
@@ -2810,8 +2818,18 @@ maybe_prompt_mac_targeted_rhis() {
       ;;
     [Xx]*)
       MAC_RHI_CHECK=0
-      _write_env_var "MAC_RHI_CHECK" "0" \
-        || warn "Could not persist MAC_RHI_CHECK to $ENV_FILE — continuing."
+      # Check writability up front. _write_env_var reports success
+      # unconditionally, and on a read-only .env its `mv` would prompt
+      # interactively — neither acceptable from inside an advisory gate.
+      if [[ -e "$ENV_FILE" && ! -w "$ENV_FILE" ]]; then
+        warn "$ENV_FILE is not writable — add this by hand to stop the prompt:"
+        echo "  MAC_RHI_CHECK=\"0\"" >&3
+      elif [[ ! -e "$ENV_FILE" ]] && [[ ! -w "$(/usr/bin/dirname "$ENV_FILE")" ]]; then
+        warn "Cannot create $ENV_FILE — add this by hand to stop the prompt:"
+        echo "  MAC_RHI_CHECK=\"0\"" >&3
+      else
+        _write_env_var "MAC_RHI_CHECK" "0"
+      fi
       ;;
     *)
       info "Continuing with the current targeting."
