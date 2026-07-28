@@ -44,4 +44,4 @@ Copy `.env.example` (minimal) or one of the preset variants (`.env.example.steam
 
 ## Suggesting changes without code
 
-Open an issue. Bug reports are most useful when they include your macOS version, UE5 version, the flags you passed, and the relevant tail of the log file (`ship_build_*.log`).
+Open an issue. Bug reports are most useful when they include your macOS version, UE5 version, the flags you passed, and the relevant tail of the log file (`Saved/Logs/build_*.log` in your project).
