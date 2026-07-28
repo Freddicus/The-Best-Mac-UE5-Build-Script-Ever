@@ -15,7 +15,7 @@ The failure is invisible to the person who built it: SM6-capable hardware always
 ### Added
 - **Resolved Mac `TargetedRHIs` now reported on every Mac build** and in `--print-config`, with the audience it supports. The resolver reproduces UE's config stack (`BaseEngine.ini` → `DefaultEngine.ini` → `Config/Mac/MacEngine.ini`) and honors the full operator set from `ConfigCacheIni.h:132-152`. A plain grep would be wrong here — the Editor writes both `-TargetedRHIs=X` and `+TargetedRHIs=X` for the same token, and that shape is healthy.
 - **Host SM6-capability detection**, used only to report which paths this machine can exercise. An SM6-capable host can never reach the SM5 fallback without `-sm5`.
-- **Interactive pre-flight prompt** when the resolved set omits `SF_METAL_SM5`: `y` adds it to `Config/DefaultEngine.ini` (placed to match the Editor's own shape), `n` ships as-is for this run, `x` ships as-is and persists `MAC_RHI_CHECK=0` to `.env`.
+- **Interactive pre-flight prompt** when the resolved set omits `SF_METAL_SM5`: `y` fixes `Config/DefaultEngine.ini`, `n` ships as-is for this run, `x` ships as-is and persists `MAC_RHI_CHECK=0` to `.env`. The `y` edit flips the subtracting `-TargetedRHIs=SF_METAL_SM5` line to `+` in place — a one-character diff — rather than appending a `+` line beneath it, which would leave a self-cancelling pair. It then verifies by re-resolving the config stack and rolls the file back if SM5 still does not resolve.
 - **`MAC_RHI_CHECK`** (default `1`) and **`--no-rhi-check`**.
 - **Note when `SF_METAL_SM6` is absent** — not a failure, but often an oversight in projects migrated from UE 5.3 or earlier. Emitted regardless of host capability, so an M1 build machine still surfaces it.
 

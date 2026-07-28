@@ -183,12 +183,15 @@ Fix it in the project, then re-cook:
 
 ```ini
 [/Script/MacTargetPlatform.MacTargetSettings]
--TargetedRHIs=SF_METAL_SM5
 +TargetedRHIs=SF_METAL_SM5
 +TargetedRHIs=SF_METAL_SM6
 ```
 
-Both the `-` and `+` lines for SM5 are correct and intentional — that is the shape the UE Editor writes. Changing `TargetedRHIs` invalidates the shader cook, so the next build recooks from scratch and takes considerably longer.
+The fix is to flip the `-TargetedRHIs=SF_METAL_SM5` line to `+`, not to add a `+` line beneath it — a `-` and a `+` for the same token in the same section cancel out and read as nonsense.
+
+(The UE Editor does sometimes write both forms, but only as part of rewriting the whole list: it clears the array and re-adds every entry in its preferred order. That is a different thing from subtracting one token and then re-adding it.)
+
+Changing `TargetedRHIs` invalidates the shader cook, so the next build recooks from scratch and takes considerably longer.
 
 Confirm the shipped artifact afterwards:
 

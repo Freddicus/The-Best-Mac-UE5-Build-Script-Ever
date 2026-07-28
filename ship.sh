@@ -2710,16 +2710,29 @@ report_mac_targeted_rhis() {
 }
 
 add_sm5_to_engine_ini() {
-  # Adds +TargetedRHIs=SF_METAL_SM5 to the project's DefaultEngine.ini,
-  # mirroring the shape the UE Editor writes: the + line goes directly after
-  # the matching - line when one exists, so the diff reads as native.
+  # Makes the project's DefaultEngine.ini target SF_METAL_SM5.
+  #
+  # Within [/Script/MacTargetPlatform.MacTargetSettings]: drops every
+  # "-TargetedRHIs=SF_METAL_SM5" line and ensures exactly one
+  # "+TargetedRHIs=SF_METAL_SM5", placed where the first "-" line was so the
+  # diff stays minimal and positional intent is preserved.
+  #
+  # It REPLACES the "-" line rather than appending after it. Appending would
+  # produce a self-cancelling pair:
+  #     -TargetedRHIs=SF_METAL_SM5
+  #     +TargetedRHIs=SF_METAL_SM5
+  # which resolves correctly but reads as nonsense in the user's git diff.
+  #
+  # Success is verified by re-resolving the config stack, not by grepping the
+  # text: a second "-" line elsewhere in the section would otherwise let a
+  # textually-present "+" line still resolve to no SM5.
   #
   # Only ever touches the project's DefaultEngine.ini. Never BaseEngine.ini,
   # never Config/Mac/MacEngine.ini. Never fails the build.
   local ini="${REPO_ROOT:-}/Config/DefaultEngine.ini"
   local section="[/Script/MacTargetPlatform.MacTargetSettings]"
   local add_line="+TargetedRHIs=SF_METAL_SM5"
-  local tmp
+  local tmp backup
 
   if [[ ! -f "$ini" ]]; then
     warn "No $ini — add this by hand:"
@@ -2737,7 +2750,12 @@ add_sm5_to_engine_ini() {
 
   if ! /usr/bin/grep -qF -- "$section" "$ini"; then
     printf '\n%s\n%s\n' "$section" "$add_line" >> "$ini"
-    good "Appended $section with $add_line to $ini"
+    if _rhi_has "$(resolve_mac_targeted_rhis)" "SF_METAL_SM5"; then
+      good "Appended $section with $add_line to $ini"
+    else
+      warn "Appended $section to $ini, but SF_METAL_SM5 still does not resolve —"
+      warn "check Config/Mac/MacEngine.ini for a line that subtracts it."
+    fi
     return 0
   fi
 
@@ -2746,33 +2764,52 @@ add_sm5_to_engine_ini() {
     function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
     {
       line = $0
-      if (trim(line) ~ /^\[/) {
-        # Leaving the target section without having inserted: insert now.
-        if (insec && !done) { print addline; done = 1 }
-        insec = (trim(line) == section)
+      t = trim(line)
+      if (t ~ /^\[/) {
+        # Leaving the target section without having placed the + line.
+        if (insec && !placed) { print addline; placed = 1 }
+        insec = (t == section)
         print line
         next
       }
-      print line
-      if (insec && !done && trim(line) == "-TargetedRHIs=SF_METAL_SM5") {
-        print addline
-        done = 1
+      if (insec) {
+        # Replace the first "-SM5" in place; drop any others. Leaving a second
+        # one behind would remove SM5 again and defeat the whole edit.
+        if (t == "-TargetedRHIs=SF_METAL_SM5") {
+          if (!placed) { print addline; placed = 1 }
+          next
+        }
+        # Keep one existing "+SM5"; drop duplicates so repeat runs are no-ops.
+        if (t == "+TargetedRHIs=SF_METAL_SM5") {
+          if (placed) next
+          print line
+          placed = 1
+          next
+        }
       }
+      print line
     }
-    END { if (insec && !done) print addline }
+    END { if (insec && !placed) print addline }
   ' "$ini" > "$tmp"
 
-  # Guard, not decoration: if the awk pass ever fails to insert (malformed
-  # section, unexpected layout), leave the original untouched and tell the
-  # user rather than silently losing the edit.
-  if ! /usr/bin/grep -qF -- "$add_line" "$tmp"; then
-    /bin/rm -f "$tmp"
-    warn "Could not add $add_line automatically — add it by hand under $section in $ini"
+  # Verify by re-resolving the whole config stack, not by grepping the text.
+  # Swap the candidate in, re-resolve, and roll back if SM5 still is not
+  # targeted — that is the only check that reflects what the engine will read.
+  backup="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/rhi_bak_XXXXXX")"
+  /bin/cp "$ini" "$backup"
+  /bin/mv "$tmp" "$ini"
+
+  if ! _rhi_has "$(resolve_mac_targeted_rhis)" "SF_METAL_SM5"; then
+    /bin/cp "$backup" "$ini"
+    /bin/rm -f "$backup"
+    warn "Could not make SF_METAL_SM5 resolve — $ini left unchanged."
+    warn "Add it by hand under $section, and remove any line that subtracts it:"
+    echo "  $add_line" >&3
     return 0
   fi
 
-  /bin/mv "$tmp" "$ini"
-  good "Added $add_line to $ini"
+  /bin/rm -f "$backup"
+  good "Updated $ini to target SF_METAL_SM5"
   info "This edits a file in your game repo — commit or revert it as you prefer."
   return 0
 }
