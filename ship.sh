@@ -2860,9 +2860,14 @@ maybe_prompt_mac_targeted_rhis() {
   fi
 
   local ans=""
+  # The prompt goes to FD 3 explicitly, NOT via `read -p`. This runs after
+  # `exec >>"$LOG_FILE" 2>&1`, and read -p writes its prompt to stderr — which
+  # by then is the log file, leaving the user staring at a bare cursor. Same
+  # idiom as the Apple_SDK.json auto-patch prompt.
+  printf 'Add SF_METAL_SM5 to DefaultEngine.ini? (y=add, n=skip, x=never ask) [n]: ' >&3
   # `|| true` matters: read returns non-zero on EOF (Ctrl-D), and under
   # `set -e` that would abort the build from inside a purely advisory prompt.
-  read -r -p "Add SF_METAL_SM5 to DefaultEngine.ini? (y=add, n=skip, x=never ask) [n]: " ans || true
+  read -r ans || true
 
   case "${ans:-n}" in
     [Yy]*)
