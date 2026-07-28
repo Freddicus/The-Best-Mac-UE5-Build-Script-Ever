@@ -6,6 +6,29 @@ Entries are grouped by PR/merge. No semantic versioning — this is a single-fil
 
 ---
 
+## [2026-07-27] — Refresh `CLAUDE.md` to match the current script
+
+`CLAUDE.md` had drifted since May. It described `ship.sh` as "~1800 lines" (actual: 5288) and as a Mac-only Developer ID pipeline, predating the `MAC_DISTRIBUTION` / `IOS_DISTRIBUTION` dispatcher, the Mac App Store and iOS pipelines, and the `--preset` system. It also never mentioned `docs/`, so a session had no signal that `gotchas.md` already answers most of the questions worth asking before touching signing or entitlements — the likely failure mode being a re-derivation of those constraints from a 5000-line script.
+
+### Changed
+- **Opening section** now describes all three pipelines and the dispatcher variables that select them, with the `--preset` values and `--list-presets`.
+- **Architecture section** expanded from 9 to 13 entries: adds versioning/canonical-file seeding, entitlements management, the preset engine (`_preset_assign` and its `CLI_SET_*` / `PRESET_ENV_LOCK_*` markers), and distribution resolution/validation. The build-pipeline entry now defers to `docs/pipeline.md` rather than restating a step order that would drift again.
+- **Config precedence** corrected in both places it appears — `preset` sits between `.env` and auto-detect.
+- **Files list** refreshed: adds `docs/`, the MAS and iOS export plist templates, the `.env.example` variants, and `CONTRIBUTING.md`.
+- **`CONTRIBUTING.md`** — bug-report instructions pointed at `ship_build_*.log`, which no longer exists; corrected to `Saved/Logs/build_*.log`.
+
+### Added
+- **`docs/` reference table** mapping each doc to the situation that calls for it.
+- **Conventions section** capturing two rules that lived only in `CONTRIBUTING.md`: prefer inference over configuration, and the `CHANGELOG.md` entry format.
+- **Commands section** gains `--list-presets` and `--ios-only`, the `.env.example` variants, and the build-log path.
+
+### Notes
+- No `ship.sh` changes; `shellcheck ship.sh` passes clean.
+- The "Key design rules" block was verified against the source and left as-is — no `--deep`, `die()`/`on_error_exit`, conditional Steam entitlements, and FD 3 discipline all still hold.
+- The design philosophy and shellcheck rule are now stated in both `CONTRIBUTING.md` (for humans) and `CLAUDE.md` (loaded into context). Deliberate duplication; both need updating if the philosophy shifts.
+
+---
+
 ## [2026-07-27] — Pre-flight guard for Mac shader-platform targeting
 
 A project whose `Config/DefaultEngine.ini` subtracts `SF_METAL_SM5` from `[/Script/MacTargetPlatform.MacTargetSettings]` cooks an SM6-only build. UE picks SM6 only when the machine has both macOS 15+ and an M2-or-newer GPU (`MetalRHI.cpp:255-266`); everything else falls back to SM5 unconditionally (`MetalRHI.cpp:433`) and then fatals in `ValidateTargetedRHIFeatureLevelExists` (`MetalRHI.cpp:96`) because SM5 was never cooked. The result is a build that cannot launch on any M1 Mac, or on any Apple Silicon Mac running macOS 14 or older.
