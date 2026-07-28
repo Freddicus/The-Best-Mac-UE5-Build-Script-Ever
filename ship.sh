@@ -2772,57 +2772,51 @@ add_sm5_to_engine_ini() {
     return 0
   fi
 
-  if ! /usr/bin/grep -qF -- "$section" "$ini"; then
-    printf '\n%s\n%s\n' "$section" "$add_line" >> "$ini"
-    if _rhi_has "$(resolve_mac_targeted_rhis)" "SF_METAL_SM5"; then
-      good "Appended $section with $add_line to $ini"
-    else
-      warn "Appended $section to $ini, but SF_METAL_SM5 still does not resolve —"
-      warn "check Config/Mac/MacEngine.ini for a line that subtracts it."
-    fi
-    return 0
-  fi
-
-  tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/rhi_ini_XXXXXX")"
-  /usr/bin/awk -v section="$section" -v addline="$add_line" '
-    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
-    {
-      line = $0
-      t = trim(line)
-      if (t ~ /^\[/) {
-        # Leaving the target section without having placed the + line.
-        if (insec && !placed) { print addline; placed = 1 }
-        insec = (t == section)
-        print line
-        next
-      }
-      if (insec) {
-        # Replace the first "-SM5" in place; drop any others. Leaving a second
-        # one behind would remove SM5 again and defeat the whole edit.
-        if (t == "-TargetedRHIs=SF_METAL_SM5") {
-          if (!placed) { print addline; placed = 1 }
-          next
-        }
-        # Keep one existing "+SM5"; drop duplicates so repeat runs are no-ops.
-        if (t == "+TargetedRHIs=SF_METAL_SM5") {
-          if (placed) next
-          print line
-          placed = 1
-          next
-        }
-      }
-      print line
-    }
-    END { if (insec && !placed) print addline }
-  ' "$ini" > "$tmp"
-
-  # Verify by re-resolving the whole config stack, not by grepping the text.
-  # Swap the candidate in, re-resolve, and roll back if SM5 still is not
-  # targeted — that is the only check that reflects what the engine will read.
+  # One backup, one edit, one verification, one rollback — whichever branch
+  # produced the new content.
   backup="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/rhi_bak_XXXXXX")"
   /bin/cp "$ini" "$backup"
-  /bin/mv "$tmp" "$ini"
 
+  if ! /usr/bin/grep -qF -- "$section" "$ini"; then
+    printf '\n%s\n%s\n' "$section" "$add_line" >> "$ini"
+  else
+    tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/rhi_ini_XXXXXX")"
+    /usr/bin/awk -v section="$section" -v addline="$add_line" '
+      function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+      {
+        line = $0
+        t = trim(line)
+        if (t ~ /^\[/) {
+          # Leaving the target section without having placed the + line.
+          if (insec && !placed) { print addline; placed = 1 }
+          insec = (t == section)
+          print line
+          next
+        }
+        if (insec) {
+          # Replace the first "-SM5" in place; drop any others. Leaving a
+          # second one behind would remove SM5 again and defeat the edit.
+          if (t == "-TargetedRHIs=SF_METAL_SM5") {
+            if (!placed) { print addline; placed = 1 }
+            next
+          }
+          # Keep one existing "+SM5"; drop dupes so repeat runs are no-ops.
+          if (t == "+TargetedRHIs=SF_METAL_SM5") {
+            if (placed) next
+            print line
+            placed = 1
+            next
+          }
+        }
+        print line
+      }
+      END { if (insec && !placed) print addline }
+    ' "$ini" > "$tmp"
+    /bin/mv "$tmp" "$ini"
+  fi
+
+  # Verify by re-resolving the whole config stack, not by grepping the text:
+  # that is the only check reflecting what the engine will actually read.
   if ! _rhi_has "$(resolve_mac_targeted_rhis)" "SF_METAL_SM5"; then
     /bin/cp "$backup" "$ini"
     /bin/rm -f "$backup"
@@ -2866,12 +2860,9 @@ maybe_prompt_mac_targeted_rhis() {
   fi
 
   local ans=""
-  echo "   [y] add +TargetedRHIs=SF_METAL_SM5 to Config/DefaultEngine.ini" >&3
-  echo "   [n] ship without SM5 this run" >&3
-  echo "   [x] ship without SM5, never ask again" >&3
   # `|| true` matters: read returns non-zero on EOF (Ctrl-D), and under
   # `set -e` that would abort the build from inside a purely advisory prompt.
-  read -r -p "Choice? (y/n/x) [n]: " ans || true
+  read -r -p "Add SF_METAL_SM5 to DefaultEngine.ini? (y=add, n=skip, x=never ask) [n]: " ans || true
 
   case "${ans:-n}" in
     [Yy]*)
