@@ -8,6 +8,51 @@ Your development Mac has your Developer ID certificate, your signing identity, y
 
 Always test on a separate machine or a clean user account, with the binary downloaded normally (not `scp`'d directly). Quarantine behavior is what most of your users will experience.
 
+## Your Mac cannot run the shader path your players will
+
+`Config/DefaultEngine.ini` decides which Metal shader platforms get cooked:
+
+```ini
+[/Script/MacTargetPlatform.MacTargetSettings]
+-TargetedRHIs=SF_METAL_SM5
++TargetedRHIs=SF_METAL_SM6
+```
+
+That `-` line subtracts SM5 from the engine default (`BaseEngine.ini` ships both), leaving an SM6-only cook. At runtime UE picks SM6 only when the machine has **both** macOS 15+ and an M2-or-newer GPU (`MetalRHI.cpp:255-266`). Everything else falls back to SM5 — unconditionally, without checking whether SM5 was cooked (`MetalRHI.cpp:433`) — and dies with a "Shader Platform Unavailable" dialog.
+
+So an SM6-only build fails to launch on every M1 Mac and on any Apple Silicon Mac running macOS 14 or older.
+
+You will never see this on an M2-or-newer machine running macOS 15+: that hardware always takes the SM6 branch. The check is also compiled out of Editor builds (`!WITH_EDITOR`), so Play-In-Editor never surfaces it either. The failure is structurally invisible on the machine that produces it.
+
+To reproduce it on capable hardware, force the fallback:
+
+```bash
+open "/path/to/Your Game.app" --args -sm5
+```
+
+Note that both a `-` and a `+` line for the same token is normal and healthy — that is the shape the UE Editor writes when it clears an array and re-adds entries in a preferred order. What matters is the resolved set, not the presence of any single line.
+
+### `TargetedRHIs` is plural, but it is not a list
+
+Despite the name, there is no comma-list form. UE reads the key with `GConfig->GetArray`, which is a plain multimap lookup (`FConfigSection::GetArray` → `MultiFind`) — **one line is one array element, and the value is never split.** The UObject side agrees (`Obj.cpp`, `ProcessArrayProperty`): same `MultiFind`, one `ImportText` per line.
+
+So this does *not* target two platforms:
+
+```ini
+TargetedRHIs=SF_METAL_SM5,SF_METAL_SM6     ; WRONG — one unmatchable value
+```
+
+It produces the single literal element `SF_METAL_SM5,SF_METAL_SM6`, which matches no shader format. Nothing warns at cook time; the game just dies at launch. Use one line per value:
+
+```ini
++TargetedRHIs=SF_METAL_SM5
++TargetedRHIs=SF_METAL_SM6
+```
+
+`ship.sh` flags a comma in any resolved value.
+
+`ship.sh` reports the resolved targeting on every Mac build and prompts before shipping a build without SM5. See [`MAC_RHI_CHECK`](configuration.md#behavior).
+
 ## Notarization is not optional for distribution
 
 macOS Gatekeeper will block an unsigned or unnotarized app for any user who didn't build it. "Hardened runtime + Developer ID" gets you past the signing check. Notarization gets you past the Apple OCSP check. Stapling means it works offline too.

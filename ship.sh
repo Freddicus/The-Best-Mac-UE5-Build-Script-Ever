@@ -1038,6 +1038,7 @@ print_config() {
   if [[ "$USE_XCODE_EXPORT" == "1" && "$MAC_DISTRIBUTION" == "developer-id" ]]; then
     echo "EXPORT_PLIST:      ${EXPORT_PLIST:-<unset>}" >&3
   fi
+  report_mac_targeted_rhis
 }
 
 # Tracks the Content/<dir>/version.txt written before UAT; reset to "dev" on EXIT.
@@ -2506,6 +2507,394 @@ read_ini_section_value() {
   ' "$file" 2>/dev/null || true
 }
 
+# --- Mac shader platform (TargetedRHIs) resolution ----------------------------
+#
+# A Mac build cooks only the Metal shader platforms listed in
+# [/Script/MacTargetPlatform.MacTargetSettings] TargetedRHIs. At runtime UE
+# picks SM6 only when the machine has BOTH macOS 15+ and an M2-or-newer GPU
+# (MetalRHI.cpp:255-266); everything else falls back to SM5 unconditionally
+# (MetalRHI.cpp:433) and then fatals in ValidateTargetedRHIFeatureLevelExists
+# (MetalRHI.cpp:96) if SM5 was never cooked. So an SM6-only cook cannot launch
+# on any M1 Mac, or on any Apple Silicon Mac running macOS 14 or older.
+#
+# The check below reads the same config the engine reads, so it is the faithful
+# signal rather than a proxy for one.
+
+_mac_targeted_rhi_ops() {
+  # Emits "<op> <value>" for every TargetedRHIs line inside
+  # [/Script/MacTargetPlatform.MacTargetSettings], in file order.
+  # Operator semantics per ConfigCacheIni.h:132-152:
+  #   Foo=Bar   Set             replace all values
+  #   +Foo=Bar  ArrayAddUnique  append if absent
+  #   .Foo=Bar  ArrayAdd        append, duplicates allowed
+  #   -Foo=Bar  Remove          remove the value
+  #   !Foo=...  Clear           clear the key
+  #   ^Foo=     InitializeToEmpty
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  /usr/bin/awk '
+    function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+    /^[[:space:]]*[;#]/ { next }
+    /^[[:space:]]*\[/ {
+      insec = (trim($0) == "[/Script/MacTargetPlatform.MacTargetSettings]")
+      next
+    }
+    !insec { next }
+    {
+      line = trim($0)
+      if (line == "") next
+      op = "set"; rest = line
+      c = substr(line, 1, 1)
+      if      (c == "+") { op = "addunique"; rest = substr(line, 2) }
+      else if (c == "-") { op = "remove";    rest = substr(line, 2) }
+      else if (c == ".") { op = "add";       rest = substr(line, 2) }
+      else if (c == "!") { op = "clear";     rest = substr(line, 2) }
+      else if (c == "^") { op = "empty";     rest = substr(line, 2) }
+      eq = index(rest, "=")
+      if (eq == 0) next
+      if (trim(substr(rest, 1, eq - 1)) != "TargetedRHIs") next
+      printf "%s %s\n", op, trim(substr(rest, eq + 1))
+    }
+  ' "$file" 2>/dev/null || true
+}
+
+_rhi_has() {
+  # $1 = newline-delimited platform list, $2 = token
+  [[ -n "$1" ]] || return 1
+  printf '%s\n' "$1" | /usr/bin/grep -qx -- "$2"
+}
+
+resolve_mac_targeted_rhis() {
+  # Resolves the effective TargetedRHIs array the way UE's config stack does:
+  # BaseEngine.ini, then the project's DefaultEngine.ini, then
+  # Config/Mac/MacEngine.ini. Within each file, operators apply in file order.
+  #
+  # Prints one platform per line. Returns 1 with no output when BaseEngine.ini
+  # cannot be read: callers must treat that as "unknown" and stay silent rather
+  # than guess.
+  local base="${UE_ROOT:-}/Engine/Config/BaseEngine.ini"
+  [[ -f "$base" ]] || return 1
+
+  local resolved="" f op val
+  for f in "$base" \
+           "${REPO_ROOT:-}/Config/DefaultEngine.ini" \
+           "${REPO_ROOT:-}/Config/Mac/MacEngine.ini"; do
+    [[ -f "$f" ]] || continue
+    while read -r op val; do
+      case "$op" in
+        clear|empty)
+          resolved=""
+          ;;
+        set)
+          resolved="$val"
+          ;;
+        add)
+          resolved="${resolved:+$resolved$'\n'}$val"
+          ;;
+        addunique)
+          if ! _rhi_has "$resolved" "$val"; then
+            resolved="${resolved:+$resolved$'\n'}$val"
+          fi
+          ;;
+        remove)
+          if [[ -n "$resolved" ]]; then
+            resolved="$(printf '%s\n' "$resolved" | /usr/bin/grep -vx -- "$val" || true)"
+          fi
+          ;;
+      esac
+    done < <(_mac_targeted_rhi_ops "$f")
+  done
+
+  [[ -n "$resolved" ]] && printf '%s\n' "$resolved"
+  return 0
+}
+
+_host_gpu_label() {
+  local chip os
+  chip="$(/usr/sbin/sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+  os="$(/usr/bin/sw_vers -productVersion 2>/dev/null || true)"
+  printf '%s / macOS %s\n' "${chip:-unknown CPU}" "${os:-unknown}"
+}
+
+detect_host_sm6_support() {
+  # SM6 on Mac requires BOTH macOS 15.0+ and MTLGPUFamilyApple8 (M2 or newer)
+  # — MetalRHI.cpp:255-266. Prints "yes" or "no".
+  #
+  # GPUFamilyApple8 has no CLI probe, so map from the chip string:
+  # "Apple M1*" is Apple7 (no SM6); "Apple M2" and later are Apple8+.
+  # Anything else (Intel) is no — UE 5.8 dropped Intel Mac rendering
+  # entirely anyway (MetalDevice.cpp:203-208).
+  #
+  # The macOS comparison must be numeric, not lexical: hosts are on macOS 26.x
+  # and "26" < "15" as a string.
+  local chip os_major
+  os_major="$(/usr/bin/sw_vers -productVersion 2>/dev/null | /usr/bin/cut -d. -f1 || true)"
+  [[ "$os_major" =~ ^[0-9]+$ ]] || { echo "no"; return 0; }
+  [[ "$os_major" -ge 15 ]] || { echo "no"; return 0; }
+
+  chip="$(/usr/sbin/sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
+  if [[ "$chip" =~ ^Apple\ M([0-9]+) ]] && [[ "${BASH_REMATCH[1]}" -ge 2 ]]; then
+    echo "yes"
+    return 0
+  fi
+  echo "no"
+}
+
+# Set once report_mac_targeted_rhis has emitted, so the report appears exactly
+# once per run. Both pre-flight and print_config call it, and --dry-run reaches
+# both (print_config only exits early under --print-config).
+_MAC_RHI_REPORTED=0
+
+report_mac_targeted_rhis() {
+  # Always-on, one-line report of what this Mac build targets, plus a note when
+  # SM6 is absent. Silent when no Mac build runs, or when resolution is unknown.
+  [[ "${_MAC_RHI_REPORTED:-0}" != "1" ]] || return 0
+  [[ "${MAC_DISTRIBUTION:-developer-id}" != "off" ]] || return 0
+
+  local rhis display suffix
+  rhis="$(resolve_mac_targeted_rhis)" || return 0
+  _MAC_RHI_REPORTED=1
+
+  if [[ -z "$rhis" ]]; then
+    echo "Mac TargetedRHIs:  <none>  (none targeted — engine will request SM5)" >&3
+  else
+    # Join with ", ", quoting any element that itself contains a comma. Without
+    # the quoting a single unmatchable "A,B" value renders identically to two
+    # valid entries.
+    display="$(printf '%s\n' "$rhis" | /usr/bin/awk '
+      {
+        printf "%s", (NR > 1 ? ", " : "")
+        if (index($0, ",")) printf "\"%s\"", $0; else printf "%s", $0
+      }
+      END { printf "\n" }
+    ')"
+    if _rhi_has "$rhis" "SF_METAL_SM5" && _rhi_has "$rhis" "SF_METAL_SM6"; then
+      suffix="(all supported Macs)"
+    elif _rhi_has "$rhis" "SF_METAL_SM5"; then
+      suffix="(all supported Macs; SM6 path unused)"
+    else
+      suffix="(requires M2 or newer on macOS 15+)"
+    fi
+    echo "Mac TargetedRHIs:  $display  $suffix" >&3
+  fi
+
+  # UE reads TargetedRHIs with GConfig->GetArray, which is a plain multimap
+  # lookup (FConfigSection::GetArray -> MultiFind): one line is one array
+  # element, and the value is never split. Despite the plural key name there is
+  # no comma-list form. "TargetedRHIs=SF_METAL_SM5,SF_METAL_SM6" yields the
+  # single literal element "SF_METAL_SM5,SF_METAL_SM6", which matches no shader
+  # format — so the platform silently counts as not targeted and the game dies
+  # at launch. Worth calling out explicitly: it is a natural thing to try.
+  if printf '%s\n' "$rhis" | /usr/bin/grep -q ','; then
+    warn "A TargetedRHIs value contains a comma. UE takes one value per line —"
+    warn "the whole comma string is treated as a single, unmatchable format."
+    echo "  Use separate lines instead:" >&3
+    echo "      +TargetedRHIs=SF_METAL_SM5" >&3
+    echo "      +TargetedRHIs=SF_METAL_SM6" >&3
+  fi
+
+  # Host testability context. This is the only place host capability is used —
+  # it answers "can I exercise this path on this machine?", never "what should
+  # I cook?". The build host's GPU says nothing about the audience's. An
+  # SM6-capable host always takes the SM6 branch, so it can never reach the SM5
+  # fallback without being forced with -sm5.
+  local host_sm6 host_desc
+  host_sm6="$(detect_host_sm6_support)"
+  if [[ "$host_sm6" == "yes" ]]; then
+    host_desc="SM6 capable"
+  else
+    host_desc="not SM6 capable"
+  fi
+  echo "  This host:       $(_host_gpu_label) — $host_desc" >&3
+
+  # Only advertise a path the build actually cooks. When SM5 is missing there
+  # is no SM5 path to test — the gate says the accurate thing about that.
+  if [[ "$host_sm6" == "yes" ]] && _rhi_has "$rhis" "SF_METAL_SM5"; then
+    echo "                   Cannot exercise the SM5 path on this machine." >&3
+    echo "                   Test it with:  open <YourGame>.app --args -sm5" >&3
+  elif [[ "$host_sm6" != "yes" ]] && _rhi_has "$rhis" "SF_METAL_SM6"; then
+    echo "                   Cannot exercise the SM6 path on this machine." >&3
+  fi
+
+  # SM6-absent note. Deliberately host-independent: an M1 CI runner must still
+  # surface it, or its players on M2+ Macs silently lose the SM6 path.
+  #
+  # Requires SM5 to be present. The note's premise is "you cook SM5, you're
+  # missing the SM6 upgrade" — with an empty array that premise is false, and
+  # claiming those Macs "will run the SM5 path" would contradict the gate,
+  # which correctly warns that SM5 was never cooked.
+  if ! _rhi_has "$rhis" "SF_METAL_SM6" && _rhi_has "$rhis" "SF_METAL_SM5"; then
+    echo "  Note:            SF_METAL_SM6 is not targeted. M2-or-newer Macs on" >&3
+    echo "                   macOS 15+ will run the SM5 path. Projects migrated" >&3
+    echo "                   from UE 5.3 or earlier often never had SM6 added —" >&3
+    echo "                   this may be an oversight." >&3
+    echo "                   Add:  +TargetedRHIs=SF_METAL_SM6" >&3
+  fi
+  return 0
+}
+
+add_sm5_to_engine_ini() {
+  # Makes the project's DefaultEngine.ini target SF_METAL_SM5.
+  #
+  # Within [/Script/MacTargetPlatform.MacTargetSettings]: drops every
+  # "-TargetedRHIs=SF_METAL_SM5" line and ensures exactly one
+  # "+TargetedRHIs=SF_METAL_SM5", placed where the first "-" line was so the
+  # diff stays minimal and positional intent is preserved.
+  #
+  # It REPLACES the "-" line rather than appending after it. Appending would
+  # produce a self-cancelling pair:
+  #     -TargetedRHIs=SF_METAL_SM5
+  #     +TargetedRHIs=SF_METAL_SM5
+  # which resolves correctly but reads as nonsense in the user's git diff.
+  #
+  # Success is verified by re-resolving the config stack, not by grepping the
+  # text: a second "-" line elsewhere in the section would otherwise let a
+  # textually-present "+" line still resolve to no SM5.
+  #
+  # Only ever touches the project's DefaultEngine.ini. Never BaseEngine.ini,
+  # never Config/Mac/MacEngine.ini. Never fails the build.
+  local ini="${REPO_ROOT:-}/Config/DefaultEngine.ini"
+  local section="[/Script/MacTargetPlatform.MacTargetSettings]"
+  local add_line="+TargetedRHIs=SF_METAL_SM5"
+  local tmp backup
+
+  if [[ ! -f "$ini" ]]; then
+    warn "No $ini — add this by hand:"
+    # Raw echo, not warn: these lines are meant to be copy-pasted into the
+    # user's ini, so they must not carry the ⚠️ prefix.
+    echo "  $section" >&3
+    echo "  $add_line" >&3
+    return 0
+  fi
+  if [[ ! -w "$ini" ]]; then
+    warn "$ini is not writable — add this by hand under $section:"
+    echo "  $add_line" >&3
+    return 0
+  fi
+
+  # One backup, one edit, one verification, one rollback — whichever branch
+  # produced the new content.
+  backup="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/rhi_bak_XXXXXX")"
+  /bin/cp "$ini" "$backup"
+
+  if ! /usr/bin/grep -qF -- "$section" "$ini"; then
+    printf '\n%s\n%s\n' "$section" "$add_line" >> "$ini"
+  else
+    tmp="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/rhi_ini_XXXXXX")"
+    /usr/bin/awk -v section="$section" -v addline="$add_line" '
+      function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+      {
+        line = $0
+        t = trim(line)
+        if (t ~ /^\[/) {
+          # Leaving the target section without having placed the + line.
+          if (insec && !placed) { print addline; placed = 1 }
+          insec = (t == section)
+          print line
+          next
+        }
+        if (insec) {
+          # Replace the first "-SM5" in place; drop any others. Leaving a
+          # second one behind would remove SM5 again and defeat the edit.
+          if (t == "-TargetedRHIs=SF_METAL_SM5") {
+            if (!placed) { print addline; placed = 1 }
+            next
+          }
+          # Keep one existing "+SM5"; drop dupes so repeat runs are no-ops.
+          if (t == "+TargetedRHIs=SF_METAL_SM5") {
+            if (placed) next
+            print line
+            placed = 1
+            next
+          }
+        }
+        print line
+      }
+      END { if (insec && !placed) print addline }
+    ' "$ini" > "$tmp"
+    /bin/mv "$tmp" "$ini"
+  fi
+
+  # Verify by re-resolving the whole config stack, not by grepping the text:
+  # that is the only check reflecting what the engine will actually read.
+  if ! _rhi_has "$(resolve_mac_targeted_rhis)" "SF_METAL_SM5"; then
+    /bin/cp "$backup" "$ini"
+    /bin/rm -f "$backup"
+    warn "Could not make SF_METAL_SM5 resolve — $ini left unchanged."
+    warn "Add it by hand under $section, and remove any line that subtracts it:"
+    echo "  $add_line" >&3
+    return 0
+  fi
+
+  /bin/rm -f "$backup"
+  good "Updated $ini to target SF_METAL_SM5"
+  info "This edits a file in your game repo — commit or revert it as you prefer."
+  return 0
+}
+
+maybe_prompt_mac_targeted_rhis() {
+  # Stop the presses when the resolved TargetedRHIs would strand users at
+  # launch. Missing SM5 means every M1 Mac, and any Apple Silicon Mac on
+  # macOS 14 or older, dies with "Shader Platform Unavailable".
+  #
+  # Never fires for a non-Mac run, never fires when suppressed, never prompts
+  # without a TTY, and never fails the build: SM6-only is a legitimate
+  # deliberate choice, and hard-failing would break existing CI.
+  [[ "${MAC_DISTRIBUTION:-developer-id}" != "off" ]] || return 0
+  [[ "${MAC_RHI_CHECK:-1}" != "0" ]] || return 0
+  [[ "${DRY_RUN:-0}" != "1" ]] || return 0
+
+  local rhis
+  rhis="$(resolve_mac_targeted_rhis)" || return 0
+  ! _rhi_has "$rhis" "SF_METAL_SM5" || return 0
+
+  warn "Mac TargetedRHIs resolves without SF_METAL_SM5."
+  echo "   Macs on M1, or on macOS 14 or older, will fail at launch with" >&3
+  echo "   \"Shader Platform Unavailable: SF_METAL_SM5 was not cooked\"." >&3
+  echo "   Adding SM5 forces a full shader recook — this build will take" >&3
+  echo "   significantly longer." >&3
+
+  if [[ ! -t 0 ]]; then
+    warn "Non-interactive run — continuing with the current targeting."
+    return 0
+  fi
+
+  local ans=""
+  # The prompt goes to FD 3 explicitly, NOT via `read -p`. This runs after
+  # `exec >>"$LOG_FILE" 2>&1`, and read -p writes its prompt to stderr — which
+  # by then is the log file, leaving the user staring at a bare cursor. Same
+  # idiom as the Apple_SDK.json auto-patch prompt.
+  printf 'Add SF_METAL_SM5 to DefaultEngine.ini? (y=add, n=skip, x=never ask) [n]: ' >&3
+  # `|| true` matters: read returns non-zero on EOF (Ctrl-D), and under
+  # `set -e` that would abort the build from inside a purely advisory prompt.
+  read -r ans || true
+
+  case "${ans:-n}" in
+    [Yy]*)
+      add_sm5_to_engine_ini
+      ;;
+    [Xx]*)
+      MAC_RHI_CHECK=0
+      # Check writability up front. _write_env_var reports success
+      # unconditionally, and on a read-only .env its `mv` would prompt
+      # interactively — neither acceptable from inside an advisory gate.
+      if [[ -e "$ENV_FILE" && ! -w "$ENV_FILE" ]]; then
+        warn "$ENV_FILE is not writable — add this by hand to stop the prompt:"
+        echo "  MAC_RHI_CHECK=\"0\"" >&3
+      elif [[ ! -e "$ENV_FILE" ]] && [[ ! -w "$(/usr/bin/dirname "$ENV_FILE")" ]]; then
+        warn "Cannot create $ENV_FILE — add this by hand to stop the prompt:"
+        echo "  MAC_RHI_CHECK=\"0\"" >&3
+      else
+        _write_env_var "MAC_RHI_CHECK" "0"
+      fi
+      ;;
+    *)
+      info "Continuing with the current targeting."
+      ;;
+  esac
+  return 0
+}
+
 detect_steam_from_ini() {
   local engine_ini="$REPO_ROOT/Config/DefaultEngine.ini"
   [[ -f "$engine_ini" ]] || return 1
@@ -2800,6 +3189,10 @@ SEED_MAC_INFO_TEMPLATE_PLIST="${SEED_MAC_INFO_TEMPLATE_PLIST:-1}"
 # CFBundleVersion to UE. Mutually exclusive with the auto-bump.
 USE_UE_PACKAGE_VERSION_COUNTER="${USE_UE_PACKAGE_VERSION_COUNTER:-0}"
 CLEAN_BUILD_DIR="${CLEAN_BUILD_DIR:-0}"
+# 1 = pre-flight prompts before shipping a Mac build whose TargetedRHIs omits
+# SF_METAL_SM5 (fails to launch on M1 Macs and on macOS 14 or older).
+# 0 = skip the prompt. The resolved-targeting report always prints regardless.
+MAC_RHI_CHECK="${MAC_RHI_CHECK:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 PRINT_CONFIG="${PRINT_CONFIG:-0}"
 BUILD_TYPE="${BUILD_TYPE:-}"
@@ -3361,6 +3754,11 @@ Build process
   --regen-project-files / --no-regen-project-files
                                      run GenerateProjectFiles.sh before xcodebuild
                                      (default: enabled when --xcode-export)
+  --no-rhi-check                     skip the Mac shader-platform (TargetedRHIs)
+                                     pre-flight prompt that fires when
+                                     SF_METAL_SM5 is not targeted. Equivalent to
+                                     MAC_RHI_CHECK=0 in .env. The resolved
+                                     targeting is still reported either way.
   --seed-apple-launchscreen-compat / --no-seed-apple-launchscreen-compat
                                      copy engine's LaunchScreen.storyboardc into
                                      Build/Apple/Resources/Interface/ if absent,
@@ -3449,6 +3847,7 @@ while [[ $# -gt 0 ]]; do
     --no-xcode-export)      USE_XCODE_EXPORT="0"; shift ;;
     --regen-project-files)    REGEN_PROJECT_FILES="1"; shift ;;
     --no-regen-project-files) REGEN_PROJECT_FILES="0"; shift ;;
+    --no-rhi-check) MAC_RHI_CHECK="0"; shift ;;
     --seed-apple-launchscreen-compat)    SEED_APPLE_LAUNCHSCREEN_COMPAT="1"; shift ;;
     --no-seed-apple-launchscreen-compat) SEED_APPLE_LAUNCHSCREEN_COMPAT="0"; shift ;;
     --seed-mac-info-template-plist)      SEED_MAC_INFO_TEMPLATE_PLIST="1"; shift ;;
@@ -4018,6 +4417,11 @@ if command -v xcrun >/dev/null 2>&1 && command -v xcodebuild >/dev/null 2>&1; th
   unset _metal_probe
   good "Metal Toolchain available."
 fi
+
+# Mac shader-platform pre-flight. Runs before the multi-hour build so a cook
+# that cannot launch for a large share of users surfaces immediately.
+report_mac_targeted_rhis
+maybe_prompt_mac_targeted_rhis
 
 # Notarization requires Apple tools and a configured, accessible notary profile
 if [[ "$NOTARIZE_ENABLED" -eq 1 ]]; then
