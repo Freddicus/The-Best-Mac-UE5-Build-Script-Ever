@@ -32,6 +32,25 @@ open "/path/to/Your Game.app" --args -sm5
 
 Note that both a `-` and a `+` line for the same token is normal and healthy — that is the shape the UE Editor writes when it clears an array and re-adds entries in a preferred order. What matters is the resolved set, not the presence of any single line.
 
+### `TargetedRHIs` is plural, but it is not a list
+
+Despite the name, there is no comma-list form. UE reads the key with `GConfig->GetArray`, which is a plain multimap lookup (`FConfigSection::GetArray` → `MultiFind`) — **one line is one array element, and the value is never split.** The UObject side agrees (`Obj.cpp`, `ProcessArrayProperty`): same `MultiFind`, one `ImportText` per line.
+
+So this does *not* target two platforms:
+
+```ini
+TargetedRHIs=SF_METAL_SM5,SF_METAL_SM6     ; WRONG — one unmatchable value
+```
+
+It produces the single literal element `SF_METAL_SM5,SF_METAL_SM6`, which matches no shader format. Nothing warns at cook time; the game just dies at launch. Use one line per value:
+
+```ini
++TargetedRHIs=SF_METAL_SM5
++TargetedRHIs=SF_METAL_SM6
+```
+
+`ship.sh` flags a comma in any resolved value.
+
 `ship.sh` reports the resolved targeting on every Mac build and prompts before shipping a build without SM5. See [`MAC_RHI_CHECK`](configuration.md#behavior).
 
 ## Notarization is not optional for distribution

@@ -17,6 +17,7 @@ The failure is invisible to the person who built it: SM6-capable hardware always
 - **Host SM6-capability detection**, used only to report which paths this machine can exercise. An SM6-capable host can never reach the SM5 fallback without `-sm5`.
 - **Interactive pre-flight prompt** when the resolved set omits `SF_METAL_SM5`: `y` fixes `Config/DefaultEngine.ini`, `n` ships as-is for this run, `x` ships as-is and persists `MAC_RHI_CHECK=0` to `.env`. The `y` edit flips the subtracting `-TargetedRHIs=SF_METAL_SM5` line to `+` in place — a one-character diff — rather than appending a `+` line beneath it, which would leave a self-cancelling pair. It then verifies by re-resolving the config stack and rolls the file back if SM5 still does not resolve.
 - **`MAC_RHI_CHECK`** (default `1`) and **`--no-rhi-check`**.
+- **Warning when a `TargetedRHIs` value contains a comma.** Despite the plural key there is no list form — `GConfig->GetArray` is a multimap lookup, so `TargetedRHIs=A,B` is one unmatchable value. UE gives no cook-time diagnostic; the game dies at launch.
 - **Note when `SF_METAL_SM6` is absent** — not a failure, but often an oversight in projects migrated from UE 5.3 or earlier. Emitted regardless of host capability, so an M1 build machine still surfaces it.
 
 ### Notes

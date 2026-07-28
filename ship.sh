@@ -2658,7 +2658,16 @@ report_mac_targeted_rhis() {
   if [[ -z "$rhis" ]]; then
     echo "Mac TargetedRHIs:  <none>  (none targeted — engine will request SM5)" >&3
   else
-    display="$(printf '%s\n' "$rhis" | /usr/bin/tr '\n' ',' | /usr/bin/sed 's/,$//; s/,/, /g')"
+    # Join with ", ", quoting any element that itself contains a comma. Without
+    # the quoting a single unmatchable "A,B" value renders identically to two
+    # valid entries.
+    display="$(printf '%s\n' "$rhis" | /usr/bin/awk '
+      {
+        printf "%s", (NR > 1 ? ", " : "")
+        if (index($0, ",")) printf "\"%s\"", $0; else printf "%s", $0
+      }
+      END { printf "\n" }
+    ')"
     if _rhi_has "$rhis" "SF_METAL_SM5" && _rhi_has "$rhis" "SF_METAL_SM6"; then
       suffix="(all supported Macs)"
     elif _rhi_has "$rhis" "SF_METAL_SM5"; then
@@ -2667,6 +2676,21 @@ report_mac_targeted_rhis() {
       suffix="(requires M2 or newer on macOS 15+)"
     fi
     echo "Mac TargetedRHIs:  $display  $suffix" >&3
+  fi
+
+  # UE reads TargetedRHIs with GConfig->GetArray, which is a plain multimap
+  # lookup (FConfigSection::GetArray -> MultiFind): one line is one array
+  # element, and the value is never split. Despite the plural key name there is
+  # no comma-list form. "TargetedRHIs=SF_METAL_SM5,SF_METAL_SM6" yields the
+  # single literal element "SF_METAL_SM5,SF_METAL_SM6", which matches no shader
+  # format — so the platform silently counts as not targeted and the game dies
+  # at launch. Worth calling out explicitly: it is a natural thing to try.
+  if printf '%s\n' "$rhis" | /usr/bin/grep -q ','; then
+    warn "A TargetedRHIs value contains a comma. UE takes one value per line —"
+    warn "the whole comma string is treated as a single, unmatchable format."
+    echo "  Use separate lines instead:" >&3
+    echo "      +TargetedRHIs=SF_METAL_SM5" >&3
+    echo "      +TargetedRHIs=SF_METAL_SM6" >&3
   fi
 
   # Host testability context. This is the only place host capability is used —
